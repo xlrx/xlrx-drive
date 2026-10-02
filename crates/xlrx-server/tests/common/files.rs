@@ -77,16 +77,24 @@ pub fn atomic_save(path: &Path, content: &[u8]) {
 pub async fn signed_in(env: &Env, username: &str) -> (Client, i64, i64, PathBuf) {
     let invite = env.invite(username, false).await;
     let (mut c, _, _) = setup_with_totp(env, &invite).await;
-    let roots = c.get("/api/roots").await;
-    let r = &roots.ok()[0];
-    assert_eq!(r["name"], "Meine Ablage");
-    let dir = env.data_dir().join(format!("homes/{username}/Drive"));
-    (
-        c,
-        r["id"].as_i64().unwrap(),
-        r["node_id"].as_i64().unwrap(),
-        dir,
-    )
+    // The first visit starts the first scan in the background: wait for it, so it cannot pick up
+    // changes a test makes on disk afterwards (and expects the API to find first).
+    for _ in 0..500 {
+        let roots = c.get("/api/roots").await;
+        let r = roots.ok()[0].clone();
+        assert_eq!(r["name"], "Meine Ablage");
+        if !r["scanned_at"].is_null() {
+            let dir = env.data_dir().join(format!("homes/{username}/Drive"));
+            return (
+                c,
+                r["id"].as_i64().unwrap(),
+                r["node_id"].as_i64().unwrap(),
+                dir,
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("erster Abgleich nicht fertig");
 }
 
 pub fn find<'a>(list: &'a Value, name: &str) -> &'a Value {
