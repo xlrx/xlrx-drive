@@ -4,27 +4,27 @@
   "version": "0.1.0",
   "type": "module",
   "packageManager": "pnpm@10.28.0",
-  "imports": {
-    "#lib/*": "./src/lib/*"
-  },
   "scripts": {
-    "dev": "vite dev",
-    "build": "vite build",
-    "preview": "vite preview",
-    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "dev": "nuxi dev",
+    "build": "nuxi generate",
+    "check": "nuxi typecheck",
+    "postinstall": "nuxi prepare",
     "e2e": "playwright test"
+  },
+  "dependencies": {
+    "@simplewebauthn/browser": "^14.0.0",
+    "nuxt": "^4.5.2",
+    "vue": "^3.5.43",
+    "vue-router": "^5.3.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.56.1",
-    "@sveltejs/adapter-static": "^4.0.0",
-    "@sveltejs/kit": "^3.0.0",
-    "@sveltejs/vite-plugin-svelte": "^7.3.1",
-    "svelte": "^5.57.1",
-    "svelte-check": "^4.7.6",
     "typescript": "^6.0.0",
-    "vite": "^8.3.2"
+    "vue-tsc": "^3.3.12"
   },
-  "dependencies": {
-    "@simplewebauthn/browser": "^14.0.0"
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }

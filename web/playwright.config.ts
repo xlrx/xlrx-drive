@@ -1,6 +1,6 @@
 import { defineConfig } from '@playwright/test';
 
-// Ende-zu-Ende gegen einen laufenden xlrx-server (siehe e2e/run.sh).
+// End-to-end against a running xlrx-server (see e2e/run.sh).
 export default defineConfig({
 	testDir: 'e2e',
 	timeout: 60_000,

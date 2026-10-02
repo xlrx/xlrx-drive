@@ -1,5 +1,7 @@
 node_modules/
-.svelte-kit/
-build/
+.nuxt/
+.output/
+.data/
 test-results/
 playwright-report/
+dist

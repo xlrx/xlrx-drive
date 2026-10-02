@@ -1,4 +1,4 @@
-//! HTTP-Schnittstelle: `/api/…` (JSON), `/healthz`, und – falls konfiguriert – die Web-App.
+//! HTTP interface: `/api/…` (JSON), `/healthz`, and – if configured – the web app.
 
 pub mod admin;
 pub mod auth;
@@ -21,10 +21,11 @@ use tower_http::trace::TraceLayer;
 
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::web;
 
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
-        // Anmeldung
+        // Sign-in
         .route("/auth/login", post(auth::login))
         .route("/auth/totp", post(auth::totp))
         .route("/auth/recovery", post(auth::recovery))
@@ -40,14 +41,14 @@ pub fn router(state: AppState) -> Router {
             "/auth/step-up/passkey/finish",
             post(auth::step_up_passkey_finish),
         )
-        // Einrichtung über Einladungslink
+        // Setup via invite link
         .route("/setup/start", post(setup::start))
         .route("/setup/password", post(setup::password))
         .route("/setup/totp/begin", post(setup::totp_begin))
         .route("/setup/totp/confirm", post(setup::totp_confirm))
         .route("/setup/passkey/begin", post(setup::passkey_begin))
         .route("/setup/passkey/finish", post(setup::passkey_finish))
-        // Eigenes Konto
+        // Own account
         .route("/me", get(me::get_me))
         .route("/me/password", post(me::change_password))
         .route("/me/totp", delete(me::totp_remove))
@@ -62,7 +63,7 @@ pub fn router(state: AppState) -> Router {
         .route("/me/recovery-codes", post(me::recovery_regenerate))
         .route("/me/sessions", get(me::sessions))
         .route("/me/sessions/{id}", delete(me::session_revoke))
-        // Verwaltung
+        // Administration
         .route(
             "/admin/users",
             get(admin::list_users).post(admin::create_user),
@@ -79,6 +80,10 @@ pub fn router(state: AppState) -> Router {
         .layer(SetResponseHeaderLayer::overriding(
             CACHE_CONTROL,
             HeaderValue::from_static("no-store"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(web::MINIMAL_CSP),
         ));
 
     let mut app = Router::new()
@@ -86,13 +91,20 @@ pub fn router(state: AppState) -> Router {
         .nest("/api", api)
         .with_state(state.clone());
     if let Some(dir) = &state.cfg.web_dir {
-        // Single-Page-App: unbekannte Pfade liefern index.html.
+        // Single-page app: unknown paths serve index.html.
         let index = ServeFile::new(dir.join("index.html"));
         app = app.fallback_service(ServeDir::new(dir).fallback(index));
     }
-    // Sicherheits-Header für alle Antworten. Skript-Regeln (CSP mit Hashes) setzt die Web-App selbst
-    // per `<meta>`, damit ihr Start-Skript erlaubt ist; hier nur, was nie schaden kann.
+    // Strict CSP for the web app: only its own scripts plus the hashed inline scripts of the
+    // generated pages. API responses keep the minimal policy set above.
+    let csp = state.web_csp.as_deref().unwrap_or(web::MINIMAL_CSP);
+    let csp = HeaderValue::from_str(csp).expect("CSP is a valid header value");
+    // Security headers for all responses.
     app.layer(SetResponseHeaderLayer::if_not_present(
+        CONTENT_SECURITY_POLICY,
+        csp,
+    ))
+    .layer(SetResponseHeaderLayer::if_not_present(
         X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     ))
@@ -105,17 +117,13 @@ pub fn router(state: AppState) -> Router {
         HeaderValue::from_static("DENY"),
     ))
     .layer(SetResponseHeaderLayer::if_not_present(
-        CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("frame-ancestors 'none'; base-uri 'none'; object-src 'none'"),
-    ))
-    .layer(SetResponseHeaderLayer::if_not_present(
         HeaderName::from_static("cross-origin-opener-policy"),
         HeaderValue::from_static("same-origin"),
     ))
     .layer(TraceLayer::new_for_http())
 }
 
-/// CSRF-Schutz: Zustandsändernde Anfragen nur von der eigenen Origin (zusätzlich zu `SameSite=Strict`).
+/// CSRF protection: state-changing requests only from our own origin (besides `SameSite=Strict`).
 async fn check_origin(State(st): State<AppState>, req: Request, next: Next) -> Response {
     if matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
         return next.run(req).await;

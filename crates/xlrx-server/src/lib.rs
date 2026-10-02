@@ -1,7 +1,7 @@
-//! Server von xlrx-drive.
+//! The xlrx-drive server.
 //!
-//! Stand M0: Konten und Anmeldung (Passwort + TOTP oder Passkey, Wiederherstellungscodes, Sitzungen,
-//! Step-up), Verwaltung von Konten, Audit-Log. Sync, Speicher und Suche folgen ab M1 (siehe `docs/PLAN.md`).
+//! As of M0: accounts and sign-in (password + TOTP or passkey, recovery codes, sessions, step-up),
+//! account management, audit log. Sync, storage and search follow from M1 (see `docs/PLAN.md`).
 
 pub mod api;
 pub mod audit;
@@ -10,6 +10,7 @@ pub mod config;
 pub mod error;
 pub mod state;
 pub mod users;
+pub mod web;
 
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -27,7 +28,7 @@ pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
         .await
 }
 
-/// Räumt periodisch abgelaufene Sitzungen, Zwischenschritte und Sperren auf.
+/// Periodically cleans up expired sessions, intermediate steps and lockouts.
 pub async fn cleanup(db: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM sessions WHERE expires_at < now() OR last_seen_at < now() - interval '8 hours'")
         .execute(db)

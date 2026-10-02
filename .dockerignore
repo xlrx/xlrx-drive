@@ -1,7 +1,7 @@
 target/
 web/node_modules/
-web/.svelte-kit/
-web/build/
+web/.nuxt/
+web/.output/
 web/test-results/
 deploy/secrets/
 deploy/.env

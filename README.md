@@ -15,7 +15,7 @@ Volltext-/KI-Suche, Teilen zwischen Benutzern, effizienter und zuverlässiger Sy
 | `crates/xlrx-sync` | Sync-Engine (sans-IO, drei Bäume, inkrementelle Planung) |
 | `crates/xlrx-sim` | Deterministischer Simulator: Abstürze, Netzfehler, späte Ergebnisse, SMB-Namensvarianten, grobe Zeitstempel |
 | `crates/xlrx-server` | Konten und Anmeldung: Passwort + TOTP oder Passkey, Wiederherstellungscodes, Step-up, Verwaltung, Audit-Log |
-| `web/` | SvelteKit-App: Anmeldung, Einrichtung, Sicherheit, Verwaltung |
+| `web/` | Nuxt-App (Vue 3): Anmeldung, Einrichtung, Sicherheit, Verwaltung |
 | `deploy/` | Dockerfile, compose (PostgreSQL 18 + pgvector, Server, Caddy mit eigener IP und HTTP/3) |
 
 ## Entwickeln

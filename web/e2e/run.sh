@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Ende-zu-Ende-Test: frische Datenbank, Server mit gebauter Web-App, Playwright.
+# End-to-end test: fresh database, server with the built web app, Playwright.
 #   DATABASE_ADMIN_URL=postgres://postgres@127.0.0.1:5432/postgres web/e2e/run.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -11,7 +11,7 @@ trap 'kill ${server:-0} 2>/dev/null || true; psql "$DATABASE_ADMIN_URL" -qc "DRO
 export DATABASE_URL="${DATABASE_ADMIN_URL%/*}/$db"
 export XLRX_PUBLIC_URL=http://localhost:8080
 export XLRX_BIND=127.0.0.1:8080
-export XLRX_WEB_DIR="$PWD/web/build"
+export XLRX_WEB_DIR="$PWD/web/.output/public"
 export XLRX_SECRET_KEY="$(target/release/xlrx-server gen-secret)"
 export XLRX_ARGON2_M_KIB=1024 XLRX_ARGON2_T=1
 

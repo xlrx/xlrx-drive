@@ -1,4 +1,4 @@
-//! Gemeinsamer Zustand aller Anfragen.
+//! State shared by all requests.
 
 use std::ops::Deref;
 use std::sync::Arc;
@@ -23,8 +23,10 @@ pub struct Inner {
     pub passwords: Passwords,
     pub webauthn: Webauthn,
     pub ceremonies: Ceremonies,
-    /// Begrenzt gleichzeitige Passwort-Prüfungen (argon2 braucht CPU und RAM; Schutz vor Überlast).
+    /// Limits concurrent password checks (argon2 needs CPU and RAM; protection against overload).
     pub hashing: Semaphore,
+    /// Content Security Policy for the web app (inline script hashes), if one is configured.
+    pub web_csp: Option<String>,
 }
 
 impl Deref for AppState {
@@ -37,9 +39,9 @@ impl Deref for AppState {
 impl AppState {
     pub fn new(db: PgPool, cfg: Config) -> Result<Self, String> {
         let passwords = Passwords::new(cfg.argon2, cfg.password_blocklist.as_deref())?;
-        // Nur die konfigurierten Adressen dürfen Passkeys verwenden – nicht jede Subdomain der
-        // Passkey-Domain (sonst könnte eine Lücke in einem anderen Dienst unter *.domain Anmeldungen
-        // bei xlrx auslösen).
+        // Only the configured addresses may use passkeys – not every subdomain of the passkey
+        // domain (otherwise a vulnerability in another service under *.domain could trigger
+        // sign-ins at xlrx).
         let mut builder = WebauthnBuilder::new(&cfg.rp_id, &cfg.public_url)
             .map_err(|e| format!("Passkey-Konfiguration: {e}"))?
             .rp_name("xlrx-drive")
@@ -50,7 +52,13 @@ impl AppState {
         let webauthn = builder
             .build()
             .map_err(|e| format!("Passkey-Konfiguration: {e}"))?;
+        let web_csp = cfg
+            .web_dir
+            .as_deref()
+            .map(crate::web::csp_for_dir)
+            .transpose()?;
         Ok(Self(Arc::new(Inner {
+            web_csp,
             db,
             secrets: SecretBox::new(&cfg.secret_key),
             cfg,
@@ -61,7 +69,7 @@ impl AppState {
         })))
     }
 
-    /// Passwort hashen (blockierend, begrenzt parallel).
+    /// Hash a password (blocking, with limited parallelism).
     pub async fn hash_password(&self, password: String) -> ApiResult<String> {
         let _permit = self
             .hashing

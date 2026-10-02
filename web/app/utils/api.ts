@@ -1,4 +1,4 @@
-// Zugriff auf die xlrx-API. Fehler kommen immer als `{ error: "…" }`.
+// Access to the xlrx API. Errors always arrive as `{ error: "…" }`.
 
 export class ApiError extends Error {
 	constructor(
@@ -8,7 +8,7 @@ export class ApiError extends Error {
 		super(message);
 	}
 
-	/** Die Aktion braucht einen frischen zweiten Faktor. */
+	/** The action needs a fresh second factor. */
 	get stepUp(): boolean {
 		return this.status === 403 && this.message === 'step_up_required';
 	}
@@ -27,7 +27,7 @@ export async function api<T = unknown>(method: string, path: string, body?: unkn
 	try {
 		data = JSON.parse(text);
 	} catch {
-		// keine JSON-Antwort (z.B. Fehler beim Lesen der Anfrage)
+		// Not JSON (e.g. the request body could not be parsed).
 	}
 	if (!res.ok) {
 		const msg =
@@ -37,12 +37,12 @@ export async function api<T = unknown>(method: string, path: string, body?: unkn
 	return data as T;
 }
 
-export const get = <T>(path: string) => api<T>('GET', path);
-export const post = <T>(path: string, body: unknown = {}) => api<T>('POST', path, body);
-export const del = <T>(path: string) => api<T>('DELETE', path);
-export const patch = <T>(path: string, body: unknown) => api<T>('PATCH', path, body);
+export const apiGet = <T>(path: string) => api<T>('GET', path);
+export const apiPost = <T>(path: string, body: unknown = {}) => api<T>('POST', path, body);
+export const apiDelete = <T>(path: string) => api<T>('DELETE', path);
+export const apiPatch = <T>(path: string, body: unknown) => api<T>('PATCH', path, body);
 
-export function message(e: unknown): string {
+export function errorMessage(e: unknown): string {
 	if (e instanceof ApiError) return e.message;
 	if (e instanceof DOMException && e.name === 'NotAllowedError')
 		return 'Vorgang abgebrochen oder nicht erlaubt.';
@@ -61,3 +61,11 @@ export interface Me {
 	recovery_codes_left: number;
 	step_up_valid?: boolean;
 }
+
+/** Passkey options as returned by the server (`{ publicKey: … }`). */
+export interface PasskeyBegin {
+	ceremony: string;
+	options: { publicKey: Record<string, unknown> };
+}
+
+export const formatDate = (s: string | null) => (s ? new Date(s).toLocaleString('de-DE') : '–');

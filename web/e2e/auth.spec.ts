@@ -1,4 +1,4 @@
-// Einrichtung, Anmeldung mit Authenticator-App und Passkey, Verwaltung – im echten Browser.
+// Account setup, login with authenticator app and passkey, administration – in a real browser.
 import { createHmac } from 'node:crypto';
 import { expect, test, type Page } from '@playwright/test';
 
@@ -51,10 +51,10 @@ test('Einrichtung, Anmeldung und Verwaltung', async ({ page }) => {
 	test.skip(!setupUrl, 'XLRX_SETUP_URL fehlt (e2e/run.sh verwenden)');
 	await virtualAuthenticator(page);
 
-	// Einrichtung über den Link: Passwort, Authenticator-App, Wiederherstellungscodes.
+	// Setup from the link: password, authenticator app, recovery codes.
 	await page.goto(setupUrl!);
 	await expect(page.getByRole('heading', { name: 'Konto einrichten' })).toBeVisible();
-	await expect(page).toHaveURL(/\/setup$/); // Token aus der Adresszeile entfernt
+	await expect(page).toHaveURL(/\/setup$/); // token removed from the address bar
 	await page.getByLabel('Neues Passwort').fill(PASSWORD);
 	await page.getByLabel('Passwort wiederholen').fill(PASSWORD);
 	await page.getByRole('button', { name: 'Weiter' }).click();
@@ -68,20 +68,20 @@ test('Einrichtung, Anmeldung und Verwaltung', async ({ page }) => {
 	await page.getByRole('button', { name: 'Fertig' }).click();
 	await expect(page.getByRole('heading', { name: /Hallo/ })).toBeVisible();
 
-	// Passkey hinzufügen (die Anmeldung gilt als frischer zweiter Faktor).
+	// Add a passkey (the login counts as a fresh second factor).
 	await page.getByRole('link', { name: 'Sicherheit' }).click();
 	await page.getByPlaceholder('Name, z.B. MacBook').fill('Testgerät');
 	await page.getByRole('button', { name: 'Passkey hinzufügen' }).click();
 	await expect(page.getByRole('cell', { name: 'Testgerät' })).toBeVisible();
 
-	// Abmelden, mit Passkey allein anmelden.
+	// Log out, log in with the passkey alone.
 	await page.getByRole('button', { name: 'Abmelden' }).first().click();
 	await expect(page.getByRole('heading', { name: 'Anmelden' })).toBeVisible();
 	await page.getByLabel('Benutzername').fill('admin');
 	await page.getByRole('button', { name: 'Mit Passkey anmelden' }).click();
 	await expect(page.getByRole('heading', { name: /Hallo/ })).toBeVisible();
 
-	// Abmelden, mit Passwort + Code anmelden (nächster Zeitschritt: der Einrichtungscode gilt nicht erneut).
+	// Log out, log in with password + code (next time step: the setup code must not work again).
 	await page.getByRole('button', { name: 'Abmelden' }).click();
 	await page.getByLabel('Benutzername').fill('admin');
 	await page.getByLabel('Passwort').fill(PASSWORD);
@@ -90,7 +90,7 @@ test('Einrichtung, Anmeldung und Verwaltung', async ({ page }) => {
 	await page.getByRole('button', { name: 'Anmelden' }).click();
 	await expect(page.getByRole('heading', { name: /Hallo/ })).toBeVisible();
 
-	// Verwaltung: neues Konto mit Einrichtungslink.
+	// Administration: new account with a setup link.
 	await page.getByRole('link', { name: 'Verwaltung' }).click();
 	await page.getByLabel('Benutzername').fill('bert');
 	await page.getByLabel('Anzeigename').fill('Bert');

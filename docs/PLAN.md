@@ -58,7 +58,7 @@ Stand: 2026-10-02 · Status: v5 – alle Grundsatzfragen geklärt, bereit für M
 | Office | **Nur Vorschau** (lokal per LibreOffice → PDF). **Keine Microsoft-Office-Web-Integration** (kein Office Online/Microsoft 365/WOPI zu Microsoft). Bearbeiten lokal in den Desktop-Apps über den Sync. |
 | Backup | Hyper Backup nach S3 ist **eingerichtet** (Stand 2026-10). |
 | Datenmenge | 300k – 3 Mio Dateien, mehrere TB. |
-| Tech-Stack | **Rust** (Server + gemeinsame Sync-Engine), **Swift/SwiftUI** (Mac/iOS, Engine via UniFFI), **SvelteKit/TypeScript** (Web). |
+| Tech-Stack | **Rust** (Server + gemeinsame Sync-Engine), **Swift/SwiftUI** (Mac/iOS, Engine via UniFFI), **Nuxt/Vue/TypeScript** (Web). |
 
 ### Annahmen & Nicht-Ziele
 
@@ -125,7 +125,7 @@ Clients
   Mac-App  ── xlrx-core (Rust via UniFFI) ── Spiegel-Modus (FSEvents) │ File-Provider-Modus
               Transport: URLSession (HTTP/3)  FinderSync-Badges, Menüleiste, LaunchAgent
   iOS-App  ── xlrx-core ── File-Provider-Extension (Dateien-App), Share-Extension, Push
-  Browser  ── Web-UI (SvelteKit, PWA)
+  Browser  ── Web-UI (Nuxt, PWA)
 ```
 
 **Warum ein separater Worker?** Parser für fremde Dateiformate (PDF, Office, Bilder, Videos) sind die
@@ -645,7 +645,7 @@ bei neuen Freigaben. Pro Person einstellbar.
 
 ## 10. Web-UI
 
-**SvelteKit** (statischer Build, vom Server ausgeliefert), TypeScript. Der API-Client wird aus OpenAPI generiert (utoipa).
+**Nuxt 4** (Vue 3, Single-Page-App als statischer Build, vom Server ausgeliefert), TypeScript. Der API-Client wird aus OpenAPI generiert (utoipa).
 Live-Updates kommen per Server-Sent Events. PWA-fähig, Deutsch/Englisch, Dark Mode.
 
 Bereiche wie bei Google Drive: **Startseite**, **Meine Ablage**, **Geteilte Ablagen**, **Für mich freigegeben**, **Zuletzt verwendet**,
@@ -1058,7 +1058,7 @@ xlrx-drive/
 │  ├─ xlrx-server/               axum-API, Journal, Storage, Watcher, Suche, Auth, Freigaben
 │  ├─ xlrx-worker/               Extraktion, Thumbnails, OCR, KI-Provider
 │  └─ xlrx-sim/                  deterministische Simulation & Fuzzing
-├─ web/                          SvelteKit-App
+├─ web/                          Nuxt-App
 ├─ apple/
 │  ├─ Project.yml                (XcodeGen/Tuist)
 │  ├─ Packages/XlrxUI/           gemeinsame SwiftUI-Komponenten
