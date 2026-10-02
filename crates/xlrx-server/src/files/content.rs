@@ -29,6 +29,7 @@ use super::ops::{
 use super::{roots, scan, store};
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
+use xlrx_sync::Reject;
 
 fn hex(h: &[u8]) -> String {
     h.iter().map(|b| format!("{b:02x}")).collect()
@@ -55,7 +56,23 @@ pub struct Staged {
 impl Drop for Staged {
     fn drop(&mut self) {
         // Whatever happens to the upload, the staging file goes (crash leftovers: housekeeping).
-        let _ = std::fs::remove_file(&self.path);
+        if !self.path.as_os_str().is_empty() {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+impl Staged {
+    /// The content's hash.
+    pub fn hash(&self) -> &[u8; 32] {
+        &self.hash
+    }
+
+    /// Keeps the staged file under another name in the staging area (replacing an older one).
+    pub fn keep_as(mut self, to: &Path) -> std::io::Result<()> {
+        std::fs::rename(&self.path, to)?;
+        self.path = PathBuf::new();
+        Ok(())
     }
 }
 
@@ -121,6 +138,40 @@ pub async fn stage(st: &AppState, body: Body, size: Option<u64>) -> ApiResult<St
     Ok(staged)
 }
 
+/// Copies (reflink where possible) a file into the staging area, but only if its content really
+/// is `hash` (the file could have changed since the database recorded it).
+pub async fn stage_from(st: &AppState, src: &Path, hash: &[u8; 32]) -> ApiResult<Option<Staged>> {
+    let dir = state_dir(st)?;
+    let path = dir
+        .join(store::STAGING)
+        .join(uuid::Uuid::new_v4().simple().to_string());
+    let (s, p, d) = (src.to_path_buf(), path.clone(), dir.clone());
+    let digest = blocking(move || -> std::io::Result<Option<FileDigest>> {
+        store::init(&d)?;
+        match store::clone_file(&s, &p) {
+            Ok(_) => Ok(Some(digest_file(&mut Chunker::new(), &p)?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    })
+    .await?
+    .map_err(io_err)?;
+    let mut staged = Staged {
+        path,
+        hash: [0; 32],
+        size: 0,
+    };
+    match digest {
+        Some(FileDigest::Stable { digest, .. }) if digest.content.hash.0 == *hash => {
+            staged.hash = digest.content.hash.0;
+            staged.size = digest.content.size;
+            Ok(Some(staged))
+        }
+        // Missing or different: `staged` is dropped and its file removed.
+        _ => Ok(None),
+    }
+}
+
 /// The replaced content of a file, kept as a version.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OldVersion {
@@ -144,6 +195,24 @@ pub enum Target {
     },
     /// New content for an existing file, only if it is still at revision `base_rev`.
     Replace { node_id: i64, base_rev: i64 },
+    /// Sync clients (PLAN 5.3): like `Replace`, but if the file changed meanwhile, the content is
+    /// stored next to it as a conflict copy named after `device`. Nothing is overwritten.
+    ReplaceOrConflict {
+        node_id: i64,
+        base_rev: i64,
+        device: String,
+    },
+}
+
+/// What [`write`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Written {
+    Created,
+    Replaced,
+    /// Stored as a conflict copy next to the file (`ReplaceOrConflict`).
+    ConflictCopy,
+    /// The file already has exactly this content: nothing to do.
+    Unchanged,
 }
 
 /// Writes staged content into a root (see the module docs). Returns the node and whether it was
@@ -154,10 +223,10 @@ pub async fn write(
     target: Target,
     staged: Staged,
     mtime: Option<OffsetDateTime>,
-) -> ApiResult<(NodeRow, bool)> {
+) -> ApiResult<(NodeRow, Written)> {
     let any_node = match &target {
         Target::New { parent_id, .. } => *parent_id,
-        Target::Replace { node_id, .. } => *node_id,
+        Target::Replace { node_id, .. } | Target::ReplaceOrConflict { node_id, .. } => *node_id,
     };
     let (_, root) = writable(st, user_id, any_node).await?;
     let lock = st.root_lock(root.id);
@@ -173,17 +242,20 @@ pub async fn write(
             let name = valid_name(&name)?;
             let parent = live(reload(st, parent_id).await?)?;
             if !parent.is_dir() {
-                return Err(ApiError::bad("Kein Ordner."));
+                return Err(ApiError::Rejected(
+                    Reject::ParentGone,
+                    "Kein Ordner.".into(),
+                ));
             }
             let dir = located(st, &p, &parent).await?;
             let name = if keep_both {
-                free_name(st, &parent, &dir, &name).await?
+                free_name(st, &parent, &dir, &name, "").await?
             } else {
                 ensure_free(st, &parent, &dir, &name, None).await?;
                 name
             };
             let node = write_new(st, &p, user_id, &parent, &dir, &name, &staged, mtime).await?;
-            Ok((node, true))
+            Ok((node, Written::Created))
         }
         Target::Replace { node_id, base_rev } => {
             let node = live(reload(st, node_id).await?)?;
@@ -193,8 +265,54 @@ pub async fn write(
             changed_since(&node, base_rev)?;
             let path = located(st, &p, &node).await?;
             let node = write_replace(st, &p, user_id, node, &path, &staged, mtime).await?;
-            Ok((node, false))
+            Ok((node, Written::Replaced))
         }
+        Target::ReplaceOrConflict {
+            node_id,
+            base_rev,
+            device,
+        } => {
+            let node = reload(st, node_id)
+                .await?
+                .filter_live()
+                .filter(|n| !n.is_dir())
+                .ok_or_else(|| {
+                    ApiError::Rejected(Reject::NodeGone, "Die Datei gibt es nicht mehr.".into())
+                })?;
+            if node.content_hash.as_deref() == Some(&staged.hash[..])
+                && node.size == Some(staged.size as i64)
+            {
+                // Already exactly this content (also: a repeated request whose answer was lost).
+                return Ok((node, Written::Unchanged));
+            }
+            if node.rev == base_rev {
+                let path = located(st, &p, &node).await?;
+                let node = write_replace(st, &p, user_id, node, &path, &staged, mtime).await?;
+                return Ok((node, Written::Replaced));
+            }
+            let parent = live(reload(st, node.parent_id.unwrap_or_default()).await?)?;
+            let dir = located(st, &p, &parent).await?;
+            let date = OffsetDateTime::now_utc()
+                .format(CONFLICT_DATE)
+                .unwrap_or_default();
+            let label = format!("Konflikt – {device} {date}");
+            let name = free_name(st, &parent, &dir, &node.name, &label).await?;
+            let copy = write_new(st, &p, user_id, &parent, &dir, &name, &staged, mtime).await?;
+            Ok((copy, Written::ConflictCopy))
+        }
+    }
+}
+
+const CONFLICT_DATE: &[time::format_description::FormatItem<'static>] =
+    time::macros::format_description!("[year]-[month]-[day] [hour].[minute]");
+
+trait FilterLive {
+    fn filter_live(self) -> Option<NodeRow>;
+}
+
+impl FilterLive for NodeRow {
+    fn filter_live(self) -> Option<NodeRow> {
+        self.deleted_at.is_none().then_some(self)
     }
 }
 
@@ -208,15 +326,31 @@ fn changed_since(node: &NodeRow, base_rev: i64) -> ApiResult<()> {
     Ok(())
 }
 
-/// "Name.ext", else "Name (1).ext", "Name (2).ext", …
-async fn free_name(st: &AppState, parent: &NodeRow, dir: &Path, name: &str) -> ApiResult<String> {
+/// Without a label: "Name.ext", else "Name (1).ext", "Name (2).ext", … With a label:
+/// "Name (label).ext", else "Name (label 2).ext", …
+async fn free_name(
+    st: &AppState,
+    parent: &NodeRow,
+    dir: &Path,
+    name: &str,
+    label: &str,
+) -> ApiResult<String> {
     let base = xlrx_proto::Name::new(name).map_err(|e| ApiError::bad(e.to_string()))?;
-    let mut candidate = name.to_owned();
+    let mut candidate = if label.is_empty() {
+        name.to_owned()
+    } else {
+        base.with_suffix(label).as_str().to_owned()
+    };
     for i in 1..1000 {
         if ensure_free(st, parent, dir, &candidate, None).await.is_ok() {
             return Ok(candidate);
         }
-        candidate = base.with_suffix(&i.to_string()).as_str().to_owned();
+        let suffix = if label.is_empty() {
+            i.to_string()
+        } else {
+            format!("{label} {}", i + 1)
+        };
+        candidate = base.with_suffix(&suffix).as_str().to_owned();
     }
     Err(ApiError::Conflict("Kein freier Name gefunden.".into()))
 }

@@ -1,19 +1,23 @@
 //! Sync API (PLAN 5.2): the change feed of a root and live notifications.
 
 use std::convert::Infallible;
+use std::path::PathBuf;
 
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::body::Body;
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
-use xlrx_proto::{ContentHash, FileContent, Kind, Name, NodeId, Rev};
-use xlrx_sync::RemoteEntry;
+use xlrx_proto::{ContentHash, FileContent, Kind, Name, NodeId, Rev, Seq};
+use xlrx_sync::{Reject, RemoteEntry, RemoteOp, RemoteResult};
 
 use crate::auth::session::CurrentUser;
 use crate::error::{ApiError, ApiResult};
+use crate::files::content::{self, Staged, Target, Written};
 use crate::files::db::{self, NODE_COLS, NodeRow};
-use crate::files::{live, roots};
+use crate::files::{live, ops, roots, store};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -160,4 +164,363 @@ pub async fn notify(
             }
         });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+fn hex32(s: &str) -> ApiResult<[u8; 32]> {
+    let mut out = [0u8; 32];
+    if s.len() != 64 {
+        return Err(ApiError::bad("Ungültiger Hash."));
+    }
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = s
+            .get(i * 2..i * 2 + 2)
+            .and_then(|x| u8::from_str_radix(x, 16).ok())
+            .ok_or_else(|| ApiError::bad("Ungültiger Hash."))?;
+    }
+    Ok(out)
+}
+
+fn hex(h: &[u8]) -> String {
+    h.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn state_dir(st: &AppState) -> ApiResult<PathBuf> {
+    st.cfg
+        .state_dir
+        .clone()
+        .ok_or_else(|| ApiError::Internal("Kein Datenverzeichnis konfiguriert".into()))
+}
+
+/// Content uploaded by this person ahead of an operation (`PUT /sync/content/{hash}`).
+fn uploaded_path(st: &AppState, user: i64, hash: &[u8; 32]) -> ApiResult<PathBuf> {
+    Ok(state_dir(st)?
+        .join(store::STAGING)
+        .join(format!("content-{user}-{}", hex(hash))))
+}
+
+/// Files and versions the person can read that should have this content.
+async fn holders(st: &AppState, user: i64, hash: &[u8; 32]) -> ApiResult<Vec<PathBuf>> {
+    let visible: Vec<i64> = roots::readable(st, user)
+        .await?
+        .iter()
+        .map(|r| r.id)
+        .collect();
+    let data_dir = st.cfg.data_dir.clone().ok_or(ApiError::NotFound)?;
+    let mut out = Vec::new();
+    let files: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT n.id, r.rel_path FROM nodes n JOIN roots r ON r.id = n.root_id
+         WHERE n.content_hash = $1 AND n.deleted_at IS NULL AND r.id = ANY($2) LIMIT 5",
+    )
+    .bind(hash.to_vec())
+    .bind(&visible)
+    .fetch_all(&st.db)
+    .await?;
+    for (id, rel) in files {
+        out.push(data_dir.join(rel).join(db::rel_path(&st.db, id).await?));
+    }
+    let kept: Vec<String> = sqlx::query_scalar(
+        "SELECT v.store_path FROM versions v JOIN nodes n ON n.id = v.node_id
+         WHERE v.content_hash = $1 AND n.root_id = ANY($2) LIMIT 1",
+    )
+    .bind(hash.to_vec())
+    .bind(&visible)
+    .fetch_all(&st.db)
+    .await?;
+    let state = state_dir(st)?;
+    out.extend(kept.into_iter().map(|p| state.join(p)));
+    Ok(out)
+}
+
+/// Gets content ready for writing without receiving it again: uploaded ahead, or cloned from a
+/// file or version that has it (checked by hashing, the database could be out of date).
+async fn obtain(st: &AppState, user: i64, hash: &[u8; 32]) -> ApiResult<Option<Staged>> {
+    let mut candidates = vec![uploaded_path(st, user, hash)?];
+    candidates.extend(holders(st, user, hash).await?);
+    for path in candidates {
+        if let Some(staged) = content::stage_from(st, &path, hash).await? {
+            return Ok(Some(staged));
+        }
+    }
+    Ok(None)
+}
+
+#[derive(Deserialize)]
+pub struct ContentQuery {
+    pub size: Option<u64>,
+}
+
+/// Content ahead of an operation that needs it (raw body). Kept for a day.
+pub async fn put_content(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    Path(hash): Path<String>,
+    Query(q): Query<ContentQuery>,
+    body: Body,
+) -> ApiResult<StatusCode> {
+    let hash = hex32(&hash)?;
+    let staged = content::stage(&st, body, q.size).await?;
+    if *staged.hash() != hash {
+        return Err(ApiError::bad("Der Inhalt passt nicht zum Hash."));
+    }
+    let to = uploaded_path(&st, me.id, &hash)?;
+    tokio::task::spawn_blocking(move || staged.keep_as(&to))
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+pub struct Available {
+    pub available: bool,
+}
+
+/// Is the content available without uploading it (uploaded ahead, or present in a file or
+/// version the person can read)?
+pub async fn content_available(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    Path(hash): Path<String>,
+) -> ApiResult<Json<Available>> {
+    let hash = hex32(&hash)?;
+    let available = uploaded_path(&st, me.id, &hash)?.is_file()
+        || !holders(&st, me.id, &hash).await?.is_empty();
+    Ok(Json(Available { available }))
+}
+
+#[derive(Deserialize)]
+pub struct OpRequest {
+    /// Name of the device (part of the operation's identity, and of conflict copy names).
+    pub device: String,
+    pub op_id: u64,
+    pub op: RemoteOp,
+}
+
+fn check_device(device: &str) -> ApiResult<()> {
+    if device.trim().is_empty() || device.len() > 100 || device.chars().any(char::is_control) {
+        return Err(ApiError::bad("Ungültiger Gerätename."));
+    }
+    Ok(())
+}
+
+async fn known(
+    st: &AppState,
+    user: i64,
+    device: &str,
+    op_id: u64,
+) -> ApiResult<Option<RemoteResult>> {
+    let r: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT result FROM sync_ops WHERE user_id = $1 AND device = $2 AND op_id = $3",
+    )
+    .bind(user)
+    .bind(device)
+    .bind(op_id as i64)
+    .fetch_optional(&st.db)
+    .await?;
+    Ok(r.and_then(|v| serde_json::from_value(v).ok()))
+}
+
+/// Executes an operation of the sync engine (PLAN 5.3) once: a retry with the same id gets the
+/// same answer. Preconditions that no longer hold are answered with the reason (`Rejected`);
+/// nothing is overwritten. `Transient`: changed outside xlrx meanwhile, try again.
+pub async fn op(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    Json(req): Json<OpRequest>,
+) -> ApiResult<Json<RemoteResult>> {
+    check_device(&req.device)?;
+    let lock = st.sync_lock(me.id, &req.device);
+    let _guard = lock.lock().await;
+    if let Some(r) = known(&st, me.id, &req.device, req.op_id).await? {
+        return Ok(Json(r));
+    }
+    let result = execute(&st, me.id, &req.device, &req.op).await?;
+    if result != RemoteResult::Transient {
+        sqlx::query(
+            "INSERT INTO sync_ops (user_id, device, op_id, result) VALUES ($1, $2, $3, $4)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(me.id)
+        .bind(&req.device)
+        .bind(req.op_id as i64)
+        .bind(serde_json::to_value(&result).map_err(|e| ApiError::Internal(e.to_string()))?)
+        .execute(&st.db)
+        .await?;
+    }
+    Ok(Json(result))
+}
+
+/// The result of an operation executed before (for a client that lost the answer: it then needs
+/// neither the source file nor a new upload).
+pub async fn op_result(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    Path((device, op_id)): Path<(String, u64)>,
+) -> ApiResult<Json<RemoteResult>> {
+    known(&st, me.id, &device, op_id)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::NotFound)
+}
+
+fn created(n: &NodeRow) -> RemoteResult {
+    RemoteResult::Created {
+        node: NodeId(n.id as u64),
+        rev: Rev(n.rev as u64),
+        seq: Seq(n.seq as u64),
+    }
+}
+
+fn missing_content() -> ApiError {
+    ApiError::Conflict("Der Inhalt fehlt: zuerst hochladen (PUT /api/sync/content/{hash}).".into())
+}
+
+async fn execute(st: &AppState, user: i64, device: &str, op: &RemoteOp) -> ApiResult<RemoteResult> {
+    // "Not found" means: the node (or the folder) is gone, or not visible to this person.
+    let gone = |r: Reject| {
+        move |e: ApiError| match e {
+            ApiError::NotFound => ApiError::Rejected(r, String::new()),
+            e => e,
+        }
+    };
+    let id = |n: &NodeId| n.0 as i64;
+    let res: ApiResult<RemoteResult> = match op {
+        RemoteOp::CreateDir { parent, name, .. } => ops::mkdir(st, user, id(parent), name.as_str())
+            .await
+            .map_err(gone(Reject::ParentGone))
+            .map(|n| created(&n)),
+        RemoteOp::CreateFile {
+            parent,
+            name,
+            content: c,
+            ..
+        } => {
+            let Some(staged) = obtain(st, user, &c.hash.0).await? else {
+                return Err(missing_content());
+            };
+            let target = Target::New {
+                parent_id: id(parent),
+                name: name.as_str().to_owned(),
+                keep_both: false,
+            };
+            content::write(st, user, target, staged, None)
+                .await
+                .map_err(gone(Reject::ParentGone))
+                .map(|(n, _)| created(&n))
+        }
+        RemoteOp::Upload {
+            node,
+            base_rev,
+            content: c,
+            ..
+        } => {
+            let Some(staged) = obtain(st, user, &c.hash.0).await? else {
+                return Err(missing_content());
+            };
+            let target = Target::ReplaceOrConflict {
+                node_id: id(node),
+                base_rev: base_rev.0 as i64,
+                device: device.to_owned(),
+            };
+            content::write(st, user, target, staged, None)
+                .await
+                .map_err(gone(Reject::NodeGone))
+                .map(|(n, w)| match w {
+                    Written::ConflictCopy => RemoteResult::Conflict {
+                        node: NodeId(n.id as u64),
+                        rev: Rev(n.rev as u64),
+                        seq: Seq(n.seq as u64),
+                    },
+                    _ => RemoteResult::Updated {
+                        rev: Rev(n.rev as u64),
+                        seq: Seq(n.seq as u64),
+                    },
+                })
+        }
+        RemoteOp::Move {
+            node,
+            from_parent,
+            from_name,
+            parent,
+            name,
+        } => {
+            let change = ops::Change {
+                name: Some(name.as_str().to_owned()),
+                parent_id: Some(id(parent)),
+                if_seq: None,
+                from: Some((id(from_parent), from_name.as_str().to_owned())),
+            };
+            ops::update(st, user, id(node), change)
+                .await
+                .map_err(gone(Reject::NodeGone))
+                .map(|n| RemoteResult::Moved {
+                    seq: Seq(n.seq as u64),
+                })
+        }
+        RemoteOp::DeleteFile {
+            node,
+            base_rev,
+            parent,
+            name,
+        } => {
+            delete(
+                st,
+                user,
+                id(node),
+                false,
+                ops::DeleteIf {
+                    at: Some((id(parent), name.as_str().to_owned())),
+                    rev: Some(base_rev.0 as i64),
+                    empty: false,
+                },
+            )
+            .await
+        }
+        RemoteOp::DeleteDir { node, parent, name } => {
+            delete(
+                st,
+                user,
+                id(node),
+                true,
+                ops::DeleteIf {
+                    at: Some((id(parent), name.as_str().to_owned())),
+                    rev: None,
+                    empty: true,
+                },
+            )
+            .await
+        }
+    };
+    match res {
+        Ok(r) => Ok(r),
+        Err(ApiError::Rejected(r, _)) => Ok(RemoteResult::Rejected(r)),
+        // Changed outside xlrx meanwhile (the root was scanned again): a retry decides anew.
+        Err(ApiError::Conflict(_)) => Ok(RemoteResult::Transient),
+        Err(e) => Err(e),
+    }
+}
+
+async fn delete(
+    st: &AppState,
+    user: i64,
+    node: i64,
+    dir: bool,
+    pre: ops::DeleteIf,
+) -> ApiResult<RemoteResult> {
+    let n = db::node_by_id(&st.db, node)
+        .await?
+        .filter(|n| n.deleted_at.is_none() && n.is_dir() == dir && n.parent_id.is_some())
+        .ok_or_else(|| ApiError::Rejected(Reject::NodeGone, String::new()))?;
+    ops::trash_if(st, user, n.id, None, &pre)
+        .await
+        .map_err(|e| match e {
+            ApiError::NotFound => ApiError::Rejected(Reject::NodeGone, String::new()),
+            e => e,
+        })?;
+    let after = db::node_by_id(&st.db, n.id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(RemoteResult::Deleted {
+        seq: Seq(after.seq as u64),
+    })
 }

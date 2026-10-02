@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use xlrx_chunk::fingerprint_of;
 use xlrx_proto::Name;
+use xlrx_sync::Reject;
 
 use super::db::{self, NODE_COLS, NodeRow, OnDisk, RootRow, Source};
 use super::fs::{ignored, walk};
@@ -144,7 +145,12 @@ pub(super) async fn ensure_free(
     name: &str,
     except: Option<&NodeRow>,
 ) -> ApiResult<()> {
-    let taken = || ApiError::Conflict(format!("In diesem Ordner gibt es schon „{name}“."));
+    let taken = || {
+        ApiError::Rejected(
+            Reject::NameTaken,
+            format!("In diesem Ordner gibt es schon „{name}“."),
+        )
+    };
     let in_db: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM nodes WHERE parent_id = $1 AND name_folded = $2
                           AND deleted_at IS NULL AND id <> $3)",
@@ -196,7 +202,10 @@ pub async fn mkdir(
     let (parent, root) = writable(st, user_id, parent_id).await?;
     let parent = live(parent)?;
     if !parent.is_dir() {
-        return Err(ApiError::bad("Kein Ordner."));
+        return Err(ApiError::Rejected(
+            Reject::ParentGone,
+            "Kein Ordner.".into(),
+        ));
     }
     let p = place(st, root)?;
     let dir = located(st, &p, &parent).await?;
@@ -209,9 +218,10 @@ pub async fn mkdir(
     })
     .await?
     .map_err(|e| match e.kind() {
-        std::io::ErrorKind::AlreadyExists => {
-            ApiError::Conflict(format!("In diesem Ordner gibt es schon „{name}“."))
-        }
+        std::io::ErrorKind::AlreadyExists => ApiError::Rejected(
+            Reject::NameTaken,
+            format!("In diesem Ordner gibt es schon „{name}“."),
+        ),
         _ => io_err(e),
     })?;
     let (id, fp) = fingerprint_of(&meta);
@@ -241,6 +251,25 @@ pub struct Change {
     pub parent_id: Option<i64>,
     /// Only if the node is still at this state (`seq` as last seen).
     pub if_seq: Option<i64>,
+    /// Only if the node is still in this folder under this name (sync clients).
+    #[serde(skip)]
+    pub from: Option<(i64, String)>,
+}
+
+/// Is the node still where the caller saw it? (Otherwise someone else moved it: their move wins.)
+fn check_at(node: &NodeRow, at: Option<&(i64, String)>) -> ApiResult<()> {
+    match at {
+        Some((parent, name)) if node.parent_id != Some(*parent) || node.name != *name => {
+            Err(ApiError::Rejected(
+                Reject::Moved,
+                format!(
+                    "„{}“ wurde inzwischen verschoben oder umbenannt.",
+                    node.name
+                ),
+            ))
+        }
+        _ => Ok(()),
+    }
 }
 
 pub async fn update(st: &AppState, user_id: i64, id: i64, ch: Change) -> ApiResult<NodeRow> {
@@ -255,6 +284,7 @@ pub async fn update(st: &AppState, user_id: i64, id: i64, ch: Change) -> ApiResu
         ));
     };
     check_seq(&node, ch.if_seq)?;
+    check_at(&node, ch.from.as_ref())?;
     let name = match &ch.name {
         Some(n) => valid_name(n)?,
         None => node.name.clone(),
@@ -266,22 +296,31 @@ pub async fn update(st: &AppState, user_id: i64, id: i64, ch: Change) -> ApiResu
     let target = db::node_by_id(&st.db, parent_id)
         .await?
         .filter(|t| t.deleted_at.is_none())
-        .ok_or(ApiError::NotFound)?;
+        .ok_or_else(|| {
+            ApiError::Rejected(
+                Reject::ParentGone,
+                "Den Zielordner gibt es nicht mehr.".into(),
+            )
+        })?;
     if target.root_id != node.root_id {
         return Err(ApiError::bad(
             "Verschieben in eine andere Ablage ist noch nicht möglich.",
         ));
     }
     if !target.is_dir() {
-        return Err(ApiError::bad("Das Ziel ist kein Ordner."));
+        return Err(ApiError::Rejected(
+            Reject::ParentGone,
+            "Das Ziel ist kein Ordner.".into(),
+        ));
     }
     if db::ancestors(&st.db, target.id)
         .await?
         .iter()
         .any(|a| a.id == node.id)
     {
-        return Err(ApiError::bad(
-            "Ein Ordner kann nicht in sich selbst verschoben werden.",
+        return Err(ApiError::Rejected(
+            Reject::WouldCycle,
+            "Ein Ordner kann nicht in sich selbst verschoben werden.".into(),
         ));
     }
     let p = place(st, root)?;
@@ -299,9 +338,10 @@ pub async fn update(st: &AppState, user_id: i64, id: i64, ch: Change) -> ApiResu
     })
     .await?
     .map_err(|e| match e.kind() {
-        std::io::ErrorKind::AlreadyExists => {
-            ApiError::Conflict(format!("Im Ziel gibt es schon „{name}“."))
-        }
+        std::io::ErrorKind::AlreadyExists => ApiError::Rejected(
+            Reject::NameTaken,
+            format!("Im Ziel gibt es schon „{name}“."),
+        ),
         _ => io_err(e),
     })?;
     let mut tx = db::begin_write(&st.db).await?;
@@ -421,8 +461,30 @@ pub(super) async fn forget(st: &AppState, op: i64) -> ApiResult<()> {
     Ok(())
 }
 
+/// Preconditions of a deletion by a sync client.
+#[derive(Debug, Default, Clone)]
+pub struct DeleteIf {
+    /// Still in this folder under this name.
+    pub at: Option<(i64, String)>,
+    /// Files: still this content revision.
+    pub rev: Option<i64>,
+    /// Folders: only if empty.
+    pub empty: bool,
+}
+
 /// Moves a node with everything below it into the trash.
 pub async fn trash(st: &AppState, user_id: i64, id: i64, if_seq: Option<i64>) -> ApiResult<()> {
+    trash_if(st, user_id, id, if_seq, &DeleteIf::default()).await
+}
+
+/// [`trash`] with the preconditions of a sync client.
+pub async fn trash_if(
+    st: &AppState,
+    user_id: i64,
+    id: i64,
+    if_seq: Option<i64>,
+    pre: &DeleteIf,
+) -> ApiResult<()> {
     let (_, root) = writable(st, user_id, id).await?;
     let lock = st.root_lock(root.id);
     let _guard = lock.lock().await;
@@ -434,6 +496,19 @@ pub async fn trash(st: &AppState, user_id: i64, id: i64, if_seq: Option<i64>) ->
         ));
     }
     check_seq(&node, if_seq)?;
+    if pre.rev.is_some_and(|r| r != node.rev) {
+        return Err(ApiError::Rejected(
+            Reject::RevMismatch,
+            format!("„{}“ wurde inzwischen geändert.", node.name),
+        ));
+    }
+    check_at(&node, pre.at.as_ref())?;
+    if pre.empty && !db::children_of(&st.db, &[node.id]).await?.is_empty() {
+        return Err(ApiError::Rejected(
+            Reject::NotEmpty,
+            format!("„{}“ ist nicht leer.", node.name),
+        ));
+    }
     let p = place(st, root)?;
     let src = located(st, &p, &node).await?;
     let container = format!(
@@ -683,9 +758,10 @@ pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<NodeRow>
         Err(e) => {
             forget(st, op).await?;
             return Err(match e.kind() {
-                std::io::ErrorKind::AlreadyExists => {
-                    ApiError::Conflict(format!("Im Ordner gibt es schon „{name}“."))
-                }
+                std::io::ErrorKind::AlreadyExists => ApiError::Rejected(
+                    Reject::NameTaken,
+                    format!("Im Ordner gibt es schon „{name}“."),
+                ),
                 _ => io_err(e),
             });
         }

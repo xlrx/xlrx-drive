@@ -12,6 +12,8 @@ pub enum ApiError {
     Forbidden(String),
     NotFound,
     Conflict(String),
+    /// A precondition of a change does not hold: sync clients get the reason, people the message.
+    Rejected(xlrx_sync::Reject, String),
     TooManyRequests,
     Internal(String),
 }
@@ -38,6 +40,13 @@ impl IntoResponse for ApiError {
             Self::Forbidden(m) => (StatusCode::FORBIDDEN, m),
             Self::NotFound => (StatusCode::NOT_FOUND, "Nicht gefunden".into()),
             Self::Conflict(m) => (StatusCode::CONFLICT, m),
+            Self::Rejected(reason, m) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({ "error": m, "reason": reason })),
+                )
+                    .into_response();
+            }
             Self::TooManyRequests => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "Zu viele Versuche. Bitte später erneut versuchen.".into(),

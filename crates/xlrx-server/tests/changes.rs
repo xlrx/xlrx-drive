@@ -125,7 +125,10 @@ async fn ordner_anlegen() {
     let r = c
         .post(&format!("/api/nodes/{file}/folders"), json!({"name": "x"}))
         .await;
-    assert_eq!(r.status, 400);
+    assert_eq!(
+        (r.status.as_u16(), r.body["reason"].as_str()),
+        (409, Some("ParentGone"))
+    );
 
     // The scan agrees with what the API did.
     let r = roots::scan(&env.state, &root).await.unwrap();
@@ -231,7 +234,12 @@ async fn umbenennen_und_verschieben() {
                 Some(json!({"parent_id": target})),
             )
             .await;
-        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(
+            (r.status.as_u16(), r.body["reason"].as_str()),
+            (409, Some("WouldCycle")),
+            "{}",
+            r.body
+        );
     }
     // Move a folder with content: one node moves, the content comes along.
     let r = c

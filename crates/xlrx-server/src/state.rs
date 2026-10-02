@@ -16,6 +16,9 @@ use crate::error::{ApiError, ApiResult};
 #[derive(Clone)]
 pub struct AppState(Arc<Inner>);
 
+/// An async lock shared by everyone working on the same thing.
+type Lock = Arc<tokio::sync::Mutex<()>>;
+
 pub struct Inner {
     pub db: PgPool,
     pub cfg: Config,
@@ -32,6 +35,9 @@ pub struct Inner {
     root_locks: std::sync::Mutex<std::collections::HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
     /// Highest committed journal sequence, live (see [`crate::files::live`]).
     pub live: tokio::sync::OnceCell<tokio::sync::watch::Receiver<i64>>,
+    /// One lock per (person, device): a device's sync operations run one after another, so a
+    /// retried operation never runs twice at the same time.
+    sync_locks: std::sync::Mutex<std::collections::HashMap<(i64, String), Lock>>,
     /// Running watchers per root (dropping one stops it).
     watchers: std::sync::Mutex<std::collections::HashMap<i64, notify::RecommendedWatcher>>,
 }
@@ -68,6 +74,7 @@ impl AppState {
             web_csp,
             root_locks: Default::default(),
             watchers: Default::default(),
+            sync_locks: Default::default(),
             live: Default::default(),
             db,
             secrets: SecretBox::new(&cfg.secret_key),
@@ -83,6 +90,12 @@ impl AppState {
     pub fn root_lock(&self, root_id: i64) -> Arc<tokio::sync::Mutex<()>> {
         let mut map = self.root_locks.lock().expect("mutex");
         map.entry(root_id).or_default().clone()
+    }
+
+    /// The sync lock of a device (see [`Inner::sync_locks`]).
+    pub fn sync_lock(&self, user_id: i64, device: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut map = self.sync_locks.lock().expect("mutex");
+        map.entry((user_id, device.to_owned())).or_default().clone()
     }
 
     /// Is the root watched already?

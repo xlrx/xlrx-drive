@@ -90,6 +90,12 @@ pub fn router(state: AppState) -> Router {
         // Sync
         .route("/sync/changes", get(sync::changes))
         .route("/sync/notify", get(sync::notify))
+        .route("/sync/ops", post(sync::op))
+        .route("/sync/ops/{device}/{op_id}", get(sync::op_result))
+        .route(
+            "/sync/content/{hash}",
+            get(sync::content_available).put(sync::put_content),
+        )
         // Administration
         .route(
             "/admin/users",
