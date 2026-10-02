@@ -43,6 +43,11 @@ pub async fn list_roots(
         let st2 = st.clone();
         let r = home.clone();
         tokio::spawn(async move {
+            if st2.cfg.watch
+                && let Err(e) = crate::files::watch::start(&st2, &r).await
+            {
+                tracing::warn!(root = r.id, error = ?e, "Überwachung nicht gestartet");
+            }
             if let Err(e) = roots::scan(&st2, &r).await {
                 tracing::warn!(root = r.id, error = ?e, "Erster Abgleich fehlgeschlagen");
             }

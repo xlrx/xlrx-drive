@@ -30,6 +30,8 @@ pub struct Inner {
     /// One lock per root: scans and changes through the API never run at the same time on the
     /// same directory tree.
     root_locks: std::sync::Mutex<std::collections::HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
+    /// Running watchers per root (dropping one stops it).
+    watchers: std::sync::Mutex<std::collections::HashMap<i64, notify::RecommendedWatcher>>,
 }
 
 impl Deref for AppState {
@@ -63,6 +65,7 @@ impl AppState {
         Ok(Self(Arc::new(Inner {
             web_csp,
             root_locks: Default::default(),
+            watchers: Default::default(),
             db,
             secrets: SecretBox::new(&cfg.secret_key),
             cfg,
@@ -77,6 +80,22 @@ impl AppState {
     pub fn root_lock(&self, root_id: i64) -> Arc<tokio::sync::Mutex<()>> {
         let mut map = self.root_locks.lock().expect("mutex");
         map.entry(root_id).or_default().clone()
+    }
+
+    /// Is the root watched already?
+    pub fn watching(&self, root_id: i64) -> bool {
+        self.watchers.lock().expect("mutex").contains_key(&root_id)
+    }
+
+    /// Keeps a root's watcher running. False if another one was registered meanwhile (this one is
+    /// dropped and stops).
+    pub fn keep_watcher(&self, root_id: i64, w: notify::RecommendedWatcher) -> bool {
+        let mut map = self.watchers.lock().expect("mutex");
+        if map.contains_key(&root_id) {
+            return false;
+        }
+        map.insert(root_id, w);
+        true
     }
 
     /// Hash a password (blocking, with limited parallelism).

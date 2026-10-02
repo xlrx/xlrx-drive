@@ -14,8 +14,8 @@ Volltext-/KI-Suche, Teilen zwischen Benutzern, effizienter und zuverlässiger Sy
 | `crates/xlrx-chunk` | FastCDC + BLAKE3, Hash-Cache mit Schutz vor groben Zeitstempeln |
 | `crates/xlrx-sync` | Sync-Engine (sans-IO, drei Bäume, inkrementelle Planung) |
 | `crates/xlrx-sim` | Deterministischer Simulator: Abstürze, Netzfehler, späte Ergebnisse, SMB-Namensvarianten, grobe Zeitstempel |
-| `crates/xlrx-server` | Konten und Anmeldung: Passwort + TOTP oder Passkey, Wiederherstellungscodes, Step-up, Verwaltung, Audit-Log |
-| `web/` | Nuxt-App (Vue 3): Anmeldung, Einrichtung, Sicherheit, Verwaltung |
+| `crates/xlrx-server` | Konten und Anmeldung (Passwort + TOTP oder Passkey, Wiederherstellungscodes, Step-up, Verwaltung, Audit-Log); Ablagen mit Abgleich und Überwachung (inotify), Hochladen, Umbenennen/Verschieben, Versionen, Papierkorb – absturzsicher |
+| `web/` | Nuxt-App (Vue 3): Anmeldung, Einrichtung, Sicherheit, Verwaltung; Dateien durchsuchen, Vorschau, Hochladen, Versionen, Papierkorb |
 | `deploy/` | Dockerfile, compose (PostgreSQL 18 + pgvector, Server, Caddy mit eigener IP und HTTP/3) |
 
 ## Lokal ausprobieren
@@ -27,7 +27,9 @@ docker compose -f deploy/docker-compose.local.yml up -d --build
 docker compose -f deploy/docker-compose.local.yml exec server xlrx-server create-user klaus "Klaus" --admin
 ```
 
-Den ausgegebenen Link öffnen (`http://localhost:8080/setup#…`). Zum Entwickeln mit Rust und Node direkt auf dem Rechner:
+Den ausgegebenen Link öffnen (`http://localhost:8080/setup#…`). „Meine Ablage“ des Kontos `klaus` ist der Ordner
+`local-data/homes/klaus/Drive` im Repository – was dort von außen hineinkommt, erscheint nach wenigen Sekunden in der Web-App.
+Zum Entwickeln mit Rust und Node direkt auf dem Rechner:
 `scripts/dev.sh` (Server + gebaute Web-App auf Port 8080) bzw. `scripts/dev.sh --hot` (zusätzlich Nuxt mit Hot Reload auf Port 3000).
 Beide nutzen einen öffentlichen Entwicklungsschlüssel, den der Server bei `https` verweigert.
 

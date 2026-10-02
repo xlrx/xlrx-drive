@@ -98,6 +98,8 @@ pub fn config() -> Config {
         state_dir: None,
         home_pattern: "homes/{user}/Drive".into(),
         force_copy: false,
+        // Tests start watchers themselves where they test them.
+        watch: false,
     }
 }
 

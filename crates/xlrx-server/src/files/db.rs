@@ -378,3 +378,79 @@ pub fn paths(nodes: &[NodeRow]) -> HashMap<i64, PathBuf> {
     }
     out
 }
+
+/// The live node at a path relative to its root directory (exact names), if any.
+pub async fn node_at_path(
+    db: &PgPool,
+    root_id: i64,
+    rel: &std::path::Path,
+) -> ApiResult<Option<NodeRow>> {
+    let Some(mut node) = root_node(db, root_id).await? else {
+        return Ok(None);
+    };
+    for c in rel.components() {
+        let std::path::Component::Normal(name) = c else {
+            return Ok(None);
+        };
+        let next: Option<NodeRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {NODE_COLS} FROM nodes WHERE parent_id = $1 AND name = $2 AND deleted_at IS NULL"
+        )))
+        .bind(node.id)
+        .bind(name.to_string_lossy().as_ref())
+        .fetch_optional(db)
+        .await?;
+        match next {
+            Some(n) => node = n,
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(node))
+}
+
+/// Live children of the given folders.
+pub async fn children_of(db: &PgPool, parents: &[i64]) -> ApiResult<Vec<NodeRow>> {
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {NODE_COLS} FROM nodes WHERE parent_id = ANY($1) AND deleted_at IS NULL"
+    )))
+    .bind(parents)
+    .fetch_all(db)
+    .await?)
+}
+
+/// Live nodes of a root with one of the given identities on disk (dev, inode).
+pub async fn by_file_ids(db: &PgPool, root_id: i64, ids: &[FileId]) -> ApiResult<Vec<NodeRow>> {
+    let devs: Vec<i64> = ids.iter().map(|f| f.dev as i64).collect();
+    let inos: Vec<i64> = ids.iter().map(|f| f.ino as i64).collect();
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {NODE_COLS} FROM nodes
+         WHERE root_id = $1 AND deleted_at IS NULL
+           AND (fs_dev, fs_ino) IN (SELECT * FROM unnest($2::bigint[], $3::bigint[]))"
+    )))
+    .bind(root_id)
+    .bind(devs)
+    .bind(inos)
+    .fetch_all(db)
+    .await?)
+}
+
+/// Marks a node and everything live below it as deleted outside xlrx (found missing by a scan).
+/// Returns the number of nodes.
+pub async fn mark_deleted_subtree(tx: &mut Tx, root_id: i64, top: i64) -> ApiResult<u64> {
+    let done = sqlx::query(
+        "WITH RECURSIVE sub AS (
+           SELECT id FROM nodes WHERE id = $1 AND deleted_at IS NULL
+           UNION ALL
+           SELECT n.id FROM nodes n JOIN sub ON n.parent_id = sub.id WHERE n.deleted_at IS NULL),
+         j AS (
+           INSERT INTO journal (seq, root_id, node_id, op, source)
+           SELECT nextval('journal_seq'), $2, id, 'delete', 'scan' FROM sub
+           RETURNING node_id, seq)
+         UPDATE nodes n SET deleted_at = now(), seq = j.seq, updated_at = now()
+         FROM j WHERE n.id = j.node_id",
+    )
+    .bind(top)
+    .bind(root_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(done.rows_affected())
+}

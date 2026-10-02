@@ -56,7 +56,7 @@ Systemsteuerung → Aufgabenplaner → Erstellen → Ausgelöste Aufgabe → Ben
 sysctl -w fs.inotify.max_user_watches=1048576 net.core.rmem_max=7500000 net.core.wmem_max=7500000
 ```
 
-(inotify für viele Ordner ab M1, größere UDP-Puffer für HTTP/3.)
+(inotify: xlrx überwacht jeden Ordner der Ablagen und bemerkt Änderungen über SMB oder File Station so in Sekunden – eine Überwachung pro Ordner. Größere UDP-Puffer für HTTP/3.)
 
 ## 5. Starten
 

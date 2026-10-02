@@ -63,6 +63,18 @@ enum Plan {
     Skip { node: Option<NodeRow> },
 }
 
+/// What one scan looks at: entries on disk (parents before children) and what the database knows
+/// about them, with each known node's path relative to the root directory.
+struct Scope {
+    entries: Vec<Seen>,
+    skipped: Vec<String>,
+    known: Vec<NodeRow>,
+    paths: HashMap<i64, PathBuf>,
+    /// Leave new or changed files alone while they are still being written (timestamps younger
+    /// than the racy window): partial scans, so clients never see half-copied files.
+    settle: bool,
+}
+
 /// Scans a whole root.
 pub async fn scan_root(
     db: &sqlx::PgPool,
@@ -71,53 +83,258 @@ pub async fn scan_root(
 ) -> ApiResult<ScanReport> {
     let dir = data_dir.join(&root.rel_path);
     let known = db::live_nodes(db, root.id).await?;
-    let root_node = known
-        .iter()
-        .find(|n| n.parent_id.is_none())
-        .cloned()
-        .ok_or_else(|| ApiError::Internal(format!("Ablage {} ohne Wurzelknoten", root.id)))?;
-
-    let dir2 = dir.clone();
-    let known2 = known.clone();
-    let (seen, plans, skipped, hashed) = tokio::task::spawn_blocking(move || plan(&dir2, &known2))
+    if !known.iter().any(|n| n.parent_id.is_none()) {
+        return Err(ApiError::Internal(format!(
+            "Ablage {} ohne Wurzelknoten",
+            root.id
+        )));
+    }
+    let paths = db::paths(&known);
+    let d = dir.clone();
+    let w = tokio::task::spawn_blocking(move || walk(&d, Path::new(""), true))
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))??;
-
-    if seen.len() <= 1 && known.len() > EMPTY_ROOT_GUARD {
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(|e| {
+            ApiError::Internal(format!(
+                "{}: Ablage nicht lesbar ({e}). Abgleich abgebrochen.",
+                dir.display()
+            ))
+        })?;
+    if w.entries.len() <= 1 && known.len() > EMPTY_ROOT_GUARD {
         return Err(ApiError::Internal(format!(
             "{}: Ordner ist leer, die Datenbank kennt aber {} Einträge. Nicht eingehängt? Abgleich abgebrochen.",
             dir.display(),
             known.len()
         )));
     }
+    let scope = Scope {
+        entries: w.entries,
+        skipped: w.skipped,
+        known,
+        paths,
+        settle: false,
+    };
+    let (report, _, _) = run(db, &dir, root, scope, Deletion::All).await?;
+    sqlx::query("UPDATE roots SET scanned_at = now() WHERE id = $1")
+        .bind(root.id)
+        .execute(db)
+        .await?;
+    Ok(report)
+}
 
+/// Which missing nodes a scan may mark as deleted.
+enum Deletion {
+    /// Full scan: everything the disk no longer has.
+    All,
+    /// Partial scan: only in these folders; elsewhere the folders are reported back (a move may
+    /// still be on its way, see [`scan_dirs`]).
+    In(HashSet<PathBuf>),
+}
+
+/// Result of [`scan_dirs`].
+#[derive(Debug, Default)]
+pub struct PartialReport {
+    pub report: ScanReport,
+    /// Folders with missing entries that were not marked deleted yet.
+    pub missing_in: Vec<PathBuf>,
+    /// Folders not known (yet) under that path; their nearest known ancestor was scanned instead.
+    pub unresolved: Vec<PathBuf>,
+    /// Folders with files still being written: to be scanned again shortly.
+    pub busy: Vec<PathBuf>,
+}
+
+/// Scans only the given folders (relative to the root directory): their entries, and new
+/// subfolders completely. Used by the watcher, so a change shows up in seconds without walking
+/// the whole root. Entries that moved in from elsewhere keep their node (found by inode).
+/// Missing entries are marked deleted only in the folders of `delete_in`; elsewhere they are
+/// reported, so a move whose two halves arrive in different batches is not taken for a deletion.
+pub async fn scan_dirs(
+    db: &sqlx::PgPool,
+    data_dir: &Path,
+    root: &RootRow,
+    dirs: &[PathBuf],
+    delete_in: &HashSet<PathBuf>,
+) -> ApiResult<PartialReport> {
+    let root_dir = data_dir.join(&root.rel_path);
+    let mut out = PartialReport::default();
+
+    // Folders as the database knows them; an unknown one is replaced by its nearest known ancestor.
+    let mut anchors: Vec<(PathBuf, NodeRow)> = Vec::new();
+    let mut wanted: Vec<PathBuf> = dirs.to_vec();
+    wanted.sort_by_key(|d| d.components().count());
+    wanted.dedup();
+    for d in wanted {
+        let mut cur = d.clone();
+        loop {
+            if anchors.iter().any(|(r, _)| *r == cur) {
+                break;
+            }
+            if let Some(n) = db::node_at_path(db, root.id, &cur)
+                .await?
+                .filter(NodeRow::is_dir)
+            {
+                anchors.push((cur.clone(), n));
+                break;
+            }
+            if cur == d {
+                out.unresolved.push(d.clone());
+            }
+            match cur.parent() {
+                Some(p) => cur = p.to_path_buf(),
+                None => break,
+            }
+        }
+    }
+    anchors.sort_by_key(|(r, _)| r.components().count());
+
+    // List the folders (and nothing below them yet).
+    let rd = root_dir.clone();
+    let rels: Vec<PathBuf> = anchors.iter().map(|(r, _)| r.clone()).collect();
+    let (mut entries, mut skipped, listed) = tokio::task::spawn_blocking(move || {
+        let mut entries: Vec<Seen> = Vec::new();
+        let mut skipped = Vec::new();
+        let mut listed = Vec::new();
+        let mut have: HashSet<PathBuf> = HashSet::new();
+        for rel in rels {
+            let w = match walk(&rd, &rel, false) {
+                Ok(w) => w,
+                // Gone meanwhile: its parent's events will follow.
+                Err(_) => continue,
+            };
+            listed.push(rel);
+            skipped.extend(w.skipped);
+            for e in w.entries {
+                if have.insert(e.rel.clone()) {
+                    entries.push(e);
+                }
+            }
+        }
+        (entries, skipped, listed)
+    })
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    anchors.retain(|(r, _)| listed.contains(r));
+    if anchors.is_empty() {
+        return Ok(out);
+    }
+
+    // What the database knows: the folders, their children, and nodes that moved in from
+    // elsewhere (same identity on disk).
+    let mut known: Vec<NodeRow> = anchors.iter().map(|(_, n)| n.clone()).collect();
+    let mut paths: HashMap<i64, PathBuf> = anchors.iter().map(|(r, n)| (n.id, r.clone())).collect();
+    let anchor_ids: Vec<i64> = anchors.iter().map(|(_, n)| n.id).collect();
+    let anchor_path: HashMap<i64, PathBuf> =
+        anchors.iter().map(|(r, n)| (n.id, r.clone())).collect();
+    for c in db::children_of(db, &anchor_ids).await? {
+        if paths.contains_key(&c.id) {
+            continue;
+        }
+        let parent = c
+            .parent_id
+            .and_then(|p| anchor_path.get(&p))
+            .cloned()
+            .unwrap_or_default();
+        paths.insert(c.id, parent.join(&c.name));
+        known.push(c);
+    }
+    let known_ids: HashSet<(u64, u64)> = known
+        .iter()
+        .filter_map(|n| n.file_id().map(|f| (f.dev, f.ino)))
+        .collect();
+    let foreign: Vec<xlrx_chunk::FileId> = entries
+        .iter()
+        .filter(|e| !known_ids.contains(&(e.id.dev, e.id.ino)))
+        .map(|e| e.id)
+        .collect();
+    for n in db::by_file_ids(db, root.id, &foreign).await? {
+        if paths.contains_key(&n.id) || n.parent_id.is_none() {
+            continue;
+        }
+        paths.insert(n.id, db::rel_path(db, n.id).await?);
+        known.push(n);
+    }
+
+    // New folders are read completely (their content is new as well).
+    let known_ids: HashSet<(u64, u64)> = known
+        .iter()
+        .filter_map(|n| n.file_id().map(|f| (f.dev, f.ino)))
+        .collect();
+    let known_paths: HashSet<&Path> = paths.values().map(PathBuf::as_path).collect();
+    let new_dirs: Vec<PathBuf> = entries
+        .iter()
+        .filter(|e| {
+            e.is_dir
+                && !known_ids.contains(&(e.id.dev, e.id.ino))
+                && !known_paths.contains(e.rel.as_path())
+        })
+        .map(|e| e.rel.clone())
+        .collect();
+    if !new_dirs.is_empty() {
+        let rd = root_dir.clone();
+        let more = tokio::task::spawn_blocking(move || {
+            let mut more = Vec::new();
+            let mut skipped = Vec::new();
+            for d in new_dirs {
+                if let Ok(w) = walk(&rd, &d, true) {
+                    // The first entry is the folder itself, already listed.
+                    more.extend(w.entries.into_iter().skip(1));
+                    skipped.extend(w.skipped);
+                }
+            }
+            (more, skipped)
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        entries.extend(more.0);
+        skipped.extend(more.1);
+    }
+
+    let scope = Scope {
+        entries,
+        skipped,
+        known,
+        paths,
+        settle: true,
+    };
+    let (report, missing_in, busy) =
+        run(db, &root_dir, root, scope, Deletion::In(delete_in.clone())).await?;
+    out.report = report;
+    out.missing_in = missing_in;
+    out.busy = busy;
+    Ok(out)
+}
+
+/// Plans (blocking: stat and hashing) and applies a scan.
+async fn run(
+    db: &sqlx::PgPool,
+    dir: &Path,
+    root: &RootRow,
+    scope: Scope,
+    deletion: Deletion,
+) -> ApiResult<(ScanReport, Vec<PathBuf>, Vec<PathBuf>)> {
+    let d = dir.to_path_buf();
+    let (scope, (plans, skipped, hashed, busy)) = tokio::task::spawn_blocking(move || {
+        let planned = plan(&d, &scope);
+        (scope, planned)
+    })
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
     let mut report = ScanReport {
         skipped,
         hashed_bytes: hashed,
         ..Default::default()
     };
-    apply(db, root, &root_node, &known, &seen, plans, &mut report).await?;
-    sqlx::query("UPDATE roots SET scanned_at = now() WHERE id = $1")
-        .bind(root.id)
-        .execute(db)
-        .await?;
+    let missing_in = apply(db, root, &scope, plans, deletion, &mut report).await?;
     if report.changes() > 0 {
         tracing::info!(root = root.id, ?report.created, ?report.updated, ?report.moved, ?report.deleted, "Abgleich");
     }
-    Ok(report)
+    Ok((report, missing_in, busy))
 }
 
-type Planned = (Vec<Seen>, Vec<Plan>, Vec<String>, u64);
-
-/// Walks the disk and decides, per entry, what to do (blocking: stat and hashing).
-fn plan(dir: &Path, known: &[NodeRow]) -> ApiResult<Planned> {
-    let w = walk(dir, Path::new(""), true).map_err(|e| {
-        ApiError::Internal(format!(
-            "{}: Ablage nicht lesbar ({e}). Abgleich abgebrochen.",
-            dir.display()
-        ))
-    })?;
-    let paths = db::paths(known);
+/// Decides, per entry, what to do. Also returns the folders with files still being written
+/// (only with [`Scope::settle`]).
+fn plan(dir: &Path, scope: &Scope) -> (Vec<Plan>, Vec<String>, u64, Vec<PathBuf>) {
+    let (entries, known, paths) = (&scope.entries, &scope.known, &scope.paths);
     let by_ino: HashMap<(u64, u64), &NodeRow> = known
         .iter()
         .filter_map(|n| n.file_id().map(|f| ((f.dev, f.ino), n)))
@@ -131,11 +348,11 @@ fn plan(dir: &Path, known: &[NodeRow]) -> ApiResult<Planned> {
     // Two passes, so that a renamed file keeps its node even if a new file now sits at its old
     // path and is listed first.
     let mut used: HashSet<i64> = HashSet::new();
-    let mut matched: Vec<Option<&NodeRow>> = vec![None; w.entries.len()];
+    let mut matched: Vec<Option<&NodeRow>> = vec![None; entries.len()];
     let usable = |n: &NodeRow, s: &Seen, used: &HashSet<i64>| {
         n.is_dir() == s.is_dir && n.parent_id.is_some() && !used.contains(&n.id)
     };
-    for (i, s) in w.entries.iter().enumerate() {
+    for (i, s) in entries.iter().enumerate() {
         let m = if s.rel.as_os_str().is_empty() {
             known.iter().find(|n| n.parent_id.is_none())
         } else {
@@ -149,7 +366,7 @@ fn plan(dir: &Path, known: &[NodeRow]) -> ApiResult<Planned> {
             matched[i] = Some(n);
         }
     }
-    for (i, s) in w.entries.iter().enumerate() {
+    for (i, s) in entries.iter().enumerate() {
         if matched[i].is_some() || s.rel.as_os_str().is_empty() {
             continue;
         }
@@ -165,14 +382,12 @@ fn plan(dir: &Path, known: &[NodeRow]) -> ApiResult<Planned> {
 
     // Moved = different parent node or different name. Children of a moved folder keep their
     // parent and are not moves themselves. Parents are listed before their children.
-    let index: HashMap<&Path, usize> = w
-        .entries
+    let index: HashMap<&Path, usize> = entries
         .iter()
         .enumerate()
         .map(|(i, s)| (s.rel.as_path(), i))
         .collect();
-    let moved: Vec<bool> = w
-        .entries
+    let moved: Vec<bool> = entries
         .iter()
         .zip(&matched)
         .map(|(s, m)| {
@@ -184,23 +399,41 @@ fn plan(dir: &Path, known: &[NodeRow]) -> ApiResult<Planned> {
                 .and_then(|p| index.get(p))
                 .and_then(|&pi| matched[pi])
                 .map(|p| p.id);
-            parent.is_none() || n.parent_id != parent || n.name != s.name
+            match s.parent_rel().map(|p| index.contains_key(p)) {
+                // The parent folder is part of this scan: compare with its node.
+                Some(true) => parent.is_none() || n.parent_id != parent || n.name != s.name,
+                // A folder a partial scan starts from: compare paths.
+                _ => paths.get(&n.id).map(PathBuf::as_path) != Some(s.rel.as_path()),
+            }
         })
         .collect();
 
-    let needs_hash: Vec<usize> = (0..w.entries.len())
-        .filter(|&i| !w.entries[i].is_dir && stale(matched[i], &w.entries[i], moved[i]))
+    let mut needs_hash: Vec<usize> = (0..entries.len())
+        .filter(|&i| !entries[i].is_dir && stale(matched[i], &entries[i], moved[i]))
         .collect();
+    // Still being written: not now (partial scans only; a full scan records what it finds).
+    let now = now_ns();
+    let settling: HashSet<usize> = if scope.settle {
+        needs_hash
+            .iter()
+            .copied()
+            .filter(|&i| racy(&entries[i].fp, now))
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    needs_hash.retain(|i| !settling.contains(i));
+    let mut busy: Vec<PathBuf> = Vec::new();
     let digests: HashMap<usize, Option<Hashed>> = needs_hash
         .par_iter()
         .map_init(Chunker::new, |chunker, &i| {
-            let path = dir.join(&w.entries[i].rel);
+            let path = dir.join(&entries[i].rel);
             let d = match digest_file(chunker, &path) {
                 Ok(FileDigest::Stable {
                     digest,
                     fingerprint,
                     ..
-                }) if fingerprint == w.entries[i].fp => Some(Hashed {
+                }) if fingerprint == entries[i].fp => Some(Hashed {
                     hash: digest.content.hash.0,
                     size: digest.content.size,
                     trusted: !racy(&fingerprint, now_ns()),
@@ -213,9 +446,19 @@ fn plan(dir: &Path, known: &[NodeRow]) -> ApiResult<Planned> {
         .collect();
 
     let mut hashed = 0u64;
-    let mut skipped = w.skipped;
-    let mut plans = Vec::with_capacity(w.entries.len());
-    for (i, s) in w.entries.iter().enumerate() {
+    let mut skipped = scope.skipped.clone();
+    let mut plans = Vec::with_capacity(entries.len());
+    for (i, s) in entries.iter().enumerate() {
+        if settling.contains(&i) {
+            let folder = s.parent_rel().unwrap_or(Path::new("")).to_path_buf();
+            if !busy.contains(&folder) {
+                busy.push(folder);
+            }
+            plans.push(Plan::Skip {
+                node: matched[i].cloned(),
+            });
+            continue;
+        }
         let mut disk = OnDisk {
             id: s.id,
             fp: Some(s.fp),
@@ -264,7 +507,7 @@ fn plan(dir: &Path, known: &[NodeRow]) -> ApiResult<Planned> {
             }
         });
     }
-    Ok((w.entries, plans, skipped, hashed))
+    (plans, skipped, hashed, busy)
 }
 
 struct Hashed {
@@ -312,23 +555,21 @@ fn now_ns() -> i64 {
 }
 
 /// Writes the decisions in batches. Entries come in breadth-first order, so a parent always has
-/// its final node before its children are placed.
+/// its final node before its children are placed. Returns the folders with missing entries that
+/// were not marked deleted (see [`Deletion`]).
 async fn apply(
     db: &sqlx::PgPool,
     root: &RootRow,
-    root_node: &NodeRow,
-    known: &[NodeRow],
-    seen: &[Seen],
+    scope: &Scope,
     plans: Vec<Plan>,
+    deletion: Deletion,
     report: &mut ScanReport,
-) -> ApiResult<()> {
+) -> ApiResult<Vec<PathBuf>> {
     let mut node_of_path: HashMap<PathBuf, i64> = HashMap::new();
-    node_of_path.insert(PathBuf::new(), root_node.id);
     let mut alive: HashSet<i64> = HashSet::new();
-    alive.insert(root_node.id);
     let mut tx = db::begin_write(db).await?;
     let mut ops = 0usize;
-    for (s, p) in seen.iter().zip(plans) {
+    for (s, p) in scope.entries.iter().zip(plans) {
         let parent = s.parent_rel().and_then(|pr| node_of_path.get(pr).copied());
         match p {
             Plan::Skip { node } => {
@@ -411,10 +652,36 @@ async fn apply(
             ops = 0;
         }
     }
-    // Everything the database knows but the disk no longer has was deleted outside xlrx.
-    for n in known.iter().filter(|n| !alive.contains(&n.id)) {
-        db::mark_deleted(&mut tx, n, None, Source::SCAN).await?;
-        report.deleted += 1;
+    // What the database knows but the disk no longer has was deleted outside xlrx. A folder takes
+    // everything below it along.
+    let missing: Vec<&NodeRow> = scope
+        .known
+        .iter()
+        .filter(|n| n.parent_id.is_some() && !alive.contains(&n.id))
+        .collect();
+    let missing_ids: HashSet<i64> = missing.iter().map(|n| n.id).collect();
+    let mut kept_in: Vec<PathBuf> = Vec::new();
+    for n in missing {
+        if n.parent_id.is_some_and(|p| missing_ids.contains(&p)) {
+            continue;
+        }
+        let folder = scope
+            .paths
+            .get(&n.id)
+            .and_then(|p| p.parent())
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let now = match &deletion {
+            Deletion::All => true,
+            Deletion::In(dirs) => dirs.contains(&folder),
+        };
+        if !now {
+            if !kept_in.contains(&folder) {
+                kept_in.push(folder);
+            }
+            continue;
+        }
+        report.deleted += db::mark_deleted_subtree(&mut tx, root.id, n.id).await? as usize;
         ops += 1;
         if ops >= BATCH {
             tx.commit().await?;
@@ -423,5 +690,5 @@ async fn apply(
         }
     }
     tx.commit().await?;
-    Ok(())
+    Ok(kept_in)
 }

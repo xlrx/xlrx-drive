@@ -120,6 +120,24 @@ pub async fn scan(st: &AppState, root: &RootRow) -> ApiResult<super::scan::ScanR
     super::scan::scan_root(&st.db, &data_dir, root).await
 }
 
+/// Scans only some folders of a root under its lock (see [`super::scan::scan_dirs`]).
+pub async fn scan_dirs(
+    st: &AppState,
+    root: &RootRow,
+    dirs: &[PathBuf],
+    delete_in: &std::collections::HashSet<PathBuf>,
+) -> ApiResult<super::scan::PartialReport> {
+    let data_dir = st
+        .cfg
+        .data_dir
+        .clone()
+        .ok_or_else(|| ApiError::Internal("Kein Datenverzeichnis konfiguriert".into()))?;
+    let lock = st.root_lock(root.id);
+    let _guard = lock.lock().await;
+    super::ops::recover(st, Some(root.id)).await?;
+    super::scan::scan_dirs(&st.db, &data_dir, root, dirs, delete_in).await
+}
+
 /// Scans all roots once (at startup: catches changes made while the server was not running).
 pub async fn scan_all(st: &AppState) {
     let roots: Vec<RootRow> = match sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -135,6 +153,12 @@ pub async fn scan_all(st: &AppState) {
         }
     };
     for r in roots {
+        // Watching starts first, so nothing changed during the scan is missed.
+        if st.cfg.watch
+            && let Err(e) = super::watch::start(st, &r).await
+        {
+            tracing::warn!(root = r.id, error = ?e, "Überwachung nicht gestartet");
+        }
         if let Err(e) = scan(st, &r).await {
             tracing::warn!(root = r.id, error = ?e, "Abgleich fehlgeschlagen");
         }

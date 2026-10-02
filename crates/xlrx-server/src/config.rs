@@ -38,6 +38,9 @@ pub struct Config {
     /// Tests only: always copy between the roots and the state directory instead of renaming, as
     /// across Btrfs subvolumes on the NAS.
     pub force_copy: bool,
+    /// Watch roots for changes from outside (inotify). On by default; `XLRX_WATCH=0` turns it off
+    /// (then only the hourly scan and "Neu einlesen" pick them up).
+    pub watch: bool,
 }
 
 /// Parameters for argon2id. Calibrate on the DS918+ (J3455) so that one check takes ~250 ms
@@ -172,6 +175,7 @@ impl Config {
                 .or_else(|| var("XLRX_DATA_DIR").map(|d| PathBuf::from(d).join("xlrx-state"))),
             home_pattern: var("XLRX_HOME_PATTERN").unwrap_or_else(|| "homes/{user}/Drive".into()),
             force_copy: false,
+            watch: var("XLRX_WATCH").is_none_or(|v| v != "0" && v != "false"),
         })
     }
 
