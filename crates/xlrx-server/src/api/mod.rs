@@ -5,6 +5,7 @@ pub mod auth;
 pub mod files;
 pub mod me;
 pub mod setup;
+pub mod sync;
 
 use axum::Router;
 use axum::extract::{Request, State};
@@ -86,6 +87,9 @@ pub fn router(state: AppState) -> Router {
         .route("/versions/{id}/restore", post(files::restore_version))
         .route("/trash/{id}/restore", post(files::restore))
         .route("/trash/{id}", delete(files::purge))
+        // Sync
+        .route("/sync/changes", get(sync::changes))
+        .route("/sync/notify", get(sync::notify))
         // Administration
         .route(
             "/admin/users",

@@ -103,19 +103,25 @@ async function browseFiles(page: Page, data: string) {
 	await expect(page.getByText('Keine Vorschau für diesen Dateityp.')).toBeVisible();
 	await expect(page.getByRole('link', { name: 'In neuem Tab' })).toHaveCount(0);
 
-	// A file added on the NAS shows up after "Neu einlesen".
+	// A file added on the NAS (SMB, File Station) shows up by itself within seconds: watcher,
+	// journal, live event, reload of the view.
 	await page.getByRole('navigation', { name: 'Pfad' }).getByRole('link', { name: 'Projekte', exact: true }).click();
+	await expect(page.getByRole('heading', { name: 'Projekte' })).toBeVisible();
 	await writeFile(join(drive, 'Projekte/Neu.txt'), 'neu');
+	await expect(page.getByRole('link', { name: 'Neu.txt', exact: true })).toBeVisible({ timeout: 10_000 });
+	// "Neu einlesen" finds nothing left to do.
 	await page.getByRole('button', { name: 'Neu einlesen' }).click();
-	await expect(page.getByText('Eingelesen: 1 neu.')).toBeVisible();
-	await expect(page.getByRole('link', { name: 'Neu.txt', exact: true })).toBeVisible();
+	await expect(page.getByText('Keine Änderungen.')).toBeVisible();
 
 	// PDF: shown in a frame of the app.
 	await page.getByRole('navigation', { name: 'Pfad' }).getByRole('link', { name: 'Meine Ablage' }).click();
+	// (Not "networkidle": the live event stream keeps the connection open.)
+	const pdf = page.waitForResponse((r) => r.url().includes('/content?inline=true'));
 	await page.getByRole('link', { name: 'Bericht.pdf', exact: true }).click();
 	const frame = page.locator('iframe[title="Bericht.pdf"]');
 	await expect(frame).toBeVisible();
-	await page.waitForLoadState('networkidle');
+	expect((await pdf).status()).toBe(200);
+	await page.waitForTimeout(500);
 	expect(refused).toEqual([]);
 }
 
@@ -138,6 +144,16 @@ async function changeFiles(page: Page, data: string) {
 	await page.getByRole('button', { name: 'Anlegen' }).click();
 	await link('Belege').click();
 	await expect(page.getByRole('heading', { name: 'Belege' })).toBeVisible();
+
+	// Changes from elsewhere (another device, SMB) appear without reloading the page.
+	const url = new URL(page.url());
+	const here = url.pathname.split('/').pop();
+	const created = await page.request.post(`/api/nodes/${here}/folders`, {
+		data: { name: 'Von woanders' },
+		headers: { origin: url.origin }
+	});
+	expect(created.status()).toBe(201);
+	await expect(link('Von woanders')).toBeVisible();
 
 	// Upload; the same name again: keep both, then replace (the old content becomes a version).
 	await upload('Rechnung.txt', 'Rechnung 1');

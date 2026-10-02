@@ -30,6 +30,8 @@ pub struct Inner {
     /// One lock per root: scans and changes through the API never run at the same time on the
     /// same directory tree.
     root_locks: std::sync::Mutex<std::collections::HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
+    /// Highest committed journal sequence, live (see [`crate::files::live`]).
+    pub live: tokio::sync::OnceCell<tokio::sync::watch::Receiver<i64>>,
     /// Running watchers per root (dropping one stops it).
     watchers: std::sync::Mutex<std::collections::HashMap<i64, notify::RecommendedWatcher>>,
 }
@@ -66,6 +68,7 @@ impl AppState {
             web_csp,
             root_locks: Default::default(),
             watchers: Default::default(),
+            live: Default::default(),
             db,
             secrets: SecretBox::new(&cfg.secret_key),
             cfg,

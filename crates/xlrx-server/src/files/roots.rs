@@ -96,6 +96,16 @@ pub fn can_read(root: &RootRow, user_id: i64) -> bool {
     root.owner_user_id == Some(user_id)
 }
 
+/// The roots this person can see (for now: the own home).
+pub async fn readable(st: &AppState, user_id: i64) -> ApiResult<Vec<RootRow>> {
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {ROOT_COLS} FROM roots WHERE owner_user_id = $1 ORDER BY id"
+    )))
+    .bind(user_id)
+    .fetch_all(&st.db)
+    .await?)
+}
+
 /// May this person change the root's content? (Home: only its owner.)
 pub fn can_write(root: &RootRow, user_id: i64) -> bool {
     root.owner_user_id == Some(user_id)

@@ -19,6 +19,7 @@ async function load() {
 	}
 }
 onMounted(load);
+useLive().onRootChange(() => root.value?.id, load);
 
 async function act(fn: () => Promise<void>) {
 	busy.value = true;

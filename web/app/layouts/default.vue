@@ -1,10 +1,22 @@
 <script setup lang="ts">
 const route = useRoute();
 const { me, set } = useSession();
+const live = useLive();
 const isPublic = computed(() => ['/login', '/setup'].includes(route.path.replace(/\/+$/, '')));
+
+// Live updates while signed in.
+watch(
+	me,
+	(m) => {
+		if (m) live.connect();
+		else live.disconnect();
+	},
+	{ immediate: true }
+);
 
 async function logout() {
 	await apiPost('/auth/logout');
+	live.disconnect();
 	set(null);
 	await navigateTo('/login');
 }

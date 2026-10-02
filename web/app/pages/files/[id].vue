@@ -63,6 +63,13 @@ watch(
 	{ immediate: true }
 );
 onBeforeUnmount(() => clearTimeout(poll));
+// Changes elsewhere (other devices, SMB, the watcher): show them right away.
+useLive().onRootChange(
+	() => node.value?.root_id,
+	() => {
+		if (!busy.value) load();
+	}
+);
 
 /** Runs a change; on failure shows the reason and reloads (the server may have rescanned). */
 async function act(fn: () => Promise<void>) {

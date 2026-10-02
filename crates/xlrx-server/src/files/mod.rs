@@ -3,6 +3,7 @@
 pub mod content;
 pub mod db;
 pub mod fs;
+pub mod live;
 pub mod ops;
 pub mod roots;
 pub mod scan;
