@@ -1104,8 +1104,14 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
 - **B1 erledigt:** Chunker, Sync-Engine (inkrementell), Simulator; nach einem adversarialen Review 1 Mio. Seeds ohne Befund (ADR 0001).
 - **M0 im Code erledigt:** Server mit Konten und Anmeldung (Passwort + TOTP oder Passkey, Wiederherstellungscodes, Step-up, Verwaltung, Audit-Log), Web-App dazu, Docker-Image, compose mit Caddy (macvlan, HTTP/3), CI inkl. Browser-Test und Prüfung ohne AVX.
 - **Offen für M0:** Inbetriebnahme auf dem DS918+ (`deploy/synology.md`) und die Messungen aus `spikes/ds918/`.
+- **M1 weitgehend erledigt (lokal getestet, ohne NAS):**
+  - Ablagen („Meine Ablage“ = `homes/NAME/Drive`) mit Knoten und lückenlosem Journal.
+  - Abgleich-Scan (Identität über die Inode, Schutz vor wiederverwendeten Inodes und leeren/fehlenden Freigaben, „racy“-Zeitstempel) und Überwachung per inotify mit Teil-Abgleich: Änderungen von außen erscheinen in Sekunden.
+  - Ändern über die API: Ordner, Hochladen, Ersetzen mit Versionen (inhaltsadressiert, Reflink), Umbenennen/Verschieben, Papierkorb – jeweils mit Absichtsprotokoll, sodass ein Absturz an jeder Stelle nichts verliert (in Tests für jede Stelle nachgestellt).
+  - Änderungs-Feed im Format der Sync-Engine und Live-Ereignisse (SSE); Web-App mit Durchsuchen, Vorschau, Hochladen, Versionen, Papierkorb und Live-Aktualisierung.
+- **Offen für M1:** Schreib-Operationen der Sync-Engine über das API (Vorbedingungen, idempotente Op-IDs), Uploads in Chunks mit Wiederaufnahme, Vorschaubilder.
 
-**Nächster Schritt:** Spike-Ergebnisse auswerten, dann M1 (Speicher, Watcher, Journal, Upload/Download, Versionen, Web-Durchsuchen).
+**Nächster Schritt:** Rest von M1, dann Inbetriebnahme auf dem DS918+ mit den Spike-Messungen.
 
 ---
 
