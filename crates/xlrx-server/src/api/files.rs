@@ -15,6 +15,7 @@ use tower_http::services::ServeFile;
 use crate::auth::session::CurrentUser;
 use crate::error::{ApiError, ApiResult};
 use crate::files::db::{self, NODE_COLS, NodeRow, RootRow};
+use crate::files::ops::{self, TrashItem};
 use crate::files::roots;
 use crate::state::AppState;
 
@@ -80,6 +81,8 @@ pub struct NodeInfo {
     pub kind: String,
     pub size: Option<i64>,
     pub rev: i64,
+    /// Last change of any kind (for `if_seq` preconditions).
+    pub seq: i64,
     #[serde(with = "time::serde::rfc3339::option")]
     pub mtime: Option<OffsetDateTime>,
     pub mime: Option<String>,
@@ -94,6 +97,7 @@ impl From<&NodeRow> for NodeInfo {
             kind: n.kind.clone(),
             size: n.size,
             rev: n.rev,
+            seq: n.seq,
             mtime: n.mtime,
             mime: (!n.is_dir()).then(|| {
                 mime_guess::from_path(&n.name)
@@ -277,4 +281,73 @@ pub async fn content(
         }
     }
     Ok(res.into_response())
+}
+
+#[derive(Deserialize)]
+pub struct NewFolder {
+    pub name: String,
+}
+
+pub async fn create_folder(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    Path(parent): Path<i64>,
+    Json(b): Json<NewFolder>,
+) -> ApiResult<(StatusCode, Json<NodeInfo>)> {
+    let n = ops::mkdir(&st, me.id, parent, &b.name).await?;
+    Ok((StatusCode::CREATED, Json(NodeInfo::from(&n))))
+}
+
+/// Rename and/or move.
+pub async fn update_node(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    Path(id): Path<i64>,
+    Json(ch): Json<ops::Change>,
+) -> ApiResult<Json<NodeInfo>> {
+    let n = ops::update(&st, me.id, id, ch).await?;
+    Ok(Json(NodeInfo::from(&n)))
+}
+
+#[derive(Deserialize)]
+pub struct IfSeq {
+    pub if_seq: Option<i64>,
+}
+
+/// Into the trash.
+pub async fn delete_node(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    Path(id): Path<i64>,
+    Query(q): Query<IfSeq>,
+) -> ApiResult<StatusCode> {
+    ops::trash(&st, me.id, id, q.if_seq).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn trash_list(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    Path(root): Path<i64>,
+) -> ApiResult<Json<Vec<TrashItem>>> {
+    Ok(Json(ops::trash_list(&st, me.id, root).await?))
+}
+
+pub async fn restore(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<NodeInfo>> {
+    let n = ops::restore(&st, me.id, id).await?;
+    Ok(Json(NodeInfo::from(&n)))
+}
+
+/// Delete from the trash for good.
+pub async fn purge(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    Path(id): Path<i64>,
+) -> ApiResult<StatusCode> {
+    ops::purge(&st, me.id, id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }

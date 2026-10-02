@@ -7,6 +7,8 @@
 
 #![allow(dead_code)]
 
+pub mod files;
+
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
@@ -95,6 +97,7 @@ pub fn config() -> Config {
         data_dir: None,
         state_dir: None,
         home_pattern: "homes/{user}/Drive".into(),
+        force_copy: false,
     }
 }
 
@@ -116,10 +119,22 @@ impl Env {
         Self::build(Some(tempfile::tempdir().expect("Datenverzeichnis"))).await
     }
 
+    /// Like [`Env::with_data`], but moving between roots and the state directory always copies
+    /// (as between Btrfs subvolumes on the NAS).
+    pub async fn with_data_copying() -> Option<Self> {
+        let mut env = Self::with_data().await?;
+        let mut cfg = env.state.cfg.clone();
+        cfg.force_copy = true;
+        env.state = AppState::new(env.db.pool.clone(), cfg).expect("Zustand");
+        env.app = xlrx_server::router(env.state.clone());
+        Some(env)
+    }
+
     async fn build(data: Option<tempfile::TempDir>) -> Option<Self> {
         let db = TestDb::new().await?;
         let mut cfg = config();
         cfg.data_dir = data.as_ref().map(|d| d.path().to_path_buf());
+        cfg.state_dir = data.as_ref().map(|d| d.path().join("xlrx-state"));
         let state = AppState::new(db.pool.clone(), cfg).expect("Zustand");
         let app = xlrx_server::router(state.clone());
         Some(Self {

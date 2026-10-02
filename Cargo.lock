@@ -2974,6 +2974,7 @@ dependencies = [
  "qrcode",
  "rand 0.10.3",
  "rayon",
+ "rustix",
  "serde",
  "serde_json",
  "sha1",

@@ -153,12 +153,19 @@ async fn serve(state: AppState) -> Result<(), String> {
     // Reconciliation: once at startup (changes made while the server was not running), then
     // periodically as a safety net. The watcher (PLAN 4.4) reports changes in between.
     if state.cfg.data_dir.is_some() {
+        // Changes a crash interrupted are completed or rolled back before anything else.
+        xlrx_server::files::ops::recover(&state, None)
+            .await
+            .map_err(|e| format!("Offene Vorgänge: {e:?}"))?;
         let st = state.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
             loop {
                 tick.tick().await;
                 xlrx_server::files::roots::scan_all(&st).await;
+                if let Err(e) = xlrx_server::files::ops::housekeeping(&st).await {
+                    tracing::warn!(error = ?e, "Aufräumen der Ablagen fehlgeschlagen");
+                }
             }
         });
     } else {

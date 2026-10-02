@@ -96,6 +96,11 @@ pub fn can_read(root: &RootRow, user_id: i64) -> bool {
     root.owner_user_id == Some(user_id)
 }
 
+/// May this person change the root's content? (Home: only its owner.)
+pub fn can_write(root: &RootRow, user_id: i64) -> bool {
+    root.owner_user_id == Some(user_id)
+}
+
 /// Directory of a root on disk.
 pub fn dir(data_dir: &Path, root: &RootRow) -> PathBuf {
     data_dir.join(&root.rel_path)
@@ -110,6 +115,8 @@ pub async fn scan(st: &AppState, root: &RootRow) -> ApiResult<super::scan::ScanR
         .ok_or_else(|| ApiError::Internal("Kein Datenverzeichnis konfiguriert".into()))?;
     let lock = st.root_lock(root.id);
     let _guard = lock.lock().await;
+    // Changes a crash interrupted come first, so the scan sees their final state.
+    super::ops::recover(st, Some(root.id)).await?;
     super::scan::scan_root(&st.db, &data_dir, root).await
 }
 

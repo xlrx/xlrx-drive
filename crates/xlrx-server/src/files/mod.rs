@@ -2,5 +2,7 @@
 
 pub mod db;
 pub mod fs;
+pub mod ops;
 pub mod roots;
 pub mod scan;
+pub mod store;

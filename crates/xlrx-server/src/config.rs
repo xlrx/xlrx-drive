@@ -35,6 +35,9 @@ pub struct Config {
     pub state_dir: Option<PathBuf>,
     /// Location of a person's "My Drive" below `data_dir`; `{user}` is the user name.
     pub home_pattern: String,
+    /// Tests only: always copy between the roots and the state directory instead of renaming, as
+    /// across Btrfs subvolumes on the NAS.
+    pub force_copy: bool,
 }
 
 /// Parameters for argon2id. Calibrate on the DS918+ (J3455) so that one check takes ~250 ms
@@ -168,6 +171,7 @@ impl Config {
                 .map(PathBuf::from)
                 .or_else(|| var("XLRX_DATA_DIR").map(|d| PathBuf::from(d).join("xlrx-state"))),
             home_pattern: var("XLRX_HOME_PATTERN").unwrap_or_else(|| "homes/{user}/Drive".into()),
+            force_copy: false,
         })
     }
 

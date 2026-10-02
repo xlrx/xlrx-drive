@@ -67,9 +67,18 @@ pub fn router(state: AppState) -> Router {
         // Files
         .route("/roots", get(files::list_roots))
         .route("/roots/{id}/scan", post(files::scan_root))
-        .route("/nodes/{id}", get(files::get_node))
+        .route("/roots/{id}/trash", get(files::trash_list))
+        .route(
+            "/nodes/{id}",
+            get(files::get_node)
+                .patch(files::update_node)
+                .delete(files::delete_node),
+        )
         .route("/nodes/{id}/children", get(files::children))
         .route("/nodes/{id}/content", get(files::content))
+        .route("/nodes/{id}/folders", post(files::create_folder))
+        .route("/trash/{id}/restore", post(files::restore))
+        .route("/trash/{id}", delete(files::purge))
         // Administration
         .route(
             "/admin/users",
