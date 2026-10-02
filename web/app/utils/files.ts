@@ -86,6 +86,18 @@ export function previewKind(mime: string | null): PreviewKind {
 	return null;
 }
 
+/** Types the server delivers for display in the browser (mirrors `inline_allowed` there). */
+export function opensInBrowser(mime: string | null): boolean {
+	if (!mime) return false;
+	return (
+		(mime.startsWith('image/') && mime !== 'image/svg+xml') ||
+		mime.startsWith('video/') ||
+		mime.startsWith('audio/') ||
+		mime === 'application/pdf' ||
+		mime === 'text/plain'
+	);
+}
+
 /** Icon for a node (see FileIcon). */
 export function iconKind(node: Pick<NodeInfo, 'kind' | 'mime'>): string {
 	if (node.kind === 'dir') return 'folder';

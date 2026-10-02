@@ -187,7 +187,7 @@ pub struct ContentQuery {
     pub inline: bool,
 }
 
-/// Types the browser may display directly. Everything else (HTML, SVG, scripts …) is only
+/// Types the browser may display directly (the web app mirrors this in `opensInBrowser`). Everything else (HTML, SVG, scripts …) is only
 /// offered as a download.
 fn inline_allowed(mime: &str) -> bool {
     (mime.starts_with("image/") && mime != "image/svg+xml")

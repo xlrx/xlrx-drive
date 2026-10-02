@@ -91,6 +91,7 @@ async function browseFiles(page: Page, data: string) {
 	await page.getByRole('link', { name: 'Projekte', exact: true }).click();
 	await page.getByRole('link', { name: 'Plan.txt', exact: true }).click();
 	await expect(page.locator('pre')).toContainText('Zweite Zeile: äöü');
+	await expect(page.getByRole('link', { name: 'In neuem Tab' })).toBeVisible();
 	const download = page.waitForEvent('download');
 	await page.getByRole('link', { name: 'Herunterladen', exact: true }).click();
 	expect((await download).suggestedFilename()).toBe('Plan.txt');
@@ -99,6 +100,7 @@ async function browseFiles(page: Page, data: string) {
 	await page.getByRole('navigation', { name: 'Pfad' }).getByRole('link', { name: 'Projekte', exact: true }).click();
 	await page.getByRole('link', { name: 'seite.html', exact: true }).click();
 	await expect(page.getByText('Keine Vorschau für diesen Dateityp.')).toBeVisible();
+	await expect(page.getByRole('link', { name: 'In neuem Tab' })).toHaveCount(0);
 
 	// A file added on the NAS shows up after "Neu einlesen".
 	await page.getByRole('navigation', { name: 'Pfad' }).getByRole('link', { name: 'Projekte', exact: true }).click();

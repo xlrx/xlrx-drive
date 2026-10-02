@@ -82,7 +82,7 @@ async function rescan() {
 			</button>
 			<template v-else-if="node">
 				<a
-					v-if="previewKind(node.mime) && previewKind(node.mime) !== 'office'"
+					v-if="opensInBrowser(node.mime)"
 					class="button"
 					:href="contentUrl(node.id, true)"
 					target="_blank"
