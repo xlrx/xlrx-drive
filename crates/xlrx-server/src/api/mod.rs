@@ -75,8 +75,15 @@ pub fn router(state: AppState) -> Router {
                 .delete(files::delete_node),
         )
         .route("/nodes/{id}/children", get(files::children))
-        .route("/nodes/{id}/content", get(files::content))
+        .route(
+            "/nodes/{id}/content",
+            get(files::content).put(files::replace_content),
+        )
+        .route("/nodes/{id}/files", post(files::upload))
         .route("/nodes/{id}/folders", post(files::create_folder))
+        .route("/nodes/{id}/versions", get(files::versions))
+        .route("/versions/{id}/content", get(files::version_content))
+        .route("/versions/{id}/restore", post(files::restore_version))
         .route("/trash/{id}/restore", post(files::restore))
         .route("/trash/{id}", delete(files::purge))
         // Administration

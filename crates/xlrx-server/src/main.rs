@@ -166,6 +166,9 @@ async fn serve(state: AppState) -> Result<(), String> {
                 if let Err(e) = xlrx_server::files::ops::housekeeping(&st).await {
                     tracing::warn!(error = ?e, "Aufräumen der Ablagen fehlgeschlagen");
                 }
+                if let Err(e) = xlrx_server::files::content::collect_versions(&st).await {
+                    tracing::warn!(error = ?e, "Aufräumen der Versionen fehlgeschlagen");
+                }
             }
         });
     } else {

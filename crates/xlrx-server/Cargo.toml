@@ -11,6 +11,7 @@ aes-gcm = "0.11"
 argon2 = "0.6"
 axum = "0.8"
 base64 = "0.23"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 hmac = "0.13"
 mime_guess = "2"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
@@ -25,7 +26,7 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 subtle = "2.6"
 thiserror.workspace = true
 time = { version = "0.3", features = ["serde", "formatting"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time", "fs", "io-util"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["trace", "fs", "set-header"] }
 tracing = "0.1"

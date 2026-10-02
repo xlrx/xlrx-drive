@@ -263,6 +263,31 @@ impl Client {
         self.send("GET", path, None).await
     }
 
+    /// A request with a raw body (uploads).
+    pub async fn send_bytes(&mut self, method: &str, path: &str, body: Vec<u8>) -> Resp {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/octet-stream");
+        if let Some(c) = &self.cookie {
+            req = req.header(header::COOKIE, format!("xlrx_session={c}"));
+        }
+        if let Some(o) = &self.origin {
+            req = req.header(header::ORIGIN, o);
+        }
+        let res = self
+            .app
+            .clone()
+            .oneshot(req.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        let status = res.status();
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| json!({ "text": String::from_utf8_lossy(&bytes) }));
+        Resp { status, body }
+    }
+
     /// GET with extra headers, returning headers and the raw body.
     pub async fn get_raw(&mut self, path: &str, headers: &[(&str, &str)]) -> RawResp {
         let mut req = Request::builder().method("GET").uri(path);

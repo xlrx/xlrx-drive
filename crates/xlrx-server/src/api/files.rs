@@ -14,6 +14,7 @@ use tower_http::services::ServeFile;
 
 use crate::auth::session::CurrentUser;
 use crate::error::{ApiError, ApiResult};
+use crate::files::content::{self as file_content, Target, VersionInfo};
 use crate::files::db::{self, NODE_COLS, NodeRow, RootRow};
 use crate::files::ops::{self, TrashItem};
 use crate::files::roots;
@@ -235,11 +236,29 @@ pub async fn content(
     }
     let data_dir = st.cfg.data_dir.as_deref().ok_or(ApiError::NotFound)?;
     let path = roots::dir(data_dir, &root).join(db::rel_path(&st.db, node.id).await?);
-    let mime = mime_guess::from_path(&node.name)
+    serve(
+        req,
+        &path,
+        &node.name,
+        q.inline,
+        node.content_hash.as_deref(),
+    )
+    .await
+}
+
+/// Serves a file of a person with the safety headers for user content.
+async fn serve(
+    req: Request,
+    path: &std::path::Path,
+    name: &str,
+    inline: bool,
+    hash: Option<&[u8]>,
+) -> ApiResult<Response> {
+    let mime = mime_guess::from_path(name)
         .first_or_octet_stream()
         .to_string();
-    let inline = q.inline && inline_allowed(&mime);
-    let mut res = ServeFile::new(&path)
+    let inline = inline && inline_allowed(&mime);
+    let mut res = ServeFile::new(path)
         .oneshot(req)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
@@ -250,7 +269,7 @@ pub async fn content(
     let h = res.headers_mut();
     h.insert(
         CONTENT_DISPOSITION,
-        disposition(if inline { "inline" } else { "attachment" }, &node.name),
+        disposition(if inline { "inline" } else { "attachment" }, name),
     );
     if !inline {
         h.insert(
@@ -274,7 +293,7 @@ pub async fn content(
     if inline {
         h.insert(X_FRAME_OPTIONS, HeaderValue::from_static("SAMEORIGIN"));
     }
-    if let Some(hash) = &node.content_hash {
+    if let Some(hash) = hash {
         let tag: String = hash.iter().take(16).map(|b| format!("{b:02x}")).collect();
         if let Ok(v) = HeaderValue::from_str(&format!("\"{tag}\"")) {
             h.insert(ETAG, v);
@@ -350,4 +369,125 @@ pub async fn purge(
 ) -> ApiResult<StatusCode> {
     ops::purge(&st, me.id, id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct UploadQuery {
+    pub name: String,
+    /// If the name is taken: "Name (1).ext" instead of refusing.
+    #[serde(default)]
+    pub keep_both: bool,
+    /// Modification time of the original (ms since 1970), as browsers report it.
+    pub mtime_ms: Option<i64>,
+    /// Announced length; a shorter or longer body is refused.
+    pub size: Option<u64>,
+}
+
+fn mtime(ms: Option<i64>) -> Option<OffsetDateTime> {
+    ms.and_then(|ms| OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000).ok())
+}
+
+/// A new file in a folder (raw request body).
+pub async fn upload(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    Path(parent): Path<i64>,
+    Query(q): Query<UploadQuery>,
+    body: axum::body::Body,
+) -> ApiResult<(StatusCode, Json<NodeInfo>)> {
+    // Fail fast before receiving gigabytes into a folder the person cannot write to.
+    ops::valid_name(&q.name)?;
+    let (folder, root) = visible(&st, &me, parent).await?;
+    if !roots::can_write(&root, me.id) {
+        return Err(ApiError::forbidden("Keine Schreibrechte in diesem Ordner."));
+    }
+    if !folder.is_dir() {
+        return Err(ApiError::bad("Kein Ordner."));
+    }
+    let staged = file_content::stage(&st, body, q.size).await?;
+    let (node, _) = file_content::write(
+        &st,
+        me.id,
+        Target::New {
+            parent_id: parent,
+            name: q.name,
+            keep_both: q.keep_both,
+        },
+        staged,
+        mtime(q.mtime_ms),
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(NodeInfo::from(&node))))
+}
+
+#[derive(Deserialize)]
+pub struct ReplaceQuery {
+    /// Revision the new content is based on; anything else is a conflict.
+    pub base_rev: i64,
+    pub mtime_ms: Option<i64>,
+    pub size: Option<u64>,
+}
+
+/// New content for an existing file.
+pub async fn replace_content(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    Path(id): Path<i64>,
+    Query(q): Query<ReplaceQuery>,
+    body: axum::body::Body,
+) -> ApiResult<Json<NodeInfo>> {
+    let (node, root) = visible(&st, &me, id).await?;
+    if !roots::can_write(&root, me.id) {
+        return Err(ApiError::forbidden("Keine Schreibrechte für diese Datei."));
+    }
+    if node.is_dir() {
+        return Err(ApiError::bad("Ordner haben keinen Inhalt."));
+    }
+    if node.rev != q.base_rev {
+        return Err(ApiError::Conflict(format!(
+            "„{}“ wurde inzwischen geändert. Bitte neu laden; beide Fassungen bleiben so erhalten.",
+            node.name
+        )));
+    }
+    let staged = file_content::stage(&st, body, q.size).await?;
+    let (node, _) = file_content::write(
+        &st,
+        me.id,
+        Target::Replace {
+            node_id: id,
+            base_rev: q.base_rev,
+        },
+        staged,
+        mtime(q.mtime_ms),
+    )
+    .await?;
+    Ok(Json(NodeInfo::from(&node)))
+}
+
+pub async fn versions(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Vec<VersionInfo>>> {
+    Ok(Json(file_content::versions(&st, me.id, id).await?))
+}
+
+pub async fn version_content(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    Path(id): Path<i64>,
+    Query(q): Query<ContentQuery>,
+    req: Request,
+) -> ApiResult<Response> {
+    let (path, node, v) = file_content::version_file(&st, me.id, id).await?;
+    serve(req, &path, &node.name, q.inline, Some(&v.content_hash)).await
+}
+
+pub async fn restore_version(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<NodeInfo>> {
+    let node = file_content::restore_version(&st, me.id, id).await?;
+    Ok(Json(NodeInfo::from(&node)))
 }

@@ -83,6 +83,18 @@ pub fn rename_noreplace(src: &Path, dst: &Path) -> io::Result<()> {
     }
 }
 
+/// Swaps two entries atomically (RENAME_EXCHANGE). `Unsupported` if the file system cannot.
+pub fn exchange(a: &Path, b: &Path) -> io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    match renameat_with(CWD, a, CWD, b, RenameFlags::EXCHANGE) {
+        Ok(()) => Ok(()),
+        Err(e) if e == rustix::io::Errno::INVAL || e == rustix::io::Errno::NOSYS => {
+            Err(io::ErrorKind::Unsupported.into())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Flushes a directory entry (after create, rename, unlink).
 pub fn fsync_dir(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
@@ -280,6 +292,17 @@ mod tests {
         assert_eq!(fs::read_to_string(&b).unwrap(), "b");
         rename_noreplace(&a, &d.path().join("c")).unwrap();
         assert!(!a.exists());
+    }
+
+    #[test]
+    fn exchange_swaps() {
+        let d = tempfile::tempdir().unwrap();
+        let (a, b) = (d.path().join("a"), d.path().join("b"));
+        fs::write(&a, "a").unwrap();
+        fs::write(&b, "b").unwrap();
+        exchange(&a, &b).unwrap();
+        assert_eq!(fs::read_to_string(&a).unwrap(), "b");
+        assert_eq!(fs::read_to_string(&b).unwrap(), "a");
     }
 
     #[test]

@@ -27,16 +27,16 @@ use crate::state::AppState;
 pub const TRASH_DAYS: i64 = 30;
 
 /// Where a change happens.
-struct Place {
-    root: RootRow,
-    data_dir: PathBuf,
+pub(super) struct Place {
+    pub(super) root: RootRow,
+    pub(super) data_dir: PathBuf,
     /// Directory of the root.
-    dir: PathBuf,
-    state_dir: PathBuf,
-    force_copy: bool,
+    pub(super) dir: PathBuf,
+    pub(super) state_dir: PathBuf,
+    pub(super) force_copy: bool,
 }
 
-fn place(st: &AppState, root: RootRow) -> ApiResult<Place> {
+pub(super) fn place(st: &AppState, root: RootRow) -> ApiResult<Place> {
     let missing = || ApiError::Internal("Kein Datenverzeichnis konfiguriert".into());
     let data_dir = st.cfg.data_dir.clone().ok_or_else(missing)?;
     let state_dir = st.cfg.state_dir.clone().ok_or_else(missing)?;
@@ -49,12 +49,12 @@ fn place(st: &AppState, root: RootRow) -> ApiResult<Place> {
     })
 }
 
-fn io_err(e: std::io::Error) -> ApiError {
+pub(super) fn io_err(e: std::io::Error) -> ApiError {
     ApiError::Internal(e.to_string())
 }
 
 /// Runs blocking file system work off the async threads.
-async fn blocking<T: Send + 'static>(
+pub(super) async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> std::io::Result<T> + Send + 'static,
 ) -> ApiResult<std::io::Result<T>> {
     tokio::task::spawn_blocking(f)
@@ -78,7 +78,11 @@ pub fn valid_name(raw: &str) -> ApiResult<String> {
 }
 
 /// A node of a root the person may change, with its root.
-async fn writable(st: &AppState, user_id: i64, id: i64) -> ApiResult<(NodeRow, RootRow)> {
+pub(super) async fn writable(
+    st: &AppState,
+    user_id: i64,
+    id: i64,
+) -> ApiResult<(NodeRow, RootRow)> {
     let node = db::node_by_id(&st.db, id)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -91,14 +95,14 @@ async fn writable(st: &AppState, user_id: i64, id: i64) -> ApiResult<(NodeRow, R
     Ok((node, root))
 }
 
-fn live(node: NodeRow) -> ApiResult<NodeRow> {
+pub(super) fn live(node: NodeRow) -> ApiResult<NodeRow> {
     if node.deleted_at.is_some() {
         return Err(ApiError::NotFound);
     }
     Ok(node)
 }
 
-fn check_seq(node: &NodeRow, if_seq: Option<i64>) -> ApiResult<()> {
+pub(super) fn check_seq(node: &NodeRow, if_seq: Option<i64>) -> ApiResult<()> {
     match if_seq {
         Some(s) if s != node.seq => Err(ApiError::Conflict(format!(
             "„{}“ wurde inzwischen geändert. Bitte die Ansicht neu laden.",
@@ -110,7 +114,7 @@ fn check_seq(node: &NodeRow, if_seq: Option<i64>) -> ApiResult<()> {
 
 /// Path of a live node on disk, after checking that the disk still holds this node there. If not
 /// (changed outside xlrx and not scanned yet), the root is scanned and the change refused.
-async fn located(st: &AppState, p: &Place, node: &NodeRow) -> ApiResult<PathBuf> {
+pub(super) async fn located(st: &AppState, p: &Place, node: &NodeRow) -> ApiResult<PathBuf> {
     let rel = db::rel_path(&st.db, node.id).await?;
     let path = if rel.as_os_str().is_empty() {
         p.dir.clone()
@@ -133,7 +137,7 @@ async fn located(st: &AppState, p: &Place, node: &NodeRow) -> ApiResult<PathBuf>
 
 /// Refuses a name that is taken in the folder, in the database or on disk, ignoring case
 /// (Macs and SMB would see a collision). `except`: the node being renamed itself.
-async fn ensure_free(
+pub(super) async fn ensure_free(
     st: &AppState,
     parent: &NodeRow,
     dir: &Path,
@@ -162,7 +166,7 @@ async fn ensure_free(
     Ok(())
 }
 
-async fn reload(st: &AppState, id: i64) -> ApiResult<NodeRow> {
+pub(super) async fn reload(st: &AppState, id: i64) -> ApiResult<NodeRow> {
     db::node_by_id(&st.db, id).await?.ok_or(ApiError::NotFound)
 }
 
@@ -315,7 +319,7 @@ pub async fn update(st: &AppState, user_id: i64, id: i64, ch: Change) -> ApiResu
 /// A step that is not atomic on disk, recorded in `pending_ops` (see the module docs).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
-enum Intent {
+pub(super) enum Intent {
     Trash {
         root_id: i64,
         node_id: i64,
@@ -341,6 +345,21 @@ enum Intent {
         name: String,
         copied: bool,
     },
+    /// A file written through xlrx (upload or restored version), see [`super::content`].
+    Upload {
+        root_id: i64,
+        actor: i64,
+        /// Relative to the state directory.
+        staging: PathBuf,
+        /// Server temp name next to the target (relative to the data directory).
+        temp: PathBuf,
+        /// Relative to the data directory.
+        target: PathBuf,
+        /// Content written (hex).
+        hash: String,
+        /// The replaced content, kept as a version.
+        old: Option<super::content::OldVersion>,
+    },
 }
 
 impl Intent {
@@ -348,17 +367,20 @@ impl Intent {
         match self {
             Intent::Trash { .. } => "trash",
             Intent::Restore { .. } => "restore",
+            Intent::Upload { .. } => "upload",
         }
     }
 
     fn root_id(&self) -> i64 {
         match self {
-            Intent::Trash { root_id, .. } | Intent::Restore { root_id, .. } => *root_id,
+            Intent::Trash { root_id, .. }
+            | Intent::Restore { root_id, .. }
+            | Intent::Upload { root_id, .. } => *root_id,
         }
     }
 }
 
-async fn record(st: &AppState, intent: &Intent) -> ApiResult<i64> {
+pub(super) async fn record(st: &AppState, intent: &Intent) -> ApiResult<i64> {
     let payload = serde_json::to_value(intent).map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(
         sqlx::query_scalar("INSERT INTO pending_ops (kind, payload) VALUES ($1, $2) RETURNING id")
@@ -369,7 +391,7 @@ async fn record(st: &AppState, intent: &Intent) -> ApiResult<i64> {
     )
 }
 
-async fn mark_copied(st: &AppState, op: i64) -> ApiResult<()> {
+pub(super) async fn mark_copied(st: &AppState, op: i64) -> ApiResult<()> {
     sqlx::query(
         "UPDATE pending_ops SET payload = jsonb_set(payload, '{copied}', 'true') WHERE id = $1",
     )
@@ -379,7 +401,7 @@ async fn mark_copied(st: &AppState, op: i64) -> ApiResult<()> {
     Ok(())
 }
 
-async fn forget(st: &AppState, op: i64) -> ApiResult<()> {
+pub(super) async fn forget(st: &AppState, op: i64) -> ApiResult<()> {
     sqlx::query("DELETE FROM pending_ops WHERE id = $1")
         .bind(op)
         .execute(&st.db)
@@ -891,6 +913,14 @@ async fn recover_one(st: &AppState, op: i64, intent: Intent) -> ApiResult<()> {
     let p = place(st, root)?;
     let exists = |path: &Path| std::fs::symlink_metadata(path).is_ok();
     match intent {
+        Intent::Upload {
+            staging,
+            temp,
+            target,
+            hash,
+            old,
+            ..
+        } => super::content::recover_upload(st, &p, op, &staging, &temp, &target, &hash, old).await,
         Intent::Trash {
             node_id,
             actor,
