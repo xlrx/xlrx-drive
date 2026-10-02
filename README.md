@@ -18,6 +18,19 @@ Volltext-/KI-Suche, Teilen zwischen Benutzern, effizienter und zuverlässiger Sy
 | `web/` | Nuxt-App (Vue 3): Anmeldung, Einrichtung, Sicherheit, Verwaltung |
 | `deploy/` | Dockerfile, compose (PostgreSQL 18 + pgvector, Server, Caddy mit eigener IP und HTTP/3) |
 
+## Lokal ausprobieren
+
+Ohne NAS, Caddy und Router – mit Docker (z.B. Docker Desktop auf dem Mac):
+
+```sh
+docker compose -f deploy/docker-compose.local.yml up -d --build
+docker compose -f deploy/docker-compose.local.yml exec server xlrx-server create-user klaus "Klaus" --admin
+```
+
+Den ausgegebenen Link öffnen (`http://localhost:8080/setup#…`). Zum Entwickeln mit Rust und Node direkt auf dem Rechner:
+`scripts/dev.sh` (Server + gebaute Web-App auf Port 8080) bzw. `scripts/dev.sh --hot` (zusätzlich Nuxt mit Hot Reload auf Port 3000).
+Beide nutzen einen öffentlichen Entwicklungsschlüssel, den der Server bei `https` verweigert.
+
 ## Entwickeln
 
 ```sh

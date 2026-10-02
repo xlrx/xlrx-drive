@@ -49,6 +49,10 @@ impl Default for ArgonParams {
     }
 }
 
+/// Fixed key used by the local trial setup (`deploy/docker-compose.local.yml`, `scripts/dev.sh`).
+/// It is public, so the server refuses it for an `https` deployment.
+pub const LOCAL_DEV_KEY: &[u8; 32] = b"xlrx-local-development-only-key!";
+
 fn var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
@@ -123,6 +127,13 @@ impl Config {
             }
         };
         let secret_key = parse_key(&key_raw)?;
+        if public_url.scheme() == "https" && &secret_key == LOCAL_DEV_KEY {
+            return Err(
+                "Der lokale Entwicklungsschlüssel darf nicht produktiv verwendet werden \
+                 (xlrx-server gen-secret)"
+                    .into(),
+            );
+        }
         let num = |name: &str, default: u32| -> Result<u32, String> {
             var(name).map_or(Ok(default), |v| {
                 v.parse().map_err(|e| format!("{name}: {e}"))

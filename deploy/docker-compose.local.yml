@@ -1,0 +1,44 @@
+# Local trial on a laptop (e.g. a Mac with Docker Desktop): no Caddy, no macvlan, plain HTTP on
+# http://localhost:8080. Not for production: fixed passwords and a public development key.
+#
+#   docker compose -f deploy/docker-compose.local.yml up -d --build
+#   docker compose -f deploy/docker-compose.local.yml exec server xlrx-server create-user klaus "Klaus" --admin
+name: xlrx-local
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    environment:
+      POSTGRES_DB: xlrx
+      POSTGRES_USER: xlrx
+      POSTGRES_PASSWORD: xlrx
+    ports:
+      # Also reachable for `scripts/dev.sh` (server via cargo on the host).
+      - "127.0.0.1:54320:5432"
+    volumes:
+      - postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xlrx -d xlrx"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://xlrx:xlrx@postgres:5432/xlrx
+      XLRX_PUBLIC_URL: http://localhost:8080
+      # Public development key (see LOCAL_DEV_KEY); refused for https deployments.
+      XLRX_SECRET_KEY: eGxyeC1sb2NhbC1kZXZlbG9wbWVudC1vbmx5LWtleSE=
+      XLRX_ARGON2_M_KIB: "8192"
+      XLRX_ARGON2_T: "1"
+    ports:
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  postgres: {}
