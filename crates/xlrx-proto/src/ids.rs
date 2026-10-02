@@ -2,9 +2,9 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// Stabile, vom Server vergebene ID eines Knotens (Datei oder Ordner).
+/// Stable, server-assigned ID of a node (file or directory).
 ///
-/// Pfade sind nur abgeleitet. Umbenennen und Verschieben ändern die ID nie.
+/// Paths are only derived. Renaming and moving never change the ID.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct NodeId(pub u64);
@@ -15,10 +15,11 @@ impl fmt::Debug for NodeId {
     }
 }
 
-/// Inhalts-Revision einer Datei. Ändert sich bei jedem neuen Inhalt, nicht bei Umbenennungen.
+/// Content revision of a file. Changes with every new content, not on renames.
 ///
-/// Dient als Vorbedingung für Uploads und Löschungen: Der Server führt sie nur aus, wenn der Client
-/// die aktuelle Revision kennt. So wird nie Inhalt überschrieben oder gelöscht, den der Client nicht gesehen hat.
+/// Serves as a precondition for uploads and deletions: the server only executes them if the
+/// client knows the current revision. That way, content the client has not seen is never
+/// overwritten or deleted.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Rev(pub u64);
@@ -29,7 +30,7 @@ impl fmt::Debug for Rev {
     }
 }
 
-/// Global monotone Sequenznummer des Server-Journals.
+/// Globally monotonic sequence number of the server journal.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Seq(pub u64);
@@ -40,7 +41,7 @@ impl fmt::Debug for Seq {
     }
 }
 
-/// Art eines Knotens.
+/// Kind of a node.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {

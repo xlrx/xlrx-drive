@@ -1,23 +1,23 @@
-//! Operationen, die die Engine plant, und ihre Ergebnisse.
+//! Operations planned by the engine, and their results.
 //!
-//! Die Engine führt nichts selbst aus. Der Aufrufer (Client bzw. Simulator) führt die Operationen
-//! aus und meldet das Ergebnis zurück. Jede Operation trägt die Vorbedingungen, die beim Ausführen
-//! geprüft werden müssen. Hat sich der Zustand inzwischen geändert, wird die Operation nicht
-//! ausgeführt (`Precondition` bzw. `Rejected`), und die Engine plant neu.
+//! The engine executes nothing itself. The caller (client or simulator) executes the operations
+//! and reports the result back. Every operation carries the preconditions that must be checked
+//! when executing it. If the state has changed in the meantime, the operation is not executed
+//! (`Precondition` or `Rejected`), and the engine replans.
 
 use serde::{Deserialize, Serialize};
 use xlrx_proto::{FileContent, Name, NodeId, Rev, Seq};
 
 use crate::types::{Fingerprint, LocalId, OpId};
 
-/// Herkunft eines neu angelegten Server-Knotens.
+/// Origin of a newly created server node.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Origin {
-    /// Gewöhnliches neues lokales Objekt; es liegt lokal am selben Ort wie auf dem Server.
+    /// Ordinary new local object; it is located at the same place locally as on the server.
     New,
-    /// Konfliktkopie: Das lokale Objekt liegt noch unter `local_parent`/`local_name` und wird danach
-    /// lokal auf den Konfliktnamen umbenannt. War es bisher mit `replaces` verknüpft, wird diese
-    /// Verknüpfung gelöst (der Knoten `replaces` wird dann neu heruntergeladen).
+    /// Conflict copy: the local object is still at `local_parent`/`local_name` and is renamed
+    /// locally to the conflict name afterwards. If it was previously linked to `replaces`, that
+    /// link is dissolved (node `replaces` is then downloaded again).
     ConflictCopy {
         local_parent: NodeId,
         local_name: Name,
@@ -25,8 +25,8 @@ pub enum Origin {
     },
 }
 
-/// Operation auf dem Server. Wird vor dem Senden im Outbox persistiert und nach einem Neustart
-/// mit derselben [`OpId`] wiederholt; der Server führt jede `OpId` nur einmal aus.
+/// Operation on the server. Persisted in the outbox before sending and retried with the same
+/// [`OpId`] after a restart; the server executes each `OpId` only once.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum RemoteOp {
     CreateDir {
@@ -35,8 +35,8 @@ pub enum RemoteOp {
         source: LocalId,
         origin: Origin,
     },
-    /// Neue Datei. Der Ausführende lädt den Inhalt aus `source` hoch und prüft dabei, dass die Datei
-    /// noch den Fingerprint `fp` und den Inhalt `content` hat (sonst `SourceChanged`).
+    /// New file. The executor uploads the content from `source`, checking that the file still has
+    /// fingerprint `fp` and content `content` (otherwise `SourceChanged`).
     CreateFile {
         parent: NodeId,
         name: Name,
@@ -45,8 +45,8 @@ pub enum RemoteOp {
         fp: Fingerprint,
         origin: Origin,
     },
-    /// Neuer Inhalt für eine bestehende Datei. Nur gültig, wenn der Server noch `base_rev` hat;
-    /// sonst legt der Server den Inhalt als Konfliktkopie an (Ergebnis `Conflict`).
+    /// New content for an existing file. Only valid if the server still has `base_rev`;
+    /// otherwise the server stores the content as a conflict copy (result `Conflict`).
     Upload {
         node: NodeId,
         base_rev: Rev,
@@ -54,8 +54,8 @@ pub enum RemoteOp {
         source: LocalId,
         fp: Fingerprint,
     },
-    /// Verschieben/Umbenennen, aber nur, wenn der Knoten noch unter `from_parent`/`from_name` liegt.
-    /// Hat ihn inzwischen jemand anderes verschoben, gewinnt dessen Verschiebung (`Rejected(Moved)`).
+    /// Move/rename, but only if the node is still at `from_parent`/`from_name`.
+    /// If someone else has moved it in the meantime, their move wins (`Rejected(Moved)`).
     Move {
         node: NodeId,
         from_parent: NodeId,
@@ -63,15 +63,15 @@ pub enum RemoteOp {
         parent: NodeId,
         name: Name,
     },
-    /// Löscht eine Datei, aber nur, wenn sie noch `base_rev` hat und unter `parent`/`name` liegt.
-    /// Inhalte, die der Client nicht kennt, und Verschiebungen, die er nicht gesehen hat, gehen so nie verloren.
+    /// Deletes a file, but only if it still has `base_rev` and is at `parent`/`name`.
+    /// That way, content the client does not know and moves it has not seen are never lost.
     DeleteFile {
         node: NodeId,
         base_rev: Rev,
         parent: NodeId,
         name: Name,
     },
-    /// Löscht einen Ordner, aber nur, wenn er auf dem Server leer ist und unter `parent`/`name` liegt.
+    /// Deletes a directory, but only if it is empty on the server and is at `parent`/`name`.
     DeleteDir {
         node: NodeId,
         parent: NodeId,
@@ -79,7 +79,7 @@ pub enum RemoteOp {
     },
 }
 
-/// Grund, aus dem der Server eine Operation abgelehnt hat. Der Zustand bleibt unverändert.
+/// Reason why the server rejected an operation. The state remains unchanged.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Reject {
     NameTaken,
@@ -88,7 +88,7 @@ pub enum Reject {
     NotEmpty,
     RevMismatch,
     WouldCycle,
-    /// Der Knoten liegt nicht (mehr) am erwarteten Ort.
+    /// The node is not (or no longer) at the expected location.
     Moved,
 }
 
@@ -103,8 +103,8 @@ pub enum RemoteResult {
         rev: Rev,
         seq: Seq,
     },
-    /// `Upload` mit veralteter Basis: Der Server hat den hochgeladenen Inhalt als neuen Knoten
-    /// (Konfliktkopie) neben dem Original abgelegt. Nichts wurde überschrieben.
+    /// `Upload` with an outdated base: the server stored the uploaded content as a new node
+    /// (conflict copy) next to the original. Nothing was overwritten.
     Conflict {
         node: NodeId,
         rev: Rev,
@@ -117,34 +117,35 @@ pub enum RemoteResult {
         seq: Seq,
     },
     Rejected(Reject),
-    /// Die lokale Quelldatei hat sich vor oder während des Hochladens geändert. Nichts wurde übernommen.
+    /// The local source file changed before or during the upload. Nothing was applied.
     SourceChanged,
-    /// Netzwerkfehler o.ä.: Ob die Operation ausgeführt wurde, ist unbekannt. Später mit derselben ID wiederholen.
+    /// Network error or similar: whether the operation was executed is unknown. Retry later with
+    /// the same ID.
     Transient,
 }
 
-/// Erwarteter Zustand einer lokalen Datei vor einer Operation, die sie ersetzt oder löscht.
+/// Expected state of a local file before an operation that replaces or deletes it.
 ///
-/// Der Ausführende prüft den Fingerprint und – wenn der Fingerprint im unsicheren Zeitfenster liegt
-/// (grobe Zeitstempel, gerade geschrieben) – zusätzlich den Inhalt durch erneutes Hashen.
+/// The executor checks the fingerprint and – if the fingerprint lies in the unsafe time window
+/// (coarse timestamps, just written) – additionally the content by rehashing it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Expected {
     pub fp: Fingerprint,
     pub content: FileContent,
 }
 
-/// Operation im lokalen Dateisystem.
+/// Operation on the local file system.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum LocalOp {
-    /// Ordner anlegen. Schlägt fehl, wenn der Name belegt ist.
+    /// Create a directory. Fails if the name is taken.
     CreateDir {
         parent: LocalId,
         name: Name,
         node: NodeId,
         node_parent: NodeId,
     },
-    /// Neue Datei herunterladen: in eine temporäre Datei schreiben, Hash prüfen, dann ohne Ersetzen
-    /// an den Zielnamen verschieben. Schlägt fehl, wenn der Name belegt ist.
+    /// Download a new file: write it to a temporary file, verify the hash, then move it to the
+    /// target name without replacing. Fails if the name is taken.
     Download {
         parent: LocalId,
         name: Name,
@@ -153,10 +154,10 @@ pub enum LocalOp {
         rev: Rev,
         content: FileContent,
     },
-    /// Inhalt einer bestehenden Datei ersetzen, aber nur, wenn sie noch unter `parent`/`name` liegt
-    /// und `expect` entspricht. Der Ausführende tauscht die fertige neue Datei atomar mit dem
-    /// Original und prüft das ausgetauschte Original danach erneut; hat es sich in der Zwischenzeit
-    /// geändert, wird zurückgetauscht (nichts geht verloren).
+    /// Replace the content of an existing file, but only if it is still at `parent`/`name` and
+    /// matches `expect`. The executor atomically swaps the finished new file with the original and
+    /// then checks the swapped-out original again; if it has changed in the meantime, the swap is
+    /// reverted (nothing is lost).
     Replace {
         local: LocalId,
         parent: LocalId,
@@ -166,8 +167,9 @@ pub enum LocalOp {
         rev: Rev,
         content: FileContent,
     },
-    /// Umbenennen/Verschieben ohne Ersetzen. Prüft, dass das Objekt noch unter `from_parent`/`from_name` liegt.
-    /// `synced_to`: Ort, der danach als vereinbart gilt (`None` bei rein lokalen Ausweich-Umbenennungen).
+    /// Rename/move without replacing. Checks that the object is still at `from_parent`/`from_name`.
+    /// `synced_to`: the location that counts as agreed afterwards (`None` for purely local renames
+    /// that only move an object out of the way).
     Move {
         local: LocalId,
         from_parent: LocalId,
@@ -176,9 +178,9 @@ pub enum LocalOp {
         name: Name,
         synced_to: Option<(NodeId, Name)>,
     },
-    /// Datei löschen, aber nur, wenn sie noch unter `parent`/`name` liegt und `expect` entspricht.
-    /// Der Ausführende verschiebt sie dazu in den eigenen Papierkorb und prüft sie dort erneut;
-    /// hat sie sich geändert, kommt sie zurück.
+    /// Delete a file, but only if it is still at `parent`/`name` and matches `expect`.
+    /// To do so, the executor moves it into its own trash and checks it again there;
+    /// if it has changed, it is moved back.
     DeleteFile {
         local: LocalId,
         parent: LocalId,
@@ -186,7 +188,7 @@ pub enum LocalOp {
         expect: Expected,
         node: NodeId,
     },
-    /// Ordner löschen, aber nur, wenn er leer ist und unter `parent`/`name` liegt.
+    /// Delete a directory, but only if it is empty and is at `parent`/`name`.
     DeleteDir {
         local: LocalId,
         parent: LocalId,
@@ -197,18 +199,18 @@ pub enum LocalOp {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum LocalResult {
-    /// Ausgeführt. `id`/`fp` beschreiben das Ergebnisobjekt (bei `Replace` evtl. eine neue Identität).
+    /// Executed. `id`/`fp` describe the resulting object (possibly a new identity for `Replace`).
     Done {
         id: LocalId,
         fp: Option<Fingerprint>,
     },
-    /// Vorbedingung verletzt (geändert, verschwunden, Name belegt). Nichts wurde verändert.
+    /// Precondition violated (changed, gone, name taken). Nothing was changed.
     Precondition,
-    /// Sonstiger Fehler. Nichts wurde verändert.
+    /// Other error. Nothing was changed.
     Error,
 }
 
-/// Eine geplante Operation.
+/// A planned operation.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Op {
     Remote(OpId, RemoteOp),

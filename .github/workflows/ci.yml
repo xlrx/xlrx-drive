@@ -4,7 +4,7 @@ on:
   push:
   pull_request:
   schedule:
-    - cron: "17 2 * * *" # nächtliche Langläufe des Simulators
+    - cron: "17 2 * * *" # nightly long simulator runs
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,7 +14,7 @@ jobs:
     name: Rust (fmt, clippy, Tests)
     runs-on: ubuntu-latest
     services:
-      # Gleiche Hauptversion wie im Betrieb (PLAN 13.2).
+      # Same major version as in production (PLAN 13.2).
       postgres:
         image: pgvector/pgvector:pg18
         env:
@@ -91,7 +91,7 @@ jobs:
       - run: cargo build --release -p xlrx-sim -p xlrx-chunk -p xlrx-server --examples --bins
         env:
           RUSTFLAGS: "-C target-cpu=x86-64-v2"
-      # Denverton = Atom C3000 (Goldmont), wie der J3455 ohne AVX. Ein "Illegal instruction" bricht den Build.
+      # Denverton = Atom C3000 (Goldmont), like the J3455 without AVX. An "Illegal instruction" fails the build.
       - run: qemu-x86_64 -cpu Denverton target/release/xlrx-sim --count 20
       - run: qemu-x86_64 -cpu Denverton target/release/examples/hashdir crates
       - run: qemu-x86_64 -cpu Denverton target/release/xlrx-server bench-argon2 4096 1 1

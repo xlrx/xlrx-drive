@@ -1,5 +1,5 @@
-//! TOTP nach RFC 6238 (HMAC-SHA1, 6 Ziffern, 30 s, ±1 Zeitschritt), kompatibel mit jeder
-//! Authenticator-App. Bewusst selbst umgesetzt (wenige Zeilen, mit den RFC-Testvektoren geprüft).
+//! TOTP per RFC 6238 (HMAC-SHA1, 6 digits, 30 s, ±1 time step), compatible with any authenticator
+//! app. Deliberately implemented in-house (a few lines, verified against the RFC test vectors).
 
 use hmac::{Hmac, KeyInit, Mac};
 use sha1::Sha1;
@@ -9,12 +9,12 @@ pub const STEP_SECS: u64 = 30;
 pub const DIGITS: usize = 6;
 pub const ISSUER: &str = "xlrx-drive";
 
-/// Neues Geheimnis (160 Bit, wie von RFC 4226 empfohlen).
+/// New secret (160 bits, as recommended by RFC 4226).
 pub fn new_secret() -> Vec<u8> {
     crate::auth::tokens::random_bytes::<20>().to_vec()
 }
 
-/// HOTP (RFC 4226) für einen Zeitschritt.
+/// HOTP (RFC 4226) for one time step.
 pub fn code_at_step(secret: &[u8], step: u64) -> String {
     let mut mac = <Hmac<Sha1> as KeyInit>::new_from_slice(secret)
         .expect("HMAC akzeptiert jede Schlüssellänge");
@@ -32,8 +32,8 @@ pub fn current_step(now_unix: u64) -> u64 {
     now_unix / STEP_SECS
 }
 
-/// Prüft einen Code gegen die Zeitschritte t-1, t, t+1 und liefert den passenden Schritt.
-/// Schritte bis einschließlich `last_used` werden abgelehnt (jeder Code gilt nur einmal).
+/// Checks a code against the time steps t-1, t, t+1 and returns the matching step.
+/// Steps up to and including `last_used` are rejected (each code is valid only once).
 pub fn verify(secret: &[u8], code: &str, now_unix: u64, last_used: Option<i64>) -> Option<i64> {
     let code: String = code.chars().filter(|c| !c.is_whitespace()).collect();
     if code.len() != DIGITS || !code.bytes().all(|b| b.is_ascii_digit()) {
@@ -41,7 +41,7 @@ pub fn verify(secret: &[u8], code: &str, now_unix: u64, last_used: Option<i64>) 
     }
     let t = current_step(now_unix);
     let mut found = None;
-    // Alle Kandidaten prüfen (gleiche Laufzeit unabhängig vom Treffer).
+    // Check all candidates (same running time regardless of which one matches).
     for step in [t.saturating_sub(1), t, t + 1] {
         let expected = code_at_step(secret, step);
         let hit: bool = expected.as_bytes().ct_eq(code.as_bytes()).into();
@@ -53,7 +53,7 @@ pub fn verify(secret: &[u8], code: &str, now_unix: u64, last_used: Option<i64>) 
     found
 }
 
-/// Base32 (RFC 4648) ohne Auffüllung, wie Authenticator-Apps es erwarten.
+/// Base32 (RFC 4648) without padding, as authenticator apps expect it.
 pub fn secret_base32(secret: &[u8]) -> String {
     const A: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     let mut out = String::new();
@@ -86,7 +86,7 @@ pub fn otpauth_url(secret: &[u8], account: &str) -> String {
     )
 }
 
-/// QR-Code der otpauth-URL als SVG.
+/// QR code of the otpauth URL as SVG.
 pub fn qr_svg(url: &str) -> String {
     match qrcode::QrCode::new(url.as_bytes()) {
         Ok(code) => code
@@ -102,7 +102,7 @@ pub fn qr_svg(url: &str) -> String {
 mod tests {
     use super::*;
 
-    // RFC 6238, Anhang B (SHA-1, Geheimnis „12345678901234567890“), letzte 6 Ziffern.
+    // RFC 6238, Appendix B (SHA-1, secret "12345678901234567890"), last 6 digits.
     const RFC_SECRET: &[u8] = b"12345678901234567890";
 
     #[test]

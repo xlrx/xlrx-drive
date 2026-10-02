@@ -1,6 +1,6 @@
 [package]
 name = "xlrx-sim"
-description = "Deterministischer Simulator für die Sync-Engine von xlrx-drive"
+description = "Deterministic simulator for the xlrx-drive sync engine"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

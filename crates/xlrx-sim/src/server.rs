@@ -1,5 +1,5 @@
-//! Simulierter Server: Knotenbaum, Journal mit Sequenznummern, Idempotenz pro (Client, OpId)
-//! und dieselben Konfliktregeln wie der echte Server.
+//! Simulated server: node tree, journal with sequence numbers, idempotency per (client, OpId)
+//! and the same conflict rules as the real server.
 
 use std::collections::BTreeMap;
 
@@ -22,11 +22,11 @@ pub struct SimServer {
     pub root: NodeId,
     seq: u64,
     next_node: u64,
-    /// Kompaktes Journal: Knoten → Sequenz der letzten Änderung.
+    /// Compact journal: node → sequence number of its last change.
     journal: BTreeMap<NodeId, u64>,
     dedup: BTreeMap<(usize, OpId), RemoteResult>,
-    /// Namensprüfung exakt statt ohne Groß-/Kleinschreibung (wie bei Zugriff per SMB/Shell auf das
-    /// Dateisystem des NAS). Damit entstehen Varianten wie „A“ und „a“ im selben Ordner.
+    /// Exact name check instead of a case-insensitive one (as with SMB/shell access to the NAS
+    /// file system). This produces variants like "A" and "a" in the same folder.
     pub exact_names: bool,
 }
 
@@ -75,8 +75,8 @@ impl SimServer {
             .collect()
     }
 
-    /// Der Server erzwingt eindeutige Namen ohne Rücksicht auf Groß-/Kleinschreibung
-    /// (außer bei [`Self::exact_names`]).
+    /// The server enforces names that are unique regardless of case
+    /// (except with [`Self::exact_names`]).
     pub fn occupant(&self, p: NodeId, name: &Name, except: Option<NodeId>) -> Option<NodeId> {
         let k = name.fold_key();
         let exact = self.exact_names;
@@ -95,7 +95,7 @@ impl SimServer {
             .map(|(id, _)| *id)
     }
 
-    /// Liegt der Knoten lebend genau unter `parent`/`name`?
+    /// Is the node alive and located exactly at `parent`/`name`?
     fn located(&self, n: NodeId, parent: NodeId, name: &Name) -> bool {
         self.nodes
             .get(&n)
@@ -118,7 +118,7 @@ impl SimServer {
         }
     }
 
-    /// Änderungen seit `cursor` (aktueller Zustand je geändertem Knoten) und neuer Cursor.
+    /// Changes since `cursor` (current state of each changed node) and the new cursor.
     pub fn changes_since(&self, cursor: Seq) -> (Vec<RemoteChange>, Seq) {
         let changes = self
             .journal
@@ -156,7 +156,7 @@ impl SimServer {
         }
     }
 
-    // --- Mutationen (auch von „Server-Nutzern“ wie Web-UI oder SMB verwendet) ---
+    // --- Mutations (also used by "server users" such as the web UI or SMB) ---
 
     pub fn create(
         &mut self,
@@ -222,7 +222,7 @@ impl SimServer {
         Ok(self.bump(&[n]))
     }
 
-    /// Löscht rekursiv (Papierkorb). Liefert die Inhalte aller gelöschten Dateien.
+    /// Deletes recursively (to the trash). Returns the contents of all deleted files.
     pub fn delete_tree(&mut self, n: NodeId) -> Vec<FileContent> {
         let mut stack = vec![n];
         let mut all = Vec::new();
@@ -243,10 +243,10 @@ impl SimServer {
         contents
     }
 
-    // --- API für Clients (idempotent) ---
+    // --- API for clients (idempotent) ---
 
-    /// Ergebnis einer schon ausgeführten Operation (Idempotenz). Der echte Client fragt das ab,
-    /// bevor er Inhalt hochlädt: Eine wiederholte Operation braucht die Quelldatei nicht mehr.
+    /// Result of an already executed operation (idempotency). The real client queries this
+    /// before uploading content: a repeated operation no longer needs the source file.
     pub fn known_result(&self, client: usize, op_id: OpId) -> Option<RemoteResult> {
         self.dedup.get(&(client, op_id)).cloned()
     }
@@ -290,7 +290,7 @@ impl SimServer {
                         self.write(*node, *content)
                             .map(|(rev, seq)| RemoteResult::Updated { rev, seq })
                     } else {
-                        // Konflikt: nichts überschreiben, hochgeladenen Inhalt daneben ablegen.
+                        // Conflict: overwrite nothing, store the uploaded content next to it.
                         let name = self.free_name(x.parent, &x.name, &format!("Konflikt {device}"));
                         self.create(x.parent, &name, Kind::File, Some(*content))
                             .map(|(node, rev, seq)| RemoteResult::Conflict { node, rev, seq })
@@ -346,7 +346,7 @@ impl SimServer {
         res.unwrap_or_else(RemoteResult::Rejected)
     }
 
-    /// Pfad → (Art, Inhalt) aller lebenden Knoten.
+    /// Path → (kind, content) of all live nodes.
     pub fn listing(&self) -> BTreeMap<String, (Kind, Option<FileContent>)> {
         let mut out = BTreeMap::new();
         for (id, x) in &self.nodes {

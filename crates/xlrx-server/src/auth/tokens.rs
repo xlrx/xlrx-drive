@@ -1,7 +1,7 @@
-//! Zufällige Tokens (Sitzungen, Einladungen, Zwischenschritte) und Wiederherstellungscodes.
+//! Random tokens (sessions, invites, intermediate steps) and recovery codes.
 //!
-//! In der Datenbank liegt immer nur der SHA-256 eines Tokens. Tokens haben 256 Bit Zufall,
-//! Wiederherstellungscodes 80 Bit; ein schneller Hash genügt deshalb.
+//! The database only ever stores the SHA-256 of a token. Tokens carry 256 bits of randomness,
+//! recovery codes 80 bits; a fast hash is therefore sufficient.
 
 use base64::Engine as _;
 use rand::Rng as _;
@@ -13,7 +13,7 @@ pub fn random_bytes<const N: usize>() -> [u8; N] {
     b
 }
 
-/// Neues Token (Base64url, 43 Zeichen) und sein Hash.
+/// New token (Base64url, 43 characters) and its hash.
 pub fn new_token() -> (String, Vec<u8>) {
     let t = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random_bytes::<32>());
     let h = hash_token(&t);
@@ -26,7 +26,7 @@ pub fn hash_token(token: &str) -> Vec<u8> {
 
 const B32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
-/// Ein Wiederherstellungscode „ABCD-EFGH-JKLM-NPQR“ (16 Zeichen Base32 = 80 Bit).
+/// A recovery code "ABCD-EFGH-JKLM-NPQR" (16 Base32 characters = 80 bits).
 pub fn new_recovery_code() -> String {
     let bytes: [u8; 10] = random_bytes();
     let mut bits: u128 = 0;
@@ -44,7 +44,7 @@ pub fn new_recovery_code() -> String {
         .join("-")
 }
 
-/// Normalisiert eine Eingabe (Groß-/Kleinschreibung, Bindestriche, Leerzeichen).
+/// Normalizes an input (upper/lower case, hyphens, whitespace).
 pub fn normalize_recovery_code(input: &str) -> Option<String> {
     let s: String = input
         .chars()

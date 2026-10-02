@@ -1,4 +1,4 @@
-//! Der Synced-Baum S mit Rückwärtsindex lokale ID → Knoten und Index nach Elternknoten.
+//! The synced tree S with a reverse index local ID → node and an index by parent node.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -12,7 +12,7 @@ pub struct Synced {
     entries: BTreeMap<NodeId, SyncedEntry>,
     by_local: BTreeMap<LocalId, NodeId>,
     by_parent: BTreeMap<NodeId, BTreeSet<NodeId>>,
-    /// Zählt jede Änderung (zum Erkennen, ob ein Planungsdurchlauf etwas bewirkt hat).
+    /// Counts every change (to detect whether a planning pass had any effect).
     mutations: u64,
 }
 
@@ -29,7 +29,7 @@ impl Synced {
         self.by_local.get(&l).copied()
     }
 
-    /// Knoten, deren vereinbarter Elternknoten `p` ist.
+    /// Nodes whose agreed parent node is `p`.
     pub fn children(&self, p: NodeId) -> Vec<NodeId> {
         self.by_parent
             .get(&p)
@@ -57,8 +57,8 @@ impl Synced {
         self.entries.is_empty()
     }
 
-    /// Fügt ein oder ersetzt. Verweigert, wenn die lokale ID schon mit einem anderen Knoten verknüpft ist,
-    /// denn eine lokale Datei darf nie zwei Server-Knoten entsprechen.
+    /// Inserts or replaces. Refuses if the local ID is already linked to another node, because a
+    /// local file must never correspond to two server nodes.
     pub fn insert(&mut self, n: NodeId, e: SyncedEntry) -> bool {
         if e.local != LocalId::GONE
             && let Some(other) = self.by_local.get(&e.local)
@@ -91,7 +91,7 @@ impl Synced {
         Some(e)
     }
 
-    /// Ändert einen Eintrag. Wird dabei die lokale ID auf eine bereits vergebene gesetzt, bleibt alles unverändert.
+    /// Modifies an entry. If that would set the local ID to one already in use, nothing changes.
     pub fn update(&mut self, n: NodeId, f: impl FnOnce(&mut SyncedEntry)) -> bool {
         let Some(old) = self.entries.get(&n).cloned() else {
             return false;
@@ -104,12 +104,12 @@ impl Synced {
         self.insert(n, new)
     }
 
-    /// Gleiche Einträge (ohne Änderungszähler)?
+    /// Same entries (ignoring the change counter)?
     pub fn same_entries(&self, other: &Synced) -> bool {
         self.entries == other.entries
     }
 
-    /// Prüft die Konsistenz der Indizes.
+    /// Checks the consistency of the indexes.
     pub fn check(&self) -> Result<(), String> {
         for (n, e) in &self.entries {
             if e.local != LocalId::GONE && self.by_local.get(&e.local) != Some(n) {
@@ -136,7 +136,7 @@ impl Synced {
     }
 }
 
-/// Persistiert werden nur die Einträge; die Indizes werden beim Laden neu aufgebaut.
+/// Only the entries are persisted; the indexes are rebuilt on load.
 impl Serialize for Synced {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         self.entries.serialize(s)

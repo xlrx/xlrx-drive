@@ -1,4 +1,5 @@
-//! Fehler der API: immer JSON `{"error": "…"}` mit passendem Status. Interne Details landen nur im Log.
+//! API errors: always JSON `{"error": "…"}` with a matching status. Internal details
+//! only end up in the log.
 
 use axum::Json;
 use axum::http::StatusCode;

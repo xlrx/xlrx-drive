@@ -1,14 +1,14 @@
-//! Sans-IO Sync-Engine von xlrx-drive.
+//! Sans-IO sync engine of xlrx-drive.
 //!
-//! Die Engine trifft nur Entscheidungen. Dateisystem, Netzwerk und Uhr liefert der Aufrufer:
+//! The engine only makes decisions. The caller provides the file system, network and clock:
 //!
-//! 1. Eingaben: [`Engine::on_remote_changes`] (Server-Journal), [`Engine::on_local_snapshot`] (Scan),
-//!    Ergebnisse ausgeführter Operationen ([`Engine::on_remote_result`], [`Engine::on_local_result`]).
-//! 2. Ausgabe: [`Engine::plan`] liefert Operationen mit Vorbedingungen.
-//! 3. Nach jeder Eingabe und nach `plan` wird [`Engine::state`] persistiert.
+//! 1. Inputs: [`Engine::on_remote_changes`] (server journal), [`Engine::on_local_snapshot`] (scan),
+//!    results of executed operations ([`Engine::on_remote_result`], [`Engine::on_local_result`]).
+//! 2. Output: [`Engine::plan`] returns operations with preconditions.
+//! 3. After every input and after `plan`, [`Engine::state`] is persisted.
 //!
-//! Dadurch läuft dieselbe Engine im Mac-Client, in der iOS-App und im deterministischen Simulator
-//! (`xlrx-sim`), der Millionen zufälliger Szenarien mit Abstürzen und Netzfehlern durchspielt.
+//! As a result, the same engine runs in the Mac client, the iOS app and the deterministic simulator
+//! (`xlrx-sim`), which runs millions of random scenarios with crashes and network failures.
 
 mod engine;
 mod ops;

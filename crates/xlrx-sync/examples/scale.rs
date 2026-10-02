@@ -1,5 +1,5 @@
-//! Misst die Engine bei großen Bäumen: Ersteinrichtung (verknüpfen ohne Übertragung) und
-//! einen Planungsdurchlauf im Ruhezustand.
+//! Measures the engine on large trees: initial setup (linking without transfer) and
+//! a planning pass in the idle state.
 //!
 //! `cargo run --release -p xlrx-sync --example scale -- 1000000`
 
@@ -29,7 +29,7 @@ fn main() {
     };
     let name = |s: String| Name::new(&s).expect("Name");
 
-    // Server- und lokaler Baum mit identischem Inhalt (wie nach Migration von Synology Drive).
+    // Server and local tree with identical content (as after a migration from Synology Drive).
     let mut remote = Vec::with_capacity(n as usize + dirs as usize);
     let mut local = Vec::with_capacity(n as usize + dirs as usize);
     for d in 0..dirs {
@@ -123,7 +123,7 @@ fn main() {
         t.elapsed(),
         ops.len()
     );
-    // Eine einzelne Datei wird lokal geändert (wie nach einem FSEvents-Ereignis).
+    // A single file is modified locally (as after an FSEvents event).
     let mut changed = local
         .iter()
         .rev()

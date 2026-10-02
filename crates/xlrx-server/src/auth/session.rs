@@ -1,6 +1,6 @@
-//! Web-Sitzungen: zufälliges Token im Cookie (`HttpOnly`, `Secure`, `SameSite=Strict`), in der DB nur
-//! als Hash. Leerlauf-Timeout 8 h, maximale Laufzeit 7 Tage. Sensible Aktionen verlangen einen frischen
-//! zweiten Faktor (Step-up, 10 min).
+//! Web sessions: random token in the cookie (`HttpOnly`, `Secure`, `SameSite=Strict`), in the DB
+//! only as a hash. Idle timeout 8 h, maximum lifetime 7 days. Sensitive actions require a fresh
+//! second factor (step-up, 10 min).
 
 use axum::extract::FromRequestParts;
 use axum::http::HeaderValue;
@@ -19,7 +19,7 @@ pub const IDLE: Duration = Duration::hours(8);
 pub const MAX_AGE: Duration = Duration::days(7);
 pub const STEP_UP_VALID: Duration = Duration::minutes(10);
 
-/// Angemeldete Person (aus dem Sitzungs-Cookie).
+/// Signed-in person (from the session cookie).
 #[derive(Clone, Debug)]
 pub struct CurrentUser {
     pub id: i64,
@@ -37,7 +37,7 @@ impl CurrentUser {
             .is_some_and(|t| OffsetDateTime::now_utc() - t < STEP_UP_VALID)
     }
 
-    /// Sensible Aktion: verlangt einen frischen zweiten Faktor.
+    /// Sensitive action: requires a fresh second factor.
     pub fn require_step_up(&self) -> ApiResult<()> {
         if self.step_up_valid() {
             Ok(())
@@ -55,7 +55,7 @@ impl CurrentUser {
     }
 }
 
-/// IP und User-Agent der Anfrage.
+/// IP and user agent of the request.
 #[derive(Clone, Debug)]
 pub struct ClientInfo {
     pub ip: String,
@@ -73,7 +73,7 @@ impl FromRequestParts<AppState> for ClientInfo {
             .extensions
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
             .map(|c| c.0.ip().to_string());
-        // Hinter Caddy: der letzte Eintrag von X-Forwarded-For stammt vom Proxy selbst.
+        // Behind Caddy: the last entry of X-Forwarded-For comes from the proxy itself.
         let forwarded = state
             .cfg
             .trust_proxy
@@ -160,7 +160,7 @@ impl FromRequestParts<AppState> for CurrentUser {
     }
 }
 
-/// Neue Sitzung nach vollständiger Anmeldung. Die Anmeldung selbst zählt als frischer zweiter Faktor.
+/// New session after a complete sign-in. The sign-in itself counts as a fresh second factor.
 pub async fn create(db: &PgPool, user_id: i64, client: &ClientInfo) -> ApiResult<String> {
     let (token, hash) = new_token();
     sqlx::query(

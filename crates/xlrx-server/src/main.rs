@@ -1,14 +1,14 @@
-//! `xlrx-server` – Server und Verwaltungsbefehle.
+//! `xlrx-server` – server and administration commands.
 //!
 //! ```text
-//! xlrx-server                         Server starten (Migrationen laufen automatisch)
-//! xlrx-server migrate                 nur Migrationen ausführen
+//! xlrx-server                         start the server (migrations run automatically)
+//! xlrx-server migrate                 run migrations only
 //! xlrx-server create-user NAME "Anzeigename" [--admin]
-//!                                     Konto anlegen, Einrichtungslink ausgeben
-//! xlrx-server invite NAME             neuer Einrichtungslink (z.B. nach Ablauf)
-//! xlrx-server reset-factors NAME      zweite Faktoren zurücksetzen, neuer Einrichtungslink
-//! xlrx-server gen-secret              neuen Schlüssel für XLRX_SECRET_KEY_FILE erzeugen
-//! xlrx-server bench-argon2 [M_KIB T P]  Passwort-Prüfung auf dieser CPU messen
+//!                                     create an account, print a setup link
+//! xlrx-server invite NAME             new setup link (e.g. after expiry)
+//! xlrx-server reset-factors NAME      reset second factors, new setup link
+//! xlrx-server gen-secret              generate a new key for XLRX_SECRET_KEY_FILE
+//! xlrx-server bench-argon2 [M_KIB T P]  measure a password check on this CPU
 //! ```
 
 use std::process::ExitCode;
@@ -184,7 +184,7 @@ async fn shutdown() {
     tracing::info!("Beende …");
 }
 
-/// Misst eine Passwort-Prüfung, um die Parameter auf dem NAS zu kalibrieren (Ziel ~250 ms).
+/// Measures a password check in order to calibrate the parameters on the NAS (target ~250 ms).
 fn bench_argon2(args: &[String]) -> Result<(), String> {
     let d = ArgonParams::default();
     let num = |i: usize, def: u32| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(def);

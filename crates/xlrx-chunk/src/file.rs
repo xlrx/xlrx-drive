@@ -1,4 +1,4 @@
-//! Dateien hashen, ohne veränderte Dateien fälschlich als stabil zu melden.
+//! Hashing files without falsely reporting modified files as stable.
 
 use std::fs::{File, Metadata};
 use std::io;
@@ -6,17 +6,17 @@ use std::path::Path;
 
 use crate::{Chunker, Digest};
 
-/// Identität einer Datei auf dem Gerät (Gerät + Inode). Bleibt bei Umbenennen und Verschieben gleich.
+/// Identity of a file on the device (device + inode). Stays the same across renames and moves.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct FileId {
     pub dev: u64,
     pub ino: u64,
 }
 
-/// Merkmale, die sich bei jeder Inhaltsänderung ändern.
+/// Attributes that change with every content modification.
 ///
-/// `ctime` lässt sich von Programmen nicht zurücksetzen (anders als `mtime`). Damit fallen auch
-/// Werkzeuge auf, die nach dem Schreiben die alte Änderungszeit wiederherstellen.
+/// Programs cannot reset `ctime` (unlike `mtime`). This also catches tools that restore the old
+/// modification time after writing.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Fingerprint {
     pub size: u64,
@@ -24,7 +24,7 @@ pub struct Fingerprint {
     pub ctime_ns: i64,
 }
 
-/// Liest Identität und Fingerprint aus Metadaten.
+/// Reads identity and fingerprint from metadata.
 #[cfg(unix)]
 pub fn fingerprint_of(meta: &Metadata) -> (FileId, Fingerprint) {
     use std::os::unix::fs::MetadataExt;
@@ -42,23 +42,23 @@ pub fn fingerprint_of(meta: &Metadata) -> (FileId, Fingerprint) {
     )
 }
 
-/// Ergebnis von [`digest_file`].
+/// Result of [`digest_file`].
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum FileDigest {
-    /// Die Datei war während des gesamten Lesens unverändert. Der Hash gehört zu genau diesem Fingerprint.
+    /// The file was unchanged during the entire read. The hash belongs to exactly this fingerprint.
     Stable {
         id: FileId,
         fingerprint: Fingerprint,
         digest: Digest,
     },
-    /// Die Datei wurde während des Lesens verändert. Später erneut versuchen.
+    /// The file was modified while being read. Try again later.
     ChangedDuringRead,
 }
 
-/// Hasht eine Datei und prüft vorher und nachher, ob sie unverändert geblieben ist.
+/// Hashes a file and checks before and after whether it remained unchanged.
 ///
-/// Ein Hash wird nur dann einem Fingerprint zugeordnet, wenn beide Messungen übereinstimmen und die
-/// gelesene Länge zur Dateigröße passt. Halb geschriebene Dateien werden so nie als stabil gemeldet.
+/// A hash is only associated with a fingerprint if both measurements match and the length read
+/// matches the file size. This way, half-written files are never reported as stable.
 #[cfg(unix)]
 pub fn digest_file(chunker: &mut Chunker, path: &Path) -> io::Result<FileDigest> {
     let file = File::open(path)?;

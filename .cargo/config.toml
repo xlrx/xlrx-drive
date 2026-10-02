@@ -1,4 +1,4 @@
-# Wichtig: KEIN `target-cpu=native` und keine AVX-Annahmen.
-# Die Server-Binaries müssen auf dem DS918+ (Celeron J3455, nur SSE4.2 / x86-64-v2) laufen.
-# SIMD-Code (z.B. BLAKE3) wählt seine Implementierung zur Laufzeit.
+# Important: NO `target-cpu=native` and no AVX assumptions.
+# The server binaries must run on the DS918+ (Celeron J3455, SSE4.2 only / x86-64-v2).
+# SIMD code (e.g. BLAKE3) selects its implementation at runtime.
 [build]

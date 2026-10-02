@@ -1,4 +1,4 @@
-//! Passwörter: argon2id, Mindestanforderungen und lokale Sperrliste (ohne Anfrage nach außen).
+//! Passwords: argon2id, minimum requirements and a local blocklist (no outbound requests).
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -13,8 +13,8 @@ pub const MAX_LEN: usize = 1024;
 
 pub struct Passwords {
     argon: Argon2<'static>,
-    /// Hash eines zufälligen Passworts: Bei unbekannten Konten wird dagegen geprüft, damit
-    /// Antwort und Antwortzeit gleich sind wie bei einem falschen Passwort.
+    /// Hash of a random password: unknown accounts are checked against it, so that the response
+    /// and response time are the same as for a wrong password.
     dummy: String,
     blocklist: HashSet<String>,
 }
@@ -55,14 +55,14 @@ impl Passwords {
             .map_err(|e| e.to_string())
     }
 
-    /// Prüft ein Passwort. Ohne gespeicherten Hash wird gegen den Platzhalter geprüft (gleiche Dauer)
-    /// und immer `false` geliefert.
+    /// Verifies a password. Without a stored hash, it is checked against the placeholder (same
+    /// duration) and `false` is always returned.
     pub fn verify(&self, stored: Option<&str>, password: &str) -> bool {
         let (hash, real) = match stored {
             Some(h) => (h, true),
             None => (self.dummy.as_str(), false),
         };
-        // Die Parameter stehen im Hash: alte Hashes bleiben nach einer Neukalibrierung gültig.
+        // The parameters are stored in the hash: old hashes remain valid after a recalibration.
         let ok = self
             .argon
             .verify_password(password.as_bytes(), hash)
@@ -70,7 +70,7 @@ impl Passwords {
         ok && real
     }
 
-    /// Mindestanforderungen. Fehlertext für die Oberfläche.
+    /// Minimum requirements. Error text is meant for the UI.
     pub fn check_policy(&self, password: &str, username: &str) -> Result<(), String> {
         let n = password.chars().count();
         if n < MIN_LEN {

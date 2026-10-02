@@ -1,6 +1,6 @@
 [package]
 name = "xlrx-proto"
-description = "Gemeinsame Typen für Server und Clients von xlrx-drive"
+description = "Types shared by the xlrx-drive server and clients"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

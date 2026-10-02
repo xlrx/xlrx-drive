@@ -1,14 +1,14 @@
-//! Content-Defined Chunking und Hashing für xlrx-drive.
+//! Content-defined chunking and hashing for xlrx-drive.
 //!
 //! # Schema `xlrx-content-v1`
 //!
-//! - Chunk-Grenzen: FastCDC 2020, Normalisierung Stufe 1, min 256 KiB / avg 1 MiB / max 4 MiB.
-//! - Chunk-Hash: BLAKE3 der Chunk-Bytes.
-//! - Inhalts-Hash: BLAKE3 im Derive-Key-Modus über (Größe, Anzahl Chunks, je Chunk: Hash und Länge).
+//! - Chunk boundaries: FastCDC 2020, normalization level 1, min 256 KiB / avg 1 MiB / max 4 MiB.
+//! - Chunk hash: BLAKE3 of the chunk bytes.
+//! - Content hash: BLAKE3 in derive-key mode over (size, chunk count, per chunk: hash and length).
 //!
-//! Der Inhalts-Hash wird aus der Chunk-Liste abgeleitet. So reicht **ein** Lesedurchgang pro Datei,
-//! und große Dateien können parallel gehasht werden. Die Parameter sind Teil des Schemas und dürfen
-//! sich nie ändern; ein Golden-Test sichert das ab.
+//! The content hash is derived from the chunk list. That way, **one** read pass per file suffices,
+//! and large files can be hashed in parallel. The parameters are part of the schema and must never
+//! change; a golden test guards this.
 
 mod cache;
 mod file;
@@ -21,25 +21,25 @@ pub use file::{FileDigest, FileId, Fingerprint};
 pub use file::{digest_file, fingerprint_of};
 use xlrx_proto::{ContentHash, FileContent};
 
-/// Kleinste Chunk-Größe (außer beim letzten Chunk einer Datei).
+/// Smallest chunk size (except for the last chunk of a file).
 pub const CHUNK_MIN: usize = 256 * 1024;
-/// Angestrebte durchschnittliche Chunk-Größe.
+/// Target average chunk size.
 pub const CHUNK_AVG: usize = 1024 * 1024;
-/// Größte Chunk-Größe.
+/// Largest chunk size.
 pub const CHUNK_MAX: usize = 4 * 1024 * 1024;
 
-/// Kontext für den Inhalts-Hash. Global eindeutig und fest, siehe BLAKE3 `derive_key`.
+/// Context for the content hash. Globally unique and fixed, see BLAKE3 `derive_key`.
 const CONTENT_CONTEXT: &str = "xlrx-drive 2026-10-02 content-v1";
 
-/// Größe des Lesepuffers. Muss deutlich größer als [`CHUNK_MAX`] sein, damit pro Füllung mehrere
-/// Chunks entstehen und der verbleibende Rest, der umkopiert wird, klein bleibt.
+/// Size of the read buffer. Must be much larger than [`CHUNK_MAX`] so that each fill yields
+/// several chunks and the leftover that gets copied over stays small.
 const BUF_SIZE: usize = 16 * 1024 * 1024;
 
-/// Ab dieser Datenmenge pro Puffer lohnt sich paralleles Hashen der Chunks.
+/// From this amount of data per buffer on, hashing the chunks in parallel pays off.
 #[cfg(feature = "parallel")]
 const PARALLEL_MIN_BYTES: usize = 2 * CHUNK_AVG;
 
-/// BLAKE3-Hash eines einzelnen Chunks.
+/// BLAKE3 hash of a single chunk.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChunkHash(pub [u8; 32]);
 
@@ -53,29 +53,29 @@ impl std::fmt::Debug for ChunkHash {
     }
 }
 
-/// Ein Chunk einer Datei.
+/// A chunk of a file.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ChunkInfo {
     pub hash: ChunkHash,
-    /// Position in der Datei.
+    /// Position in the file.
     pub offset: u64,
-    /// Länge in Bytes (höchstens [`CHUNK_MAX`]).
+    /// Length in bytes (at most [`CHUNK_MAX`]).
     pub len: u32,
 }
 
-/// Ergebnis des Hashens: Inhalt (Hash + Größe) und Chunk-Liste.
+/// Result of hashing: content (hash + size) and chunk list.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Digest {
     pub content: FileContent,
     pub chunks: Vec<ChunkInfo>,
 }
 
-/// Hasht einen einzelnen Chunk.
+/// Hashes a single chunk.
 pub fn chunk_hash(data: &[u8]) -> ChunkHash {
     ChunkHash(*blake3::hash(data).as_bytes())
 }
 
-/// Leitet den Inhalts-Hash aus Größe und Chunk-Liste ab (Schema `xlrx-content-v1`).
+/// Derives the content hash from size and chunk list (schema `xlrx-content-v1`).
 pub fn content_hash(size: u64, chunks: &[ChunkInfo]) -> ContentHash {
     let mut h = blake3::Hasher::new_derive_key(CONTENT_CONTEXT);
     h.update(&size.to_le_bytes());
@@ -87,8 +87,8 @@ pub fn content_hash(size: u64, chunks: &[ChunkInfo]) -> ContentHash {
     ContentHash(*h.finalize().as_bytes())
 }
 
-/// Wiederverwendbarer Chunker. Hält den Lesepuffer, damit pro Datei nichts neu alloziert wird.
-/// Für paralleles Hashen vieler Dateien: ein `Chunker` pro Thread.
+/// Reusable chunker. Keeps the read buffer so that nothing is reallocated per file.
+/// For hashing many files in parallel: one `Chunker` per thread.
 pub struct Chunker {
     buf: Vec<u8>,
     mask_s: u64,
@@ -116,10 +116,10 @@ impl Chunker {
         }
     }
 
-    /// Länge des nächsten Chunks ab dem Anfang von `window`.
+    /// Length of the next chunk starting at the beginning of `window`.
     ///
-    /// `window` muss entweder mindestens [`CHUNK_MAX`] Bytes lang sein oder bis zum Dateiende reichen,
-    /// sonst wäre der Schnittpunkt nicht endgültig.
+    /// `window` must either be at least [`CHUNK_MAX`] bytes long or extend to the end of the file;
+    /// otherwise the cut point would not be final.
     fn next_cut(&self, window: &[u8]) -> usize {
         let window = &window[..window.len().min(CHUNK_MAX)];
         let (_, len) = fastcdc::v2020::cut(
@@ -135,7 +135,7 @@ impl Chunker {
         len
     }
 
-    /// Hasht Daten, die vollständig im Speicher liegen (ohne Umkopieren).
+    /// Hashes data that lies entirely in memory (without copying).
     pub fn digest_slice(&mut self, data: &[u8]) -> Digest {
         self.ranges.clear();
         let mut pos = 0;
@@ -163,15 +163,15 @@ impl Chunker {
         }
     }
 
-    /// Liest bis zum Ende und hasht dabei in einem einzigen Durchgang.
+    /// Reads to the end, hashing in a single pass.
     pub fn digest_reader<R: Read>(&mut self, mut reader: R) -> io::Result<Digest> {
         if self.buf.len() != BUF_SIZE {
             self.buf = vec![0; BUF_SIZE];
         }
-        let mut start = 0usize; // Beginn des noch nicht verarbeiteten Bereichs im Puffer
-        let mut end = 0usize; // Ende der gültigen Daten im Puffer
+        let mut start = 0usize; // Start of the not yet processed region in the buffer
+        let mut end = 0usize; // End of the valid data in the buffer
         let mut eof = false;
-        let mut offset = 0u64; // Dateiposition von buf[start]
+        let mut offset = 0u64; // File position of buf[start]
         let mut chunks = Vec::new();
 
         loop {
@@ -192,7 +192,7 @@ impl Chunker {
                 break;
             }
 
-            // Alle Schnittpunkte sammeln, die mit den vorhandenen Daten endgültig sind.
+            // Collect all cut points that are final given the data available.
             self.ranges.clear();
             let mut pos = start;
             while pos < end && (eof || end - pos >= CHUNK_MAX) {
@@ -223,7 +223,7 @@ impl Chunker {
     }
 }
 
-/// Hasht die angegebenen Bereiche, bei genügend Daten parallel.
+/// Hashes the given ranges, in parallel if there is enough data.
 fn hash_ranges(buf: &[u8], ranges: &[(usize, usize)], out: &mut Vec<ChunkHash>) {
     out.clear();
     #[cfg(feature = "parallel")]
@@ -246,7 +246,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    /// Deterministische Pseudozufallsdaten (xorshift64*), unabhängig von externen Crates.
+    /// Deterministic pseudo-random data (xorshift64*), independent of external crates.
     pub(crate) fn pseudo_random(len: usize, seed: u64) -> Vec<u8> {
         let mut x = seed | 1;
         let mut out = Vec::with_capacity(len + 8);
@@ -260,7 +260,7 @@ mod tests {
         out
     }
 
-    /// Liefert Daten in unregelmäßigen, kleinen Häppchen, wie ein Netzwerk-Stream.
+    /// Delivers data in small, irregular pieces, like a network stream.
     struct Choppy<'a> {
         data: &'a [u8],
         pos: usize,
@@ -356,8 +356,8 @@ mod tests {
         assert_ne!(a.content.hash, empty.content.hash);
     }
 
-    /// Schützt das Schema: Ändern sich Chunk-Grenzen oder Hash-Ableitung, schlägt dieser Test fehl.
-    /// Dann darf NICHT einfach der Erwartungswert angepasst werden, sondern es braucht ein neues Schema.
+    /// Protects the schema: if the chunk boundaries or the hash derivation change, this test fails.
+    /// In that case, do NOT simply adjust the expected value; a new schema is required instead.
     #[test]
     fn golden_schema_v1() {
         let data = pseudo_random(20 * 1024 * 1024, 2026);

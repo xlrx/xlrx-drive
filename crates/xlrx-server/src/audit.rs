@@ -1,4 +1,4 @@
-//! Audit-Log: Anmeldungen, Änderungen an Faktoren, Admin-Aktionen (PLAN 16).
+//! Audit log: sign-ins, changes to factors, admin actions (PLAN 16).
 
 use sqlx::PgPool;
 

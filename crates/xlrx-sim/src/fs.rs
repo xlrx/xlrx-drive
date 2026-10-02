@@ -1,5 +1,5 @@
-//! Simuliertes lokales Dateisystem mit Inodes, POSIX-ähnlichem `rename` und optional
-//! Groß-/Kleinschreibungs-unabhängigen Namen (wie APFS).
+//! Simulated local file system with inodes, POSIX-like `rename` and optionally
+//! case-insensitive names (like APFS).
 
 use std::collections::BTreeMap;
 
@@ -22,10 +22,10 @@ pub struct SimFs {
     pub root: u64,
     next_ino: u64,
     pub case_insensitive: bool,
-    /// Auflösung der Zeitstempel (1 = exakt). Grobe Zeitstempel (z.B. exFAT: 2 s) lassen zwei
-    /// Änderungen kurz hintereinander denselben Fingerprint haben.
+    /// Timestamp resolution (1 = exact). Coarse timestamps (e.g. exFAT: 2 s) give two changes in
+    /// quick succession the same fingerprint.
     pub granularity: i64,
-    /// Hash-Cache des Clients: Inode → (Fingerprint, Zeitpunkt des Hashens, Inhalt).
+    /// The client's hash cache: inode → (fingerprint, time of hashing, content).
     cache: BTreeMap<u64, (Fingerprint, i64, FileContent)>,
 }
 
@@ -79,7 +79,7 @@ impl SimFs {
             .map(|(id, _)| *id)
     }
 
-    /// Liegt `ino` gleich `anc` oder darunter?
+    /// Is `ino` equal to `anc` or below it?
     pub fn within(&self, ino: u64, anc: u64) -> bool {
         let mut cur = ino;
         loop {
@@ -107,10 +107,10 @@ impl SimFs {
         })
     }
 
-    /// Inhalt einer Datei, wie ihn der Client sieht: aus dem Hash-Cache, wenn der Fingerprint
-    /// unverändert ist und der Hash erst nach dem Zeitstempel-Intervall der letzten Änderung
-    /// entstand (sonst könnte eine spätere Änderung im selben Intervall unsichtbar sein);
-    /// andernfalls wird neu „gehasht“. So arbeiten Scanner und Ausführender im echten Client.
+    /// Content of a file as the client sees it: from the hash cache if the fingerprint is
+    /// unchanged and the hash was taken only after the timestamp interval of the last change
+    /// (otherwise a later change within the same interval could go unnoticed);
+    /// otherwise it is "rehashed". This is how scanner and executor work in the real client.
     pub fn hashed_content(&mut self, ino: u64, now: i64) -> Option<FileContent> {
         let fp = self.fingerprint(ino)?;
         let g = self.granularity.max(1);
@@ -125,7 +125,7 @@ impl SimFs {
         Some(c)
     }
 
-    /// Scan, wie ihn der Client liefert: Inhalte über den Hash-Cache.
+    /// Scan as the client delivers it: contents via the hash cache.
     pub fn scan(&mut self, now: i64) -> Vec<LocalObservation> {
         let ids: Vec<u64> = self.inodes.keys().copied().collect();
         self.cache.retain(|k, _| ids.binary_search(k).is_ok());
@@ -188,8 +188,8 @@ impl SimFs {
         Ok(())
     }
 
-    /// Umbenennen. Mit `replace` wird eine vorhandene Zieldatei ersetzt (POSIX-Semantik);
-    /// zurückgegeben wird dann deren Inode (gelöscht).
+    /// Rename. With `replace`, an existing target file is replaced (POSIX semantics);
+    /// its (now deleted) inode is then returned.
     pub fn rename(
         &mut self,
         ino: u64,
@@ -245,7 +245,7 @@ impl SimFs {
         }
     }
 
-    /// Löscht rekursiv und liefert alle entfernten Dateien.
+    /// Deletes recursively and returns all removed files.
     pub fn rm_rf(&mut self, ino: u64) -> Vec<Inode> {
         let mut out = Vec::new();
         for c in self.children(ino) {
@@ -257,7 +257,7 @@ impl SimFs {
         out
     }
 
-    /// Tatsächlicher Stand (Inhalt immer exakt, ohne Hash-Cache).
+    /// Actual state (content always exact, bypassing the hash cache).
     pub fn snapshot(&self) -> Vec<LocalObservation> {
         self.inodes
             .iter()
@@ -274,7 +274,7 @@ impl SimFs {
             .collect()
     }
 
-    /// Pfad → (Art, Inhalt), für den Endvergleich.
+    /// Path → (kind, content), for the final comparison.
     pub fn listing(&self) -> BTreeMap<String, (Kind, Option<FileContent>)> {
         let mut out = BTreeMap::new();
         for (id, i) in &self.inodes {

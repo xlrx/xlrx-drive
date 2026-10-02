@@ -1,4 +1,4 @@
-//! Konfiguration aus Umgebungsvariablen (siehe `deploy/docker-compose.yml`).
+//! Configuration from environment variables (see `deploy/docker-compose.yml`).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -10,26 +10,26 @@ use url::Url;
 pub struct Config {
     pub database_url: String,
     pub bind: SocketAddr,
-    /// Öffentliche Adresse, z.B. `https://drive.example.de`. Bestimmt Cookie-`Secure`, erlaubte
-    /// Origin und den Passkey-Ursprung.
+    /// Public address, e.g. `https://drive.example.de`. Determines the cookie `Secure` flag, the
+    /// allowed origin and the passkey origin.
     pub public_url: Url,
-    /// Weitere erlaubte Origins, z.B. der LAN-Endpunkt `https://drive-lan.example.de` (PLAN 5.9).
+    /// Further allowed origins, e.g. the LAN endpoint `https://drive-lan.example.de` (PLAN 5.9).
     pub extra_origins: Vec<Url>,
-    /// Relying-Party-ID für Passkeys (Domain). Standard: Host der öffentlichen Adresse. Einmal festlegen:
-    /// Eine spätere Änderung macht alle registrierten Passkeys unbrauchbar.
+    /// Relying party ID for passkeys (domain). Default: host of the public address. Set it once: a
+    /// later change renders all registered passkeys unusable.
     pub rp_id: String,
-    /// Schlüssel für Geheimnisse in der DB (TOTP). Kommt aus einem Docker-Secret, nie aus der DB.
+    /// Key for secrets in the DB (TOTP). Comes from a Docker secret, never from the DB.
     pub secret_key: [u8; 32],
-    /// Gebaute Web-App (SvelteKit, statisch). Ohne: nur API.
+    /// Built web app (SvelteKit, static). Without it: API only.
     pub web_dir: Option<PathBuf>,
-    /// `X-Forwarded-For` des vorgelagerten Proxys (Caddy) auswerten.
+    /// Evaluate `X-Forwarded-For` from the upstream proxy (Caddy).
     pub trust_proxy: bool,
     pub argon2: ArgonParams,
-    /// Zusätzliche Liste verbotener Passwörter (eine Zeile je Passwort).
+    /// Additional list of forbidden passwords (one line per password).
     pub password_blocklist: Option<PathBuf>,
 }
 
-/// Parameter für argon2id. Auf dem DS918+ (J3455) so kalibrieren, dass eine Prüfung ~250 ms dauert
+/// Parameters for argon2id. Calibrate on the DS918+ (J3455) so that one check takes ~250 ms
 /// (`xlrx-server bench-argon2`).
 #[derive(Clone, Copy, Debug)]
 pub struct ArgonParams {
@@ -40,7 +40,7 @@ pub struct ArgonParams {
 
 impl Default for ArgonParams {
     fn default() -> Self {
-        // OWASP-Empfehlung für argon2id; Feinabstimmung im M0-Spike.
+        // OWASP recommendation for argon2id; fine-tuning in the M0 spike.
         Self {
             m_kib: 19 * 1024,
             t: 2,
@@ -53,7 +53,7 @@ fn var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
-/// Liest einen 32-Byte-Schlüssel (Base64 oder Hex).
+/// Reads a 32-byte key (Base64 or hex).
 pub fn parse_key(raw: &str) -> Result<[u8; 32], String> {
     let raw = raw.trim();
     let bytes = if raw.len() == 64 && raw.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -74,7 +74,7 @@ pub fn parse_key(raw: &str) -> Result<[u8; 32], String> {
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
-        // Die URL enthält das DB-Passwort: bevorzugt aus einem Docker-Secret.
+        // The URL contains the DB password: preferably from a Docker secret.
         let database_url = match (var("DATABASE_URL_FILE"), var("DATABASE_URL")) {
             (Some(path), _) => std::fs::read_to_string(&path)
                 .map_err(|e| format!("DATABASE_URL_FILE {path}: {e}"))?
@@ -147,7 +147,7 @@ impl Config {
         })
     }
 
-    /// Erlaubte Origins (Schema + Host + Port) für zustandsändernde Anfragen.
+    /// Allowed origins (scheme + host + port) for state-changing requests.
     pub fn allowed_origins(&self) -> Vec<String> {
         std::iter::once(&self.public_url)
             .chain(self.extra_origins.iter())

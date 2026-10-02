@@ -1,20 +1,20 @@
-//! Baum mit Eltern-, Kinder- und Namensindex.
+//! Tree with parent, children and name indexes.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use xlrx_proto::Name;
 
-/// Ein Eintrag, der einen Elternknoten und einen Namen hat.
+/// An entry that has a parent node and a name.
 pub trait TreeEntry<I> {
     fn parent(&self) -> I;
     fn name(&self) -> &Name;
 }
 
-/// Ein Baum aus Einträgen mit Index nach Elternknoten und (Eltern, Namensschlüssel).
+/// A tree of entries, indexed by parent node and by (parent, name key).
 ///
-/// Der Namensschlüssel ist je nach Dateisystem der exakte Name oder die kleingeschriebene Form.
-/// Mehrere Einträge mit gleichem Schlüssel sind erlaubt (kurzfristig, z.B. Groß-/Kleinschreibungsvarianten
-/// auf dem Server); [`Tree::lookup`] liefert dann alle.
+/// Depending on the file system, the name key is the exact name or its lowercased form.
+/// Multiple entries with the same key are allowed (temporarily, e.g. case variants on the server);
+/// [`Tree::lookup`] then returns all of them.
 #[derive(Clone, Debug)]
 pub struct Tree<I, E> {
     entries: BTreeMap<I, E>,
@@ -92,7 +92,7 @@ impl<I: Ord + Copy, E: TreeEntry<I>> Tree<I, E> {
         Some(entry)
     }
 
-    /// Ändert einen Eintrag und hält die Indizes konsistent.
+    /// Modifies an entry and keeps the indexes consistent.
     pub fn update(&mut self, id: I, f: impl FnOnce(&mut E)) -> bool {
         match self.remove(id) {
             Some(mut e) => {
@@ -112,7 +112,7 @@ impl<I: Ord + Copy, E: TreeEntry<I>> Tree<I, E> {
         self.children.get(&id).is_some_and(|s| !s.is_empty())
     }
 
-    /// Alle Einträge unter `parent` mit gleichem Namensschlüssel wie `name`.
+    /// All entries under `parent` with the same name key as `name`.
     pub fn lookup(&self, parent: I, name: &Name) -> impl Iterator<Item = I> + '_ {
         self.by_name
             .get(&(parent, self.key(name)))
@@ -121,7 +121,7 @@ impl<I: Ord + Copy, E: TreeEntry<I>> Tree<I, E> {
             .copied()
     }
 
-    /// Liegt `id` gleich `ancestor` oder darunter? Bricht bei Zyklen sicher ab.
+    /// Is `id` equal to `ancestor` or below it? Terminates safely on cycles.
     pub fn is_within(&self, id: I, ancestor: I) -> bool {
         let mut cur = id;
         for _ in 0..=self.entries.len() {
@@ -136,7 +136,7 @@ impl<I: Ord + Copy, E: TreeEntry<I>> Tree<I, E> {
         false
     }
 
-    /// Tiefe unterhalb der Wurzel (Wurzel-Kinder haben Tiefe 1). `None` bei abgerissener Kette oder Zyklus.
+    /// Depth below the root (children of the root have depth 1). `None` on a broken chain or cycle.
     pub fn depth(&self, id: I, root: I) -> Option<usize> {
         let mut cur = id;
         for d in 0..=self.entries.len() {
@@ -148,7 +148,7 @@ impl<I: Ord + Copy, E: TreeEntry<I>> Tree<I, E> {
         None
     }
 
-    /// Entfernt alle Einträge, die nicht (mehr) von `root` aus erreichbar sind.
+    /// Removes all entries that are not (or no longer) reachable from `root`.
     pub fn retain_reachable(&mut self, root: I) -> Vec<I> {
         let mut reachable = BTreeSet::new();
         let mut stack = vec![root];
@@ -171,7 +171,7 @@ impl<I: Ord + Copy, E: TreeEntry<I>> Tree<I, E> {
         dead
     }
 
-    /// Alle Nachfahren von `id` (ohne `id` selbst).
+    /// All descendants of `id` (excluding `id` itself).
     pub fn descendants(&self, id: I) -> Vec<I> {
         let mut out = Vec::new();
         let mut stack = vec![id];

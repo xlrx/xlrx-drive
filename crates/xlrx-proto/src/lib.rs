@@ -1,7 +1,7 @@
-//! Gemeinsame Typen für Server und Clients von xlrx-drive.
+//! Shared types for the xlrx-drive server and clients.
 //!
-//! Alles, was über die Leitung geht oder in beiden Welten persistiert wird, lebt hier:
-//! IDs, Revisionen, Inhalts-Hashes und Dateinamen.
+//! Everything that goes over the wire or is persisted on both sides lives here:
+//! IDs, revisions, content hashes and file names.
 
 mod content;
 mod ids;

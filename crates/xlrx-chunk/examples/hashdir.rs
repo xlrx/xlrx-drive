@@ -1,11 +1,11 @@
-//! Misst Scan- und Hash-Geschwindigkeit auf echten Daten (z.B. für den DS918+-Spike).
+//! Measures scan and hash speed on real data (e.g. for the DS918+ spike).
 //!
 //! ```text
 //! cargo run --release -p xlrx-chunk --example hashdir -- /volume1/homes/klaus/Drive
 //! ```
 //!
-//! Durchlauf 1 hasht alles. Durchlauf 2 nutzt den Hash-Cache und zeigt den Schnellweg für
-//! unveränderte Dateien (nur `stat`, kein Lesen).
+//! Pass 1 hashes everything. Pass 2 uses the hash cache and shows the fast path for unchanged
+//! files (only `stat`, no reading).
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -92,7 +92,7 @@ fn main() {
             files.len() as f64 / el,
             b / el / 1e6
         );
-        // Kurz warten, damit frisch gehashte Dateien beim zweiten Durchlauf nicht als „racy“ gelten.
+        // Wait briefly so that freshly hashed files are not considered "racy" in the second pass.
         if round == 1 {
             std::thread::sleep(std::time::Duration::from_millis(2100));
         }

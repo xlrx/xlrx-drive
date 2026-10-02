@@ -1,9 +1,9 @@
-//! Hash-Cache: Unveränderte Dateien werden nie erneut gelesen.
+//! Hash cache: unchanged files are never read again.
 //!
-//! Schlüssel ist die Datei-Identität, gültig ist ein Eintrag nur bei identischem Fingerprint.
-//! Schutz vor dem „Racy-Timestamp“-Problem (wie bei git): Lag die letzte Änderung zu nah am Zeitpunkt
-//! des Hashens, könnte eine weitere Änderung in derselben Zeitstempel-Granularität unbemerkt bleiben.
-//! Solche Einträge gelten als unsicher und werden beim nächsten Mal neu gehasht.
+//! The key is the file identity; an entry is only valid if the fingerprint is identical.
+//! Protection against the "racy timestamp" problem (as in git): if the last modification was too
+//! close to the time of hashing, a further modification within the same timestamp granularity
+//! could go unnoticed. Such entries are considered unsafe and are rehashed the next time.
 
 use std::collections::HashMap;
 
@@ -11,20 +11,20 @@ use xlrx_proto::FileContent;
 
 use crate::{FileId, Fingerprint};
 
-/// Abstand, den mtime/ctime zum Hash-Zeitpunkt mindestens haben müssen (2 s, deckt auch
-/// Dateisysteme mit grober Zeitauflösung wie FAT oder manche Netzwerk-Dateisysteme ab).
+/// Minimum distance mtime/ctime must have from the time of hashing (2 s; also covers file
+/// systems with coarse time resolution such as FAT or some network file systems).
 pub const RACY_WINDOW_NS: i64 = 2_000_000_000;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct CacheEntry {
     pub fingerprint: Fingerprint,
-    /// Wanduhrzeit (ns seit Unix-Epoche), zu der gehasht wurde.
+    /// Wall-clock time (ns since the Unix epoch) at which the file was hashed.
     pub hashed_at_ns: i64,
     pub content: FileContent,
 }
 
 impl CacheEntry {
-    /// `true`, wenn die letzte Änderung so kurz vor dem Hashen lag, dass der Eintrag nicht vertrauenswürdig ist.
+    /// `true` if the last modification was so close to hashing that the entry cannot be trusted.
     pub fn is_racy(&self) -> bool {
         let newest = self.fingerprint.mtime_ns.max(self.fingerprint.ctime_ns);
         newest > self.hashed_at_ns.saturating_sub(RACY_WINDOW_NS)
@@ -41,7 +41,7 @@ impl HashCache {
         Self::default()
     }
 
-    /// Liefert den Inhalt nur, wenn der Fingerprint exakt passt und der Eintrag nicht „racy“ ist.
+    /// Returns the content only if the fingerprint matches exactly and the entry is not "racy".
     pub fn lookup(&self, id: FileId, fingerprint: Fingerprint) -> Option<FileContent> {
         let e = self.map.get(&id)?;
         (e.fingerprint == fingerprint && !e.is_racy()).then_some(e.content)

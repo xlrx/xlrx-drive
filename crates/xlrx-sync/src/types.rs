@@ -1,4 +1,4 @@
-//! Grundtypen der Engine: lokale IDs, Fingerprints und die Einträge der drei Bäume.
+//! Basic types of the engine: local IDs, fingerprints and the entries of the three trees.
 
 use std::fmt;
 
@@ -7,14 +7,14 @@ use xlrx_proto::{FileContent, Kind, Name, NodeId, Rev};
 
 use crate::tree::TreeEntry;
 
-/// Identität eines Objekts im lokalen Dateisystem (z.B. Inode bzw. APFS-File-ID).
-/// Bleibt bei Umbenennen und Verschieben gleich.
+/// Identity of an object in the local file system (e.g. inode or APFS file ID).
+/// Stays the same across renames and moves.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct LocalId(pub u64);
 
 impl LocalId {
-    /// Platzhalter für „keine lokale Entsprechung mehr“ (z.B. wenn die Inode-Nummer für ein
-    /// Objekt anderer Art wiederverwendet wurde). Existiert nie im lokalen Baum.
+    /// Placeholder for "no local counterpart anymore" (e.g. when the inode number was reused for
+    /// an object of a different kind). Never exists in the local tree.
     pub const GONE: LocalId = LocalId(u64::MAX);
 }
 
@@ -24,7 +24,7 @@ impl fmt::Debug for LocalId {
     }
 }
 
-/// Merkmale einer lokalen Datei, die sich bei jeder Änderung ändern (Größe, mtime, ctime).
+/// Attributes of a local file that change with every modification (size, mtime, ctime).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct Fingerprint {
     pub size: u64,
@@ -32,8 +32,8 @@ pub struct Fingerprint {
     pub ctime_ns: i64,
 }
 
-/// ID einer Operation. Für Server-Operationen zugleich der Idempotenz-Schlüssel:
-/// Wiederholt der Client nach einem Abbruch dieselbe Operation, führt der Server sie nur einmal aus.
+/// ID of an operation. For server operations it is also the idempotency key:
+/// if the client retries the same operation after an interruption, the server runs it only once.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct OpId(pub u64);
 
@@ -43,13 +43,13 @@ impl fmt::Debug for OpId {
     }
 }
 
-/// Zustand eines Knotens auf dem Server (Remote-Baum R).
+/// State of a node on the server (remote tree R).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct RemoteEntry {
     pub parent: NodeId,
     pub name: Name,
     pub kind: Kind,
-    /// Nur bei Dateien.
+    /// Files only.
     pub content: Option<FileContent>,
     pub rev: Rev,
 }
@@ -63,7 +63,7 @@ impl TreeEntry<NodeId> for RemoteEntry {
     }
 }
 
-/// Zuletzt vereinbarter Zustand eines Knotens (Synced-Baum S): Server und lokale Kopie waren sich hier einig.
+/// Last agreed state of a node (synced tree S): the server and the local copy agreed on this.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct SyncedEntry {
     pub parent: NodeId,
@@ -71,20 +71,20 @@ pub struct SyncedEntry {
     pub kind: Kind,
     pub content: Option<FileContent>,
     pub rev: Rev,
-    /// Lokale Entsprechung.
+    /// Local counterpart.
     pub local: LocalId,
-    /// Fingerprint der lokalen Datei, als ihr Inhalt zuletzt `content` war.
+    /// Fingerprint of the local file when its content was last `content`.
     pub fp: Option<Fingerprint>,
 }
 
-/// Beobachteter Zustand eines lokalen Objekts (Lokaler Baum L).
+/// Observed state of a local object (local tree L).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct LocalEntry {
     pub parent: LocalId,
     pub name: Name,
     pub kind: Kind,
     pub fp: Option<Fingerprint>,
-    /// Bei Dateien der Inhalt zum Fingerprint (vom Scanner gehasht oder aus dem Hash-Cache).
+    /// Files only: content matching the fingerprint (hashed by the scanner or from the hash cache).
     pub content: Option<FileContent>,
 }
 
@@ -97,29 +97,29 @@ impl TreeEntry<LocalId> for LocalEntry {
     }
 }
 
-/// Eine Beobachtung aus einem Scan.
+/// An observation from a scan.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LocalObservation {
     pub id: LocalId,
     pub entry: LocalEntry,
 }
 
-/// Eine Änderung aus dem Server-Journal: aktueller Zustand oder `None` (gelöscht bzw. nicht mehr sichtbar).
+/// A change from the server journal: current state or `None` (deleted or no longer visible).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct RemoteChange {
     pub node: NodeId,
     pub state: Option<RemoteEntry>,
 }
 
-/// Konfiguration eines Sync-Ordners.
+/// Configuration of a sync directory.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
-    /// Server-Knoten, der dem lokalen Sync-Ordner entspricht.
+    /// Server node corresponding to the local sync directory.
     pub remote_root: NodeId,
-    /// Gerätename, erscheint in Namen von Konfliktkopien.
+    /// Device name; appears in the names of conflict copies.
     pub device: String,
-    /// Ignoriert das lokale Dateisystem Groß-/Kleinschreibung (APFS-Standard)?
+    /// Is the local file system case-insensitive (APFS default)?
     pub local_case_insensitive: bool,
-    /// Mehr Löschungen auf einmal werden erst nach Bestätigung an den Server geschickt.
+    /// More deletions than this at once are only sent to the server after confirmation.
     pub max_unconfirmed_deletes: usize,
 }

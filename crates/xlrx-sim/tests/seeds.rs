@@ -1,7 +1,7 @@
-//! Zufällige Simulationsläufe bei jedem `cargo test`.
+//! Random simulation runs on every `cargo test`.
 //!
-//! Anzahl über `XLRX_SIM_SEEDS` (Standard 200 je Variante). Die CI nutzt mehr; nachts laufen
-//! hunderttausende Seeds über `cargo run --release -p xlrx-sim`.
+//! Count via `XLRX_SIM_SEEDS` (default 200 per variant). CI uses more; at night, hundreds of
+//! thousands of seeds run via `cargo run --release -p xlrx-sim`.
 
 use xlrx_sim::{SimConfig, run};
 
@@ -81,7 +81,7 @@ fn lange_laeufe() {
 
 #[test]
 fn namensvarianten_auf_dem_server() {
-    // Zugriff per SMB/Shell auf dem NAS: „A“ und „a“ im selben Ordner, Mac ohne Unterscheidung.
+    // SMB/shell access on the NAS: "A" and "a" in the same folder, Mac is case-insensitive.
     check(
         SimConfig {
             case_insensitive_local: true,

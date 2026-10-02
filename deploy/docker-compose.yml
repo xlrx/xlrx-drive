@@ -1,10 +1,10 @@
-# xlrx-drive auf der Synology (Container Manager → Projekt). Anleitung: deploy/synology.md
-# Werte stehen in deploy/.env (Vorlage: .env.example), Geheimnisse in deploy/secrets/.
+# xlrx-drive on the Synology (Container Manager → Project). Guide: deploy/synology.md
+# Values live in deploy/.env (template: .env.example), secrets in deploy/secrets/.
 name: xlrx
 
 services:
   postgres:
-    # PostgreSQL 18 mit pgvector, ohne AVX-Annahme gebaut (PLAN 13.2).
+    # PostgreSQL 18 with pgvector, built without assuming AVX (PLAN 13.2).
     image: pgvector/pgvector:pg18
     restart: unless-stopped
     user: "${PUID}:${PGID}"
@@ -15,7 +15,7 @@ services:
       POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
     secrets: [pg_password]
     volumes:
-      # Eigene Freigabe mit abgeschaltetem Copy-on-Write (NOCOW), siehe synology.md.
+      # Dedicated shared folder with copy-on-write disabled (NOCOW), see synology.md.
       - ${XLRX_DB_DIR:-/volume1/xlrx-db}/postgres:/var/lib/postgresql
     command:
       - postgres
@@ -64,7 +64,7 @@ services:
       XLRX_ARGON2_M_KIB: ${XLRX_ARGON2_M_KIB:-19456}
       XLRX_ARGON2_T: ${XLRX_ARGON2_T:-2}
     secrets: [database_url, xlrx_secret_key]
-    # Ab M1: das ganze Volume, damit Versionen per Reflink zentral liegen können (PLAN 4.1).
+    # From M1 on: the whole volume, so versions can be kept centrally via reflink (PLAN 4.1).
     # volumes:
     #   - /volume1:/mnt/volume1
     networks: [internal, proxy]
@@ -81,16 +81,16 @@ services:
       - ${CADDY_DIR:-/volume1/docker/xlrx/caddy}/data:/data
       - ${CADDY_DIR:-/volume1/docker/xlrx/caddy}/config:/config
     networks:
-      # Eigene IP im Heimnetz: Ports 80/443 (TCP) und 443 (UDP, HTTP/3) ohne Konflikt mit DSM (PLAN 15.3).
+      # Own IP on the home network: ports 80/443 (TCP) and 443 (UDP, HTTP/3) without clashing with DSM (PLAN 15.3).
       lan:
         ipv4_address: ${CADDY_IP}
       proxy: {}
 
 networks:
-  # Nur Postgres und Server, kein Internet.
+  # Only Postgres and the server, no internet access.
   internal:
     internal: true
-  # Caddy ↔ Server.
+  # Caddy ↔ server.
   proxy: {}
   lan:
     driver: macvlan

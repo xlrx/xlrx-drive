@@ -1,10 +1,10 @@
-//! Kommandozeile für lange Simulationsläufe.
+//! Command-line interface for long simulation runs.
 //!
 //! ```text
 //! cargo run --release -p xlrx-sim -- --from 0 --count 100000 --clients 3
-//! cargo run --release -p xlrx-sim -- --seed 4711 --trace     # einen Fehler genau ansehen
-//! cargo run --release -p xlrx-sim -- --ci --exact-names 300   # Server-Namensvarianten (SMB)
-//! cargo run --release -p xlrx-sim -- --coarse 8 --defer 300   # grobe Zeitstempel, späte Ergebnisse
+//! cargo run --release -p xlrx-sim -- --seed 4711 --trace     # inspect a single failure in detail
+//! cargo run --release -p xlrx-sim -- --ci --exact-names 300   # server-side name variants (SMB)
+//! cargo run --release -p xlrx-sim -- --coarse 8 --defer 300   # coarse timestamps, late results
 //! ```
 
 use xlrx_sim::{SimConfig, run};

@@ -2,12 +2,12 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// Inhalts-Hash einer Datei (Schema `xlrx-content-v1`, siehe `xlrx-chunk`).
+/// Content hash of a file (schema `xlrx-content-v1`, see `xlrx-chunk`).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ContentHash(pub [u8; 32]);
 
 impl ContentHash {
-    /// Hex-Darstellung (64 Zeichen), z.B. für Objektnamen im Speicher.
+    /// Hex representation (64 characters), e.g. for object names in storage.
     pub fn to_hex(&self) -> String {
         let mut s = String::with_capacity(64);
         for b in self.0 {
@@ -20,12 +20,12 @@ impl ContentHash {
 
 impl fmt::Debug for ContentHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Kurzform reicht für Logs und Tests.
+        // The short form is enough for logs and tests.
         write!(f, "h{}", &self.to_hex()[..12])
     }
 }
 
-/// Inhalt einer Datei: Hash und Größe. Zwei Dateien mit gleichem `FileContent` gelten als inhaltsgleich.
+/// File content: hash and size. Two files with equal `FileContent` are considered identical.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct FileContent {
     pub hash: ContentHash,

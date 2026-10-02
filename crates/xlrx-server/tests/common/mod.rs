@@ -1,7 +1,9 @@
-//! Testumgebung: eigene Datenbank je Test, Router ohne Netzwerk, Client mit Cookie und Origin.
+//! Test environment: a separate database per test, router without networking, client with cookie
+//! and origin.
 //!
-//! Braucht einen PostgreSQL-Server: `XLRX_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5432/postgres`.
-//! Ohne die Variable werden die Tests übersprungen (mit Hinweis); die CI setzt sie immer.
+//! Requires a PostgreSQL server:
+//! `XLRX_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5432/postgres`.
+//! Without the variable, the tests are skipped (with a notice); CI always sets it.
 
 #![allow(dead_code)]
 
@@ -26,7 +28,7 @@ pub struct TestDb {
 impl TestDb {
     pub async fn new() -> Option<Self> {
         let Ok(admin_url) = std::env::var("XLRX_TEST_DATABASE_URL") else {
-            // In der CI ist Überspringen ein Fehler: Dort muss gegen echtes PostgreSQL getestet werden.
+            // In CI, skipping is an error: there, tests must run against a real PostgreSQL.
             assert!(
                 std::env::var_os("CI").is_none(),
                 "XLRX_TEST_DATABASE_URL fehlt in der CI"
@@ -83,7 +85,7 @@ pub fn config() -> Config {
         secret_key: [42u8; 32],
         web_dir: None,
         trust_proxy: false,
-        // Schnelle Parameter nur für Tests.
+        // Fast parameters, for tests only.
         argon2: ArgonParams {
             m_kib: 256,
             t: 1,
@@ -115,7 +117,7 @@ impl Env {
         }
     }
 
-    /// Konto mit Einrichtungslink anlegen (wie `xlrx-server create-user`).
+    /// Create an account with a setup link (like `xlrx-server create-user`).
     pub async fn invite(&self, username: &str, admin: bool) -> String {
         let u = users::create(
             &self.db.pool,
@@ -206,7 +208,7 @@ impl Client {
     }
 }
 
-/// Base32 → Bytes (für das TOTP-Geheimnis aus der Einrichtung).
+/// Base32 → bytes (for the TOTP secret from the setup).
 pub fn base32_decode(s: &str) -> Vec<u8> {
     const A: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     let (mut buf, mut bits, mut out) = (0u32, 0u32, Vec::new());
@@ -227,7 +229,8 @@ pub fn now_step() -> u64 {
 
 pub const PASSWORD: &str = "Wolken über dem Garten 7";
 
-/// Einrichtung mit Passwort + TOTP. Liefert Client (angemeldet), TOTP-Geheimnis und Wiederherstellungscodes.
+/// Setup with password + TOTP. Returns the client (signed in), the TOTP secret and the recovery
+/// codes.
 pub async fn setup_with_totp(env: &Env, invite: &str) -> (Client, Vec<u8>, Vec<String>) {
     let mut c = env.client();
     let start = c

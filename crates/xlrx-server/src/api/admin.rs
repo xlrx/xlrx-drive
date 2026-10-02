@@ -1,5 +1,5 @@
-//! Verwaltung: Konten anlegen (mit Einrichtungslink), zweite Faktoren zurücksetzen, sperren.
-//! Jede verändernde Aktion verlangt Admin-Rechte und einen frischen zweiten Faktor.
+//! Administration: create accounts (with setup link), reset second factors, disable accounts.
+//! Every modifying action requires admin rights and a fresh second factor.
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -23,7 +23,7 @@ pub struct UserInfo {
     pub disabled: bool,
     pub totp: bool,
     pub passkeys: i64,
-    /// Einrichtung noch nicht abgeschlossen (kein Passwort oder kein zweiter Faktor).
+    /// Setup not yet completed (no password or no second factor).
     pub setup_pending: bool,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
@@ -110,7 +110,7 @@ pub async fn create_user(
     }))
 }
 
-/// Neuer Einrichtungslink, z.B. wenn der alte abgelaufen ist oder das Passwort vergessen wurde.
+/// New setup link, e.g. when the old one has expired or the password was forgotten.
 pub async fn invite(
     State(st): State<AppState>,
     me: CurrentUser,
@@ -137,8 +137,8 @@ pub async fn invite(
     }))
 }
 
-/// Alle zweiten Faktoren zurücksetzen (z.B. Handy verloren, keine Codes mehr). Beendet alle Sitzungen;
-/// die Person richtet sich über den neuen Link neu ein.
+/// Reset all second factors (e.g. phone lost, no codes left). Ends all sessions; the person sets
+/// up again via the new link.
 pub async fn reset_factors(
     State(st): State<AppState>,
     me: CurrentUser,
@@ -172,7 +172,7 @@ pub async fn reset_user_factors(db: &sqlx::PgPool, user_id: i64) -> ApiResult<()
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
-    // Feste Tabellennamen, keine Eingaben.
+    // Fixed table names, no user input.
     for table in ["passkeys", "recovery_codes", "sessions", "login_challenges"] {
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "DELETE FROM {table} WHERE user_id = $1"

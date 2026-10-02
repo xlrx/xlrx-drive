@@ -1,5 +1,5 @@
-//! Einrichtung über einen Einladungs- bzw. Einrichtungslink: Passwort festlegen, dann mindestens einen
-//! zweiten Faktor (TOTP oder Passkey). Erst danach gibt es eine Sitzung und Wiederherstellungscodes.
+//! Setup via an invite or setup link: set a password, then at least one second factor (TOTP or
+//! passkey). Only then are a session and recovery codes issued.
 
 use axum::Json;
 use axum::extract::State;
@@ -255,7 +255,7 @@ pub struct PasskeyRegBeginResp {
     pub options: CreationChallengeResponse,
 }
 
-/// Registrierung eines Passkeys starten (bei der Einrichtung oder angemeldet).
+/// Start registering a passkey (during setup or while signed in).
 pub async fn start_registration(
     st: &AppState,
     user: &UserRow,
@@ -280,7 +280,7 @@ pub async fn start_registration(
     Ok(PasskeyRegBeginResp { ceremony, options })
 }
 
-/// Registrierung abschließen und speichern. Liefert den Namen des Passkeys.
+/// Complete the registration and store it. Returns the passkey's name.
 pub async fn finish_registration(
     st: &AppState,
     user_id: i64,
@@ -364,8 +364,7 @@ struct FinishResp {
     me: users::Me,
 }
 
-/// Einrichtung abschließen: Link verbrauchen, alte Sitzungen beenden, Wiederherstellungscodes erzeugen,
-/// anmelden.
+/// Complete setup: consume the link, end old sessions, generate recovery codes, sign in.
 async fn finish(st: &AppState, s: &Setup, client: &ClientInfo) -> ApiResult<Response> {
     let mut tx = st.db.begin().await?;
     if let Some(invite) = &s.invite_hash {

@@ -14,8 +14,8 @@ xlrx-chunk = { path = "crates/xlrx-chunk" }
 xlrx-sync = { path = "crates/xlrx-sync" }
 
 blake3 = "1.8"
-# Exakt gepinnt: Chunk-Grenzen gehen in den Inhalts-Hash ein (Schema "xlrx-content-v1").
-# Ein Update darf die Schnittpunkte nicht still verändern; der Golden-Test in xlrx-chunk prüft das.
+# Pinned exactly: chunk boundaries feed into the content hash (schema "xlrx-content-v1").
+# An update must not silently change the cut points; the golden test in xlrx-chunk checks this.
 fastcdc = "=5.0.0"
 rayon = "1.12"
 serde = { version = "1.0", features = ["derive"] }
@@ -23,7 +23,7 @@ serde_json = "1.0"
 thiserror = "2.0"
 unicode-normalization = "0.1"
 
-# Nur für Tests/Benchmarks
+# Only for tests/benchmarks
 proptest = "1.11"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 tempfile = "3.27"
@@ -38,7 +38,7 @@ todo = "warn"
 unimplemented = "warn"
 
 [profile.dev]
-# Der Simulator läuft viele tausend Szenarien; etwas Optimierung lohnt sich auch im Test.
+# The simulator runs many thousands of scenarios; some optimization pays off even in tests.
 opt-level = 1
 
 [profile.dev.package."*"]

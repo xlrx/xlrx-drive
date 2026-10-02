@@ -1,4 +1,4 @@
-//! Konten in der Datenbank.
+//! Accounts in the database.
 
 use serde::Serialize;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -34,7 +34,7 @@ pub struct UserRow {
 const USER_COLS: &str = "id, uuid, username, username_folded, display_name, email, password_hash,
     totp_secret_enc, totp_last_step, is_admin, disabled_at, created_at";
 
-/// Vergleichsform eines Benutzernamens.
+/// Comparison form of a username.
 pub fn fold(username: &str) -> String {
     username.trim().to_lowercase()
 }
@@ -118,7 +118,7 @@ pub async fn create(
     }
 }
 
-/// Neuer Einrichtungslink (72 h). Frühere, unbenutzte Links der Person verfallen.
+/// New setup link (72 h). The person's earlier, unused links expire.
 pub async fn create_invite(
     db: &PgPool,
     user_id: i64,
@@ -146,11 +146,11 @@ pub async fn create_invite(
 
 pub fn setup_url(state: &AppState, token: &str) -> String {
     let base = state.cfg.public_url.as_str().trim_end_matches('/');
-    // Im Fragment: Das Token erscheint so in keinem Server- oder Proxy-Log.
+    // In the fragment: this way the token never shows up in any server or proxy log.
     format!("{base}/setup#{token}")
 }
 
-/// Ersetzt alle Wiederherstellungscodes und liefert die neuen (nur dieses eine Mal sichtbar).
+/// Replaces all recovery codes and returns the new ones (visible only this one time).
 pub async fn replace_recovery_codes(
     tx: &mut Transaction<'_, Postgres>,
     user_id: i64,
@@ -180,7 +180,7 @@ pub async fn recovery_left(db: &PgPool, user_id: i64) -> ApiResult<i64> {
     Ok(n)
 }
 
-/// Löst einen Wiederherstellungscode ein (nur einmal gültig).
+/// Redeems a recovery code (valid only once).
 pub async fn consume_recovery_code(db: &PgPool, user_id: i64, input: &str) -> ApiResult<bool> {
     let Some(norm) = crate::auth::tokens::normalize_recovery_code(input) else {
         return Ok(false);
@@ -196,7 +196,7 @@ pub async fn consume_recovery_code(db: &PgPool, user_id: i64, input: &str) -> Ap
     Ok(r.rows_affected() == 1)
 }
 
-/// Prüft einen TOTP-Code des Kontos mit Replay-Schutz (atomar in der DB).
+/// Verifies a TOTP code of the account with replay protection (atomically in the DB).
 pub async fn verify_totp(state: &AppState, user: &UserRow, code: &str) -> ApiResult<bool> {
     let Some(enc) = &user.totp_secret_enc else {
         return Ok(false);
@@ -264,7 +264,7 @@ pub async fn add_passkey(db: &PgPool, user_id: i64, name: &str, pk: &Passkey) ->
     }
 }
 
-/// Öffentliche Sicht auf ein Konto.
+/// Public view of an account.
 #[derive(Serialize)]
 pub struct Me {
     pub id: i64,

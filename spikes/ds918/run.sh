@@ -1,7 +1,7 @@
 #!/bin/sh
-# DS918+-Spike (M0): misst und prüft auf dem NAS, was der Plan annimmt. Ändert nichts an Nutzerdaten.
-#   sudo sh spikes/ds918/run.sh [Testordner mit echten Dateien, z.B. /volume1/homes/klaus/Drive]
-# Ergebnis: spikes/ds918/results-<Datum>.md (bitte committen oder mir schicken).
+# DS918+ spike (M0): measures and verifies on the NAS what the plan assumes. Does not modify any user data.
+#   sudo sh spikes/ds918/run.sh [test folder with real files, e.g. /volume1/homes/klaus/Drive]
+# Result: spikes/ds918/results-<date>.md (please commit it or send it to me).
 set -u
 cd "$(dirname "$0")"
 SAMPLE="${1:-}"

@@ -1,7 +1,7 @@
-//! Verschlüsselung von Geheimnissen in der Datenbank (TOTP) mit AES-256-GCM.
+//! Encryption of secrets in the database (TOTP) with AES-256-GCM.
 //!
-//! Format: 12 Byte Nonce ‖ Chiffrat mit Tag. Die zusätzlichen Daten (AAD) binden ein Geheimnis an
-//! seinen Zweck und sein Konto: Ein in der DB vertauschtes Geheimnis lässt sich nicht entschlüsseln.
+//! Format: 12-byte nonce ‖ ciphertext with tag. The additional data (AAD) binds a secret to its
+//! purpose and its account: a secret swapped around in the DB cannot be decrypted.
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -43,7 +43,7 @@ impl SecretBox {
     }
 }
 
-/// AAD für das TOTP-Geheimnis eines Kontos.
+/// AAD for an account's TOTP secret.
 pub fn totp_aad(user_id: i64) -> Vec<u8> {
     format!("xlrx totp v1 user {user_id}").into_bytes()
 }

@@ -1,15 +1,15 @@
-//! Schutz vor Durchprobieren: Fehlversuche je Schlüssel zählen, ab einer Schwelle exponentiell sperren.
+//! Brute-force protection: count failed attempts per key, lock out exponentially past a threshold.
 //!
-//! Schlüssel sind die IP („ip:…“) und der eingegebene Benutzername („name:…“), auch für Konten, die es
-//! nicht gibt. So verhält sich ein unbekanntes Konto genauso wie ein bekanntes.
+//! Keys are the IP ("ip:…") and the entered username ("name:…"), including for accounts that do not
+//! exist. That way an unknown account behaves exactly like a known one.
 
 use crate::error::{ApiError, ApiResult};
 use sqlx::PgPool;
 
-/// Fenster, in dem Fehlversuche zusammengezählt werden.
+/// Window in which failed attempts are added up.
 const WINDOW_MINUTES: i64 = 15;
-/// Ab so vielen Fehlversuchen wird gesperrt (pro Benutzername bzw. pro IP; hinter einer
-/// Familien-IP liegen mehrere Personen).
+/// Lock out after this many failed attempts (per username or per IP; a family IP is shared by
+/// several people).
 const NAME_LIMIT: i32 = 5;
 const IP_LIMIT: i32 = 20;
 const MAX_LOCK_SECS: i64 = 3600;
@@ -30,7 +30,7 @@ fn limit(key: &str) -> i32 {
     }
 }
 
-/// Lehnt ab, solange einer der Schlüssel gesperrt ist.
+/// Rejects as long as one of the keys is locked.
 pub async fn check(db: &PgPool, keys: &[String]) -> ApiResult<()> {
     let locked: Option<(String,)> = sqlx::query_as(
         "SELECT key FROM auth_throttle WHERE key = ANY($1) AND locked_until > now() LIMIT 1",
@@ -44,7 +44,7 @@ pub async fn check(db: &PgPool, keys: &[String]) -> ApiResult<()> {
     }
 }
 
-/// Zählt einen Fehlversuch. Liefert `true`, wenn dadurch eine Sperre entstanden ist.
+/// Counts a failed attempt. Returns `true` if this caused a lockout.
 pub async fn fail(db: &PgPool, keys: &[String]) -> ApiResult<bool> {
     let mut locked_now = false;
     for key in keys {

@@ -1,15 +1,15 @@
-//! Deterministischer Simulator für die Sync-Engine von xlrx-drive.
+//! Deterministic simulator for the xlrx-drive sync engine.
 //!
-//! Ein Lauf besteht aus einem simulierten Server und mehreren Clients mit eigenem simuliertem
-//! Dateisystem. Zufällige Nutzeraktionen (auf den Clients und direkt auf dem Server), Sync-Schritte
-//! in zufälliger Reihenfolge, verlorene Anfragen und Antworten sowie Abstürze an beliebigen Stellen
-//! wechseln sich ab. Danach folgt eine Ruhephase, und es wird geprüft:
+//! A run consists of a simulated server and several clients, each with its own simulated file
+//! system. Random user actions (on the clients and directly on the server), sync steps in random
+//! order, lost requests and responses, and crashes at arbitrary points alternate. This is followed
+//! by a settle phase, after which the following is checked:
 //!
-//! - **Konvergenz:** Alle Clients haben exakt den Stand des Servers.
-//! - **Datenerhalt:** Jeder Inhalt, den ein Nutzer geschrieben und nicht selbst entfernt hat, existiert noch.
-//! - **Invarianten** der Engine nach jedem Schritt.
+//! - **Convergence:** All clients have exactly the server's state.
+//! - **Data preservation:** Any content a user wrote and did not remove themselves still exists.
+//! - **Invariants** of the engine after every step.
 //!
-//! Jeder Fehler ist über den Seed exakt reproduzierbar.
+//! Every failure is exactly reproducible from its seed.
 
 mod driver;
 pub mod fs;

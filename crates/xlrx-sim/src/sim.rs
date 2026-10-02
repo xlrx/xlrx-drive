@@ -1,5 +1,5 @@
-//! Ablaufsteuerung: zufällige Nutzeraktionen, Sync-Schritte, Netzfehler und Abstürze –
-//! danach Ruhephase und Prüfung von Konvergenz und Datenerhalt.
+//! Run control: random user actions, sync steps, network faults and crashes, followed by a
+//! settle phase and checks for convergence and data preservation.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
@@ -14,32 +14,32 @@ use crate::fs::SimFs;
 use crate::rng::Rng;
 use crate::server::SimServer;
 
-/// Einstellungen eines Simulationslaufs.
+/// Settings for a simulation run.
 #[derive(Clone, Debug)]
 pub struct SimConfig {
     pub clients: usize,
-    /// Schritte mit Nutzeraktionen und Fehlern, danach folgt die Ruhephase.
+    /// Steps with user actions and faults; the settle phase follows afterwards.
     pub steps: usize,
     pub case_insensitive_local: bool,
-    /// Wahrscheinlichkeiten in Promille.
+    /// Probabilities in per mille.
     pub p_user_client: u32,
     pub p_user_server: u32,
     pub p_crash: u32,
     pub p_drop_request: u32,
     pub p_drop_response: u32,
-    /// Absturz zwischen Ausführung einer Operation und Verarbeitung ihres Ergebnisses.
+    /// Crash between executing an operation and processing its result.
     pub p_crash_after_effect: u32,
-    /// Ergebnis trifft verspätet ein (nach weiteren Scans, Abrufen und Planungen), wie bei
-    /// nebenläufig ausgeführten Operationen im echten Client.
+    /// Result arrives late (after further scans, fetches and planning passes), as with
+    /// operations executed concurrently in the real client.
     pub p_defer_result: u32,
-    /// Anteil der Server-Nutzeraktionen (Anlegen, Verschieben), die Namen exakt statt ohne
-    /// Groß-/Kleinschreibung prüfen (Zugriff per SMB/Shell). Erzeugt Varianten wie „A“ neben „a“.
+    /// Share of server user actions (create, move) that check names exactly instead of
+    /// case-insensitively (SMB/shell access). Produces variants like "A" next to "a".
     pub p_server_exact_names: u32,
-    /// Auflösung der lokalen Zeitstempel (1 = exakt, größer = grob wie bei exFAT).
-    /// Dann haben auch alle Inhalte dieselbe Größe (ungünstigster Fall für Fingerprints).
+    /// Resolution of local timestamps (1 = exact, larger = coarse, as with exFAT).
+    /// All contents then also have the same size (worst case for fingerprints).
     pub mtime_granularity: i64,
-    /// Streng: Muss das Sicherheitsnetz der Engine eingreifen, gilt der Lauf als Fehler
-    /// (zeigt Lücken in den Regeln, auch wenn die Daten sicher sind).
+    /// Strict: if the engine's safety net has to intervene, the run counts as a failure
+    /// (this reveals gaps in the rules, even if the data is safe).
     pub strict_rules: bool,
 }
 
@@ -83,7 +83,7 @@ pub struct SimStats {
     pub sync_ops: usize,
     pub crashes: usize,
     pub conflicts: usize,
-    /// Wie oft das Sicherheitsnetz der Engine einen Warte-Zyklus auflösen musste.
+    /// How often the engine's safety net had to break a wait cycle.
     pub breakers: u64,
 }
 
@@ -94,7 +94,7 @@ struct Client {
     engine: Engine,
     persisted: State,
     queue: VecDeque<Op>,
-    /// Ausgeführte Operationen, deren Ergebnis noch nicht verarbeitet wurde.
+    /// Executed operations whose result has not been processed yet.
     results: VecDeque<Deferred>,
 }
 
@@ -111,9 +111,9 @@ struct Sim {
     clients: Vec<Client>,
     clock: i64,
     next_tag: u64,
-    /// Alle je von Nutzern geschriebenen Inhalte.
+    /// All contents ever written by users.
     written: BTreeSet<u64>,
-    /// Inhalte, die ein Nutzer bewusst überschrieben oder gelöscht hat (dort, wo er sie sah).
+    /// Contents a user deliberately overwrote or deleted (where they saw them).
     removed: BTreeSet<u64>,
     trace: VecDeque<String>,
     stats: SimStats,
@@ -138,7 +138,7 @@ fn tag_of(c: &FileContent) -> u64 {
     u64::from_le_bytes(b)
 }
 
-/// Führt einen vollständigen Simulationslauf aus.
+/// Performs a complete simulation run.
 pub fn run(seed: u64, cfg: &SimConfig) -> Result<SimStats, SimFailure> {
     let mut sim = Sim::new(seed, cfg.clone());
     sim.run()
@@ -224,8 +224,8 @@ impl Sim {
         self.written.insert(t);
         let mut c = content(t);
         if self.cfg.mtime_granularity > 1 {
-            // Ungünstigster Fall: Änderungen ohne Größenänderung, der Fingerprint unterscheidet
-            // sich dann nur noch über die (groben) Zeitstempel.
+            // Worst case: changes without a size change, so the fingerprint then differs only in
+            // the (coarse) timestamps.
             c.size = 64;
         }
         c
@@ -274,7 +274,7 @@ impl Sim {
         Ok(self.stats.clone())
     }
 
-    // ------------------------------------------------------------------ Nutzeraktionen
+    // ------------------------------------------------------------------ User actions
 
     fn user_op_client(&mut self, ci: usize) {
         self.stats.user_ops += 1;
@@ -330,7 +330,7 @@ impl Sim {
                 tag_of(&c)
             )
         } else if kind < 65 {
-            // Atomic Save: neue Datei schreiben, über das Original umbenennen.
+            // Atomic save: write a new file, rename it over the original.
             let Some(&f) = self.rng.pick(&files) else {
                 return;
             };
@@ -513,7 +513,7 @@ impl Sim {
         self.log(msg);
     }
 
-    // ------------------------------------------------------------------ Client-Schritte
+    // ------------------------------------------------------------------ Client steps
 
     fn crash(&mut self, ci: usize, step: usize) {
         self.stats.crashes += 1;
@@ -545,17 +545,17 @@ impl Sim {
         self.persist(ci)
     }
 
-    /// Scan in einer von drei Formen, wie sie der echte Client nutzt:
-    /// vollständig, als Änderungsliste gegen den Stand der Engine, oder als Rescan eines
-    /// einzelnen Ordners (FSEvents). Der Teil-Rescan hält den Vertrag des Clients ein:
-    /// Verschobene Objekte werden mit neuem Ort samt Vorfahren gemeldet, als gelöscht nur,
-    /// was es nicht mehr gibt.
+    /// Scan in one of three forms, as used by the real client:
+    /// full, as a change list against the engine's state, or as a rescan of a single
+    /// folder (FSEvents). The partial rescan honors the client's contract:
+    /// moved objects are reported at their new location together with their ancestors, and only
+    /// what no longer exists is reported as deleted.
     fn scan(&mut self, ci: usize) -> Result<(), SimFailure> {
         self.scan_with(ci, true)
     }
 
-    /// `partial`: Teil-Rescans erlaubt. In der Ruhephase nicht, denn dort soll jede Änderung
-    /// gesehen werden (wie im Client, dem FSEvents jede Änderung meldet).
+    /// `partial`: partial rescans allowed. Not in the settle phase, since every change should be
+    /// seen there (as in the client, to which FSEvents reports every change).
     fn scan_with(&mut self, ci: usize, partial: bool) -> Result<(), SimFailure> {
         let mode = if self.clients[ci].engine.wants_full_scan() {
             0
@@ -576,7 +576,7 @@ impl Sim {
         let fs_now: BTreeMap<LocalId, LocalEntry> =
             observed.into_iter().map(|o| (o.id, o.entry)).collect();
         let known = c.engine.local_tree();
-        // Welche Objekte betrachtet dieser Scan?
+        // Which objects does this scan cover?
         let scope: BTreeSet<LocalId> = if mode < 8 {
             known
                 .ids()
@@ -623,8 +623,8 @@ impl Sim {
                 Some(e) => {
                     if known.get(*id) != Some(e) {
                         upserts.insert(*id, e.clone());
-                        // Vorfahren mitmelden, die die Engine nicht (so) kennt. Der Client kennt
-                        // den vollständigen Pfad des neu gescannten Ordners, also alle Vorfahren.
+                        // Also report ancestors the engine doesn't know (in this state). The
+                        // client knows the full path of the rescanned folder, hence all ancestors.
                         let mut p = e.parent;
                         while p != root {
                             let Some(pe) = fs_now.get(&p) else { break };
@@ -666,8 +666,8 @@ impl Sim {
                 "C{ci} SICHERHEITSNETZ {b:?}, Zustand danach:\n{summary}"
             ));
         }
-        // Die inkrementelle Planung darf nichts übersehen: Ohne Ergebnis muss auch eine
-        // vollständige Planung nichts finden.
+        // Incremental planning must not miss anything: if it yields nothing, a full planning
+        // pass must not find anything either.
         let fresh_ops = ops.iter().any(|op| matches!(op, Op::Local(..)))
             || ops.iter().any(|op| matches!(op, Op::Remote(..)));
         if !fresh_ops
@@ -687,7 +687,7 @@ impl Sim {
         Ok(n)
     }
 
-    /// Ein zufälliger Schritt eines Clients. `faults`: Netzfehler und Abstürze erlaubt.
+    /// A random step of one client. `faults`: network faults and crashes allowed.
     fn client_step(&mut self, ci: usize, faults: bool) -> Result<(), SimFailure> {
         match self.rng.below(11) {
             0 | 1 => self.fetch(ci),
@@ -698,7 +698,7 @@ impl Sim {
         }
     }
 
-    /// Verarbeitet ein zufälliges verspätetes Ergebnis.
+    /// Processes a random late result.
     fn deliver_one(&mut self, ci: usize) -> Result<(), SimFailure> {
         let len = self.clients[ci].results.len();
         if len == 0 {
@@ -726,7 +726,7 @@ impl Sim {
         if len == 0 {
             return Ok(());
         }
-        // Operationen laufen im echten Client nebenläufig: zufällige Reihenfolge.
+        // Operations run concurrently in the real client: random order.
         let i = if faults { self.rng.below(len) } else { 0 };
         let Some(op) = self.clients[ci].queue.remove(i) else {
             return Ok(());
@@ -784,8 +784,8 @@ impl Sim {
         if faults && self.rng.chance(self.cfg.p_drop_request) {
             return RemoteResult::Transient;
         }
-        // Wie im echten Protokoll: Erst fragt der Client, ob der Server die Operation schon kennt;
-        // nur eine neue Operation braucht die (unveränderte) Quelldatei.
+        // As in the real protocol: the client first asks whether the server already knows the
+        // operation; only a new operation needs the (unchanged) source file.
         let known = self.server.known_result(self.clients[ci].idx, id);
         if known.is_none() && !crate::driver::source_ok(&self.clients[ci].fs, op) {
             return RemoteResult::SourceChanged;
@@ -798,9 +798,9 @@ impl Sim {
         res
     }
 
-    // ------------------------------------------------------------------ Ruhephase und Prüfung
+    // ------------------------------------------------------------------ Settle phase and checks
 
-    /// Keine Nutzeraktionen und Fehler mehr: so lange synchronisieren, bis sich nichts mehr tut.
+    /// No more user actions or faults: keep syncing until nothing happens any more.
     fn settle(&mut self) -> Result<(), SimFailure> {
         self.log("--- Ruhephase ---".into());
         for ci in 0..self.clients.len() {
@@ -818,7 +818,7 @@ impl Sim {
                     self.scan_with(ci, false)?;
                     let mut n = self.plan(ci)?;
                     if n == 0 {
-                        // Zustandsänderungen ohne Operation (Verknüpfen) können neue ermöglichen.
+                        // State changes without an operation (linking) can enable new ones.
                         n = self.plan(ci)?;
                     }
                     if n == 0 && self.clients[ci].queue.is_empty() {
@@ -835,8 +835,8 @@ impl Sim {
             }
             if !busy && self.server.seq() == seq_before {
                 quiet += 1;
-                // Mehrere ruhige Runden abwarten: Das Sicherheitsnetz der Engine greift erst,
-                // wenn ein Stillstand über mehrere Planungen anhält.
+                // Wait for several quiet rounds: the engine's safety net only kicks in once a
+                // standstill persists across several planning passes.
                 if quiet >= 3 {
                     self.log(format!("ruhig nach Runde {round}"));
                     return Ok(());
@@ -864,7 +864,7 @@ impl Sim {
                 return Err(self.fail(format!("C{ci} weicht vom Server ab:\n{diff}")));
             }
         }
-        // Datenerhalt: Jeder geschriebene Inhalt, den kein Nutzer entfernt hat, muss noch existieren.
+        // Data preservation: every written content that no user removed must still exist.
         let present: BTreeSet<u64> = server
             .values()
             .filter_map(|(_, c)| c.as_ref().map(tag_of))

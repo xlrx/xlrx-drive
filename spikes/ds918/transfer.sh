@@ -1,15 +1,15 @@
 #!/bin/sh
-# HTTP/3 (QUIC) gegen HTTP/2 im Durchsatz – vom Mac aus, einmal im LAN und einmal unterwegs (Hotspot).
-#   1. Auf dem NAS: Testdatei anlegen (wird nur zur Messung ausgeliefert):
+# HTTP/3 (QUIC) vs. HTTP/2 throughput – from the Mac, once on the LAN and once on the go (hotspot).
+#   1. On the NAS: create a test file (served only for the measurement):
 #        sudo mkdir -p /volume1/docker/xlrx/caddy/spike
 #        sudo dd if=/dev/urandom of=/volume1/docker/xlrx/caddy/spike/1g.bin bs=1M count=1024
-#      und im Caddyfile im xlrx-Block ergänzen (danach wieder entfernen):
+#      and add this to the xlrx block in the Caddyfile (remove it again afterwards):
 #        handle_path /_spike/* {
 #            root * /srv/spike
 #            file_server
 #        }
-#      sowie in docker-compose.yml bei caddy: - ${CADDY_DIR}/spike:/srv/spike:ro
-#   2. Auf dem Mac (curl mit HTTP/3, z.B. `brew install curl`):
+#      plus, in docker-compose.yml under caddy: - ${CADDY_DIR}/spike:/srv/spike:ro
+#   2. On the Mac (curl with HTTP/3, e.g. `brew install curl`):
 #        sh spikes/ds918/transfer.sh drive.example.de
 set -eu
 HOST="$1"

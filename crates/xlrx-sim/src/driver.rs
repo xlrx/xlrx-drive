@@ -1,17 +1,17 @@
-//! Ausführung geplanter Operationen gegen das simulierte Dateisystem – mit denselben Vorbedingungen,
-//! die der echte Client prüft.
+//! Execution of planned operations against the simulated file system, with the same
+//! preconditions the real client checks.
 //!
-//! Zerstörende Operationen (`Replace`, `DeleteFile`) prüfen Ort, Fingerprint und – über den
-//! Hash-Cache, also neu gehasht, wenn der Fingerprint im unsicheren Zeitfenster liegt – den Inhalt.
-//! Im echten Client folgt danach der atomare Tausch bzw. das Verschieben in den eigenen Papierkorb
-//! mit erneuter Prüfung (siehe ADR 0001); im Simulator ist jede Operation atomar.
+//! Destructive operations (`Replace`, `DeleteFile`) check location, fingerprint and, via the hash
+//! cache (i.e. rehashed if the fingerprint falls within the unsafe time window), the content.
+//! In the real client this is followed by the atomic swap or the move into its own trash, each
+//! with another check (see ADR 0001); in the simulator every operation is atomic.
 
 use xlrx_proto::{Kind, Name};
 use xlrx_sync::{DOWNLOAD_TEMP_PREFIX, Expected, LocalId, LocalOp, LocalResult, RemoteOp};
 
 use crate::fs::SimFs;
 
-/// Liegt die Datei noch am erwarteten Ort und hat den erwarteten Stand?
+/// Is the file still at the expected location and in the expected state?
 fn file_as_expected(
     fs: &mut SimFs,
     local: LocalId,
@@ -30,7 +30,7 @@ fn file_as_expected(
         && fs.hashed_content(local.0, clock) == Some(expect.content)
 }
 
-/// Führt eine lokale Operation aus. Ist eine Vorbedingung verletzt, bleibt alles unverändert.
+/// Executes a local operation. If a precondition is violated, everything stays unchanged.
 pub fn exec_local(fs: &mut SimFs, op: &LocalOp, clock: i64) -> LocalResult {
     let done = |id: u64, fs: &SimFs| LocalResult::Done {
         id: LocalId(id),
@@ -63,7 +63,7 @@ pub fn exec_local(fs: &mut SimFs, op: &LocalOp, clock: i64) -> LocalResult {
             if !file_as_expected(fs, *local, *parent, name, expect, clock) {
                 return LocalResult::Precondition;
             }
-            // Wie im echten Client: temporäre Datei schreiben und atomar über das Original legen.
+            // As in the real client: write a temp file and atomically move it over the original.
             let tmp = Name::new(&format!("{DOWNLOAD_TEMP_PREFIX}{clock}")).expect("gültiger Name");
             let Ok(t) = fs.create(parent.0, &tmp, Kind::File, Some(*content), clock) else {
                 return LocalResult::Error;
@@ -140,8 +140,8 @@ pub fn exec_local(fs: &mut SimFs, op: &LocalOp, clock: i64) -> LocalResult {
     }
 }
 
-/// Inhalt wird aus der lokalen Datei hochgeladen: Diese muss noch genau dem gehashten Stand entsprechen.
-/// (Der echte Client hasht beim Hochladen mit und bricht bei Abweichung ab.)
+/// Content is uploaded from the local file, which must still exactly match the hashed state.
+/// (The real client hashes while uploading and aborts on a mismatch.)
 pub fn source_ok(fs: &SimFs, op: &RemoteOp) -> bool {
     match op {
         RemoteOp::CreateFile {

@@ -1,5 +1,5 @@
-//! Kurzlebige Zwischenstände im Speicher: Passkey-Registrierung und -Anmeldung, TOTP-Einrichtung im
-//! angemeldeten Zustand. Nach 5 Minuten verfallen sie; ein Neustart verwirft sie (dann neu beginnen).
+//! Short-lived in-memory ceremony state: passkey registration and sign-in, TOTP setup while signed
+//! in. It expires after 5 minutes; a restart discards it (then start over).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -11,30 +11,30 @@ const TTL: Duration = Duration::from_secs(300);
 const MAX_ENTRIES: usize = 10_000;
 
 pub enum Ceremony {
-    /// Passkey hinzufügen: bei der Einrichtung (`setup` = Hash des Einrichtungs-Tokens) oder angemeldet.
+    /// Add a passkey: during setup (`setup` = hash of the setup token) or while signed in.
     Register {
         user_id: i64,
         name: String,
         setup: Option<Vec<u8>>,
         state: PasskeyRegistration,
     },
-    /// Anmeldung oder Step-up per Passkey.
+    /// Sign-in or step-up via passkey.
     Authenticate {
         user_id: i64,
         purpose: AuthPurpose,
         state: PasskeyAuthentication,
     },
-    /// Neues TOTP-Geheimnis, noch nicht bestätigt.
+    /// New TOTP secret, not yet confirmed.
     TotpEnroll { user_id: i64, secret: Vec<u8> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthPurpose {
-    /// Anmeldung nur mit Passkey (zählt als beide Faktoren).
+    /// Passkey-only sign-in (counts as both factors).
     Login,
-    /// Zweiter Faktor nach dem Passwort (Hash des Zwischenschritt-Tokens).
+    /// Second factor after the password (hash of the intermediate-step token).
     SecondFactor(Vec<u8>),
-    /// Step-up einer bestehenden Sitzung.
+    /// Step-up of an existing session.
     StepUp(i64),
 }
 
@@ -50,7 +50,7 @@ impl Ceremonies {
         let now = Instant::now();
         map.retain(|_, (t, _)| now.duration_since(*t) < TTL);
         if map.len() >= MAX_ENTRIES {
-            // Schutz vor Speicherüberlauf: die ältesten verwerfen.
+            // Guard against unbounded memory growth: discard the oldest.
             if let Some(oldest) = map
                 .iter()
                 .min_by_key(|(_, (t, _))| *t)
@@ -63,7 +63,7 @@ impl Ceremonies {
         id
     }
 
-    /// Entnimmt einen Zwischenstand (nur einmal verwendbar).
+    /// Removes and returns a pending ceremony (usable only once).
     pub fn take(&self, id: &str) -> Option<Ceremony> {
         let mut map = self.inner.lock().expect("Mutex");
         let (t, c) = map.remove(id)?;

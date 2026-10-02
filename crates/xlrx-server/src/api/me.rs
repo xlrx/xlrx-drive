@@ -1,5 +1,5 @@
-//! Eigenes Konto: Faktoren verwalten, Wiederherstellungscodes, Passwort, Sitzungen.
-//! Alles, was Faktoren oder das Passwort ändert, verlangt einen frischen zweiten Faktor (Step-up).
+//! Own account: manage factors, recovery codes, password, sessions.
+//! Anything that changes factors or the password requires a fresh second factor (step-up).
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -56,7 +56,7 @@ pub async fn change_password(
         .bind(hash)
         .execute(&st.db)
         .await?;
-    // Andere Sitzungen beenden: Wer das alte Passwort kannte, ist danach draußen.
+    // End other sessions: anyone who knew the old password is locked out afterwards.
     sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND id <> $2")
         .bind(me.id)
         .bind(me.session_id)

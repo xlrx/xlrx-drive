@@ -1,6 +1,6 @@
 [package]
 name = "xlrx-chunk"
-description = "Content-Defined Chunking (FastCDC) und BLAKE3-Hashing für xlrx-drive"
+description = "Content-defined chunking (FastCDC) and BLAKE3 hashing for xlrx-drive"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ publish.workspace = true
 
 [features]
 default = ["parallel"]
-# Hasht die Chunks großer Dateien parallel (rayon).
+# Hashes the chunks of large files in parallel (rayon).
 parallel = ["dep:rayon"]
 
 [dependencies]

@@ -3,13 +3,13 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use unicode_normalization::UnicodeNormalization;
 
-/// Maximale Länge eines Namens in Bytes (UTF-8). Entspricht dem Limit von APFS, Btrfs und ext4.
+/// Maximum length of a name in bytes (UTF-8). Matches the limit of APFS, Btrfs and ext4.
 pub const MAX_NAME_BYTES: usize = 255;
 
-/// Ein einzelner Datei- oder Ordnername, immer in Unicode-NFC.
+/// A single file or directory name, always in Unicode NFC.
 ///
-/// macOS liefert Namen oft in NFD („Ä“ als A + Trema). Intern wird ausschließlich NFC verwendet,
-/// damit derselbe Name auf allen Plattformen identisch verglichen wird.
+/// macOS often returns names in NFD ("Ä" as A + diaeresis). Internally only NFC is used, so
+/// that the same name compares identically on all platforms.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Name(String);
 
@@ -26,7 +26,7 @@ pub enum NameError {
 }
 
 impl Name {
-    /// Prüft und normalisiert (NFC) einen Namen.
+    /// Validates and normalizes (NFC) a name.
     pub fn new(raw: &str) -> Result<Self, NameError> {
         let nfc: String = raw.nfc().collect();
         if nfc.is_empty() {
@@ -48,17 +48,17 @@ impl Name {
         &self.0
     }
 
-    /// Vergleichsschlüssel für Dateisysteme, die Groß-/Kleinschreibung ignorieren (APFS-Standard, SMB).
+    /// Comparison key for case-insensitive file systems (APFS default, SMB).
     ///
-    /// Kleinschreibung nach Unicode plus NFC. Das deckt die praktisch relevanten Fälle ab.
-    /// Exotische Unterschiede der Case-Folding-Tabellen verschiedener Dateisysteme (z.B. „ß“/„ss“)
-    /// werden nicht zusammengelegt, das ist die vorsichtigere Wahl.
+    /// Unicode lowercasing plus NFC. This covers the cases that matter in practice.
+    /// Exotic differences between the case-folding tables of different file systems
+    /// (e.g. "ß"/"ss") are not merged; that is the more cautious choice.
     pub fn fold_key(&self) -> String {
         self.0.to_lowercase().nfc().collect()
     }
 
-    /// Zerlegt in Stamm und Endung („Bericht.final.pdf“ → („Bericht.final“, „.pdf“)).
-    /// Versteckte Dateien ohne weitere Endung („.bashrc“) haben keine Endung.
+    /// Splits into stem and extension ("Bericht.final.pdf" → ("Bericht.final", ".pdf")).
+    /// Hidden files without a further extension (".bashrc") have no extension.
     pub fn split_extension(&self) -> (&str, &str) {
         match self.0.rfind('.') {
             Some(0) | None => (&self.0, ""),
@@ -66,12 +66,12 @@ impl Name {
         }
     }
 
-    /// Erzeugt einen abgeleiteten Namen „Stamm (zusatz).endung“ und kürzt den Stamm bei Bedarf,
-    /// sodass das Längenlimit eingehalten wird.
+    /// Builds a derived name "stem (suffix).ext" and shortens the stem if needed so that the
+    /// length limit is respected.
     ///
-    /// Das Ergebnis ist immer gültig, und verschiedene Zusätze ergeben verschiedene Namen
-    /// (darauf verlassen sich die Schleifen, die einen freien Konfliktnamen suchen). Notfalls wird
-    /// die Endung zum Stamm gezählt und der Zusatz vorne gekürzt; sein Ende (der Zähler) bleibt.
+    /// The result is always valid, and different suffixes yield different names (the loops that
+    /// search for a free conflict name rely on this). If necessary, the extension is counted as
+    /// part of the stem and the suffix is truncated at the front; its end (the counter) is kept.
     pub fn with_suffix(&self, suffix: &str) -> Name {
         let clean: String = suffix
             .chars()
@@ -87,7 +87,7 @@ impl Name {
         }
         let (mut stem, mut ext) = self.split_extension();
         if addition.len() + ext.len() >= MAX_NAME_BYTES {
-            // Überlange „Endung“ (z.B. „1. Kapitel …“): als Teil des Stamms behandeln.
+            // Overlong "extension" (e.g. "1. Chapter …"): treat it as part of the stem.
             stem = self.as_str();
             ext = "";
         }
@@ -97,7 +97,7 @@ impl Name {
             while !stem.is_char_boundary(cut) {
                 cut -= 1;
             }
-            // NFC kann die Länge beim Zusammensetzen ändern: im Zweifel weiter kürzen.
+            // NFC composition can change the length: when in doubt, keep shortening.
             if let Ok(n) = Name::new(&format!("{}{addition}{ext}", &stem[..cut])) {
                 return n;
             }
@@ -106,7 +106,7 @@ impl Name {
             }
             cut -= 1;
         }
-        // Nur der Zusatz: ist gültig, weil er mit „ (“ bzw. einem Teil davon beginnt und passt.
+        // Just the suffix: valid because it starts with ` (` (or a part of it) and fits.
         Name::new(&addition).unwrap_or_else(|_| Name(format!("Datei {}", addition.len())))
     }
 }
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn nfd_and_nfc_are_equal() {
-        let nfd = "A\u{0308}pfel.txt"; // Ä als A + kombinierendes Trema
+        let nfd = "A\u{0308}pfel.txt"; // Ä as A + combining diaeresis
         let nfc = "\u{00C4}pfel.txt";
         assert_eq!(Name::new(nfd).unwrap(), Name::new(nfc).unwrap());
     }
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn suffix_on_overlong_extension_stays_valid_and_distinct() {
-        // Alles ab dem ersten Punkt wäre die „Endung“ und lässt keinen Platz für den Zusatz.
+        // Everything from the first dot would be the "extension", leaving no room for the suffix.
         let n = Name::new(&format!("1. {}", "x".repeat(240))).unwrap();
         let a = n.with_suffix("Konflikt Gerät0 1");
         let b = n.with_suffix("Konflikt Gerät0 2");

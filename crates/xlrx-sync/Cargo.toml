@@ -1,6 +1,6 @@
 [package]
 name = "xlrx-sync"
-description = "Sans-IO Sync-Engine von xlrx-drive (Drei-Bäume-Modell)"
+description = "Sans-IO sync engine of xlrx-drive (three-tree model)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,4 +1,4 @@
-//! Anmeldung, Einrichtung, Step-up und Verwaltung über die HTTP-Schnittstelle, gegen echtes PostgreSQL.
+//! Sign-in, setup, step-up and administration via the HTTP interface, against a real PostgreSQL.
 
 mod common;
 
@@ -29,7 +29,7 @@ async fn last_step(env: &Env, username: &str) -> u64 {
     s.unwrap() as u64
 }
 
-/// Erlaubt im Test einen weiteren Code im selben 30-s-Fenster (sonst greift der Replay-Schutz).
+/// Allows another code in the same 30 s window in tests (otherwise replay protection kicks in).
 async fn allow_next_totp(env: &Env, username: &str) {
     sqlx::query("UPDATE users SET totp_last_step = $2 WHERE username = $1")
         .bind(username)
@@ -71,7 +71,7 @@ async fn einrichtung_und_anmeldung_mit_totp() {
     assert!(c.cookie.is_none());
     assert_eq!(c.get("/api/me").await.status, 401);
 
-    // Falsches Passwort und unbekanntes Konto: gleiche Antwort.
+    // Wrong password and unknown account: same response.
     let wrong = c
         .post(
             "/api/auth/login",
@@ -98,7 +98,7 @@ async fn einrichtung_und_anmeldung_mit_totp() {
     assert!(c.cookie.is_none(), "Passwort allein meldet nicht an");
     let ch = r.body["challenge"].as_str().unwrap().to_owned();
 
-    // Der Code aus der Einrichtung gilt nicht noch einmal.
+    // The code from the setup is not valid a second time.
     let used = last_step(&env, "anna").await;
     let replay = c
         .post(
@@ -116,7 +116,7 @@ async fn einrichtung_und_anmeldung_mit_totp() {
     assert_eq!(ok.ok()["username"], "anna");
     assert_eq!(c.get("/api/me").await.status, 200);
 
-    // Ein verbrauchter Zwischenschritt gilt nicht noch einmal.
+    // A consumed intermediate step is not valid a second time.
     let again = c
         .post("/api/auth/totp", json!({"challenge": ch, "code": "000000"}))
         .await;
@@ -145,7 +145,7 @@ async fn einladung_gilt_nur_einmal_und_passwort_regeln() {
             .await;
         assert_eq!(r.status, 400, "{weak}: {}", r.body);
     }
-    // Ohne Passwort kein zweiter Faktor.
+    // No second factor without a password.
     c.post("/api/setup/totp/begin", json!({"setup_token": t}))
         .await
         .ok();
@@ -231,7 +231,7 @@ async fn sperre_nach_fehlversuchen() {
         )
         .await;
     assert_eq!(r.status, 429, "gesperrt, auch mit richtigem Passwort");
-    // Unbekannte Konten werden genauso gesperrt (keine Unterscheidung von außen).
+    // Unknown accounts get locked out the same way (indistinguishable from outside).
     for _ in 0..5 {
         c.post(
             "/api/auth/login",
@@ -311,7 +311,7 @@ async fn admin_aktionen_brauchen_step_up() {
     let env = env_or_skip!();
     let invite = env.invite("admin", true).await;
     let (mut a, secret, _) = setup_with_totp(&env, &invite).await;
-    // Die Anmeldung zählt als frischer zweiter Faktor – hier künstlich veralten lassen.
+    // The sign-in counts as a fresh second factor – artificially age it here.
     sqlx::query("UPDATE sessions SET step_up_at = now() - interval '1 hour'")
         .execute(&env.db.pool)
         .await
@@ -339,7 +339,7 @@ async fn admin_aktionen_brauchen_step_up() {
     let token = url.split('#').nth(1).unwrap();
     let (mut f, _, _) = setup_with_totp(&env, token).await;
     assert_eq!(f.get("/api/me").await.ok()["username"], "fritz");
-    // Normale Konten dürfen nicht verwalten.
+    // Regular accounts may not administer.
     assert_eq!(f.get("/api/admin/users").await.status, 403);
     let users = a.get("/api/admin/users").await;
     assert_eq!(users.ok().as_array().unwrap().len(), 2);
@@ -468,7 +468,7 @@ async fn passwort_aendern_beendet_andere_sitzungen() {
 }
 
 fn authenticator() -> WebauthnAuthenticator<SoftPasskey> {
-    // Der Software-Authenticator meldet eine Nutzerprüfung (wie Face ID/Touch ID).
+    // The software authenticator reports user verification (like Face ID/Touch ID).
     WebauthnAuthenticator::new(SoftPasskey::new(true))
 }
 
@@ -512,7 +512,7 @@ async fn passkey_einrichtung_anmeldung_und_step_up() {
     assert_eq!(done.ok()["me"]["passkeys"][0]["name"], "iPhone");
     assert_eq!(done.body["recovery_codes"].as_array().unwrap().len(), 10);
 
-    // Anmeldung nur mit Passkey.
+    // Passkey-only sign-in.
     let mut p = env.client();
     let begin = p
         .post("/api/auth/passkey/begin", json!({"username": "jana"}))
@@ -530,7 +530,7 @@ async fn passkey_einrichtung_anmeldung_und_step_up() {
         .await;
     assert_eq!(r.ok()["username"], "jana");
 
-    // Derselbe Vorgang lässt sich nicht wiederholen.
+    // The same ceremony cannot be repeated.
     let r = p
         .post(
             "/api/auth/passkey/finish",
@@ -539,7 +539,7 @@ async fn passkey_einrichtung_anmeldung_und_step_up() {
         .await;
     assert_eq!(r.status, 401);
 
-    // Step-up per Passkey.
+    // Step-up via passkey.
     sqlx::query("UPDATE sessions SET step_up_at = NULL")
         .execute(&env.db.pool)
         .await
@@ -558,7 +558,7 @@ async fn passkey_einrichtung_anmeldung_und_step_up() {
     assert_eq!(r.status, 204, "{}", r.body);
     assert_eq!(p.get("/api/me").await.ok()["step_up_valid"], true);
 
-    // Passwort + Passkey als zweiter Faktor.
+    // Password + passkey as the second factor.
     let mut q = env.client();
     let r = q
         .post(
@@ -586,7 +586,7 @@ async fn passkey_einrichtung_anmeldung_und_step_up() {
     .await
     .ok();
 
-    // Der einzige zweite Faktor lässt sich nicht entfernen.
+    // The only second factor cannot be removed.
     let me = p.get("/api/me").await;
     let pk = me.ok()["passkeys"][0]["id"].as_i64().unwrap();
     let r = p
@@ -600,7 +600,7 @@ async fn passkey_einrichtung_anmeldung_und_step_up() {
 async fn fremder_passkey_wird_abgelehnt() {
     let env = env_or_skip!();
     let origin: Url = ORIGIN.parse().unwrap();
-    // Konto mit TOTP und Passkey A; ein anderer Passkey B darf nicht anmelden.
+    // Account with TOTP and passkey A; a different passkey B must not be able to sign in.
     let (mut c, _, _) = setup_with_totp(&env, &env.invite("kai", false).await).await;
     let mut a = authenticator();
     let begin = c.post("/api/me/passkeys/begin", json!({"name": "A"})).await;
@@ -622,7 +622,7 @@ async fn fremder_passkey_wird_abgelehnt() {
         .await;
     let options: RequestChallengeResponse =
         serde_json::from_value(begin.ok()["options"].clone()).unwrap();
-    // B kennt keinen der erlaubten Schlüssel.
+    // B knows none of the allowed keys.
     assert!(b.do_authentication(origin.clone(), options).is_err());
     let r = p
         .post("/api/auth/passkey/begin", json!({"username": "niemand"}))
@@ -647,7 +647,7 @@ async fn passkey_von_anderer_subdomain_wird_abgelehnt() {
     )
     .await;
 
-    // Eine andere (z.B. kompromittierte) Seite unter der Passkey-Domain darf nicht anmelden.
+    // Another (e.g. compromised) site under the passkey domain must not be able to sign in.
     let evil: Url = "https://fotos.drive.example.test".parse().unwrap();
     let mut p = env.client();
     let begin = p

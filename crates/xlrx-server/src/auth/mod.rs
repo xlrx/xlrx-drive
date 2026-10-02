@@ -1,4 +1,4 @@
-//! Anmeldung: Passwort + TOTP oder Passkey, Wiederherstellungscodes, Sitzungen, Step-up (PLAN 16.1).
+//! Sign-in: password + TOTP or passkey, recovery codes, sessions, step-up (PLAN 16.1).
 
 pub mod ceremony;
 pub mod password;

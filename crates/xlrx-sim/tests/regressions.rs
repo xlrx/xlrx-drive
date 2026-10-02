@@ -1,6 +1,6 @@
-//! Regressionstests für Fehler, die ein adversarialer Review der Sync-Engine gefunden hat,
-//! sowie für verspätet eintreffende Ergebnisse. Jeder Test beschreibt den Ablauf, der vorher
-//! zu Datenverlust, Endlosschleife oder fehlender Konvergenz führte.
+//! Regression tests for bugs found by an adversarial review of the sync engine, as well as for
+//! results that arrive late. Each test describes the sequence that previously led to data loss,
+//! an infinite loop or a failure to converge.
 
 use std::sync::mpsc;
 use std::time::Duration;
@@ -13,7 +13,7 @@ fn tags(w: &World) -> Vec<u64> {
     w.server_listing().values().filter_map(|c| *c).collect()
 }
 
-/// Führt `f` mit Zeitlimit aus: Eine Endlosschleife soll den Test scheitern lassen, nicht hängen.
+/// Runs `f` with a time limit: an infinite loop should make the test fail, not hang.
 fn within<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) -> T {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -23,9 +23,9 @@ fn within<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) 
         .expect("Zeitlimit überschritten (Endlosschleife?)")
 }
 
-/// Server: f gelöscht und mit neuem Inhalt neu angelegt. Lokal: f nur umbenannt.
-/// Vorher wurde die lokale Datei dem neuen Server-Knoten zugeschlagen und dann mit dessen
-/// Inhalt überschrieben.
+/// Server: f deleted and recreated with new content. Locally: f only renamed.
+/// Previously the local file was assigned to the new server node and then overwritten with its
+/// content.
 #[test]
 fn server_loescht_und_legt_neu_an_waehrend_lokal_umbenannt_wird() {
     let mut w = World::new(1, false);
@@ -40,8 +40,8 @@ fn server_loescht_und_legt_neu_an_waehrend_lokal_umbenannt_wird() {
     assert_eq!(w.server_file("/f"), Some(2), "{:?}", w.server_listing());
 }
 
-/// Lokal gelöscht, gleichzeitig auf dem Server verschoben (ohne dass der Client es schon weiß).
-/// Das Löschen darf die verschobene Datei nicht treffen.
+/// Deleted locally, moved on the server at the same time (before the client knows about it).
+/// The delete must not hit the moved file.
 #[test]
 fn loeschen_trifft_keine_auf_dem_server_verschobene_datei() {
     let mut w = World::new(1, false);
@@ -50,7 +50,7 @@ fn loeschen_trifft_keine_auf_dem_server_verschobene_datei() {
     w.sync();
     w.client_rm(0, "/f");
     let ops = w.plan_client(0); // DeleteFile /f
-    w.server_mv("/f", "/Archiv/f"); // gleichzeitig in der Web-UI
+    w.server_mv("/f", "/Archiv/f"); // at the same time, in the web UI
     for op in ops {
         let o = w.execute(0, op);
         w.deliver(0, o);
@@ -65,7 +65,7 @@ fn loeschen_trifft_keine_auf_dem_server_verschobene_datei() {
     );
 }
 
-/// Lokal umbenannt, gleichzeitig auf dem Server verschoben: Der Server gewinnt.
+/// Renamed locally, moved on the server at the same time: the server wins.
 #[test]
 fn verschieben_ueberschreibt_keine_fremde_verschiebung() {
     let mut w = World::new(1, false);
@@ -89,8 +89,8 @@ fn verschieben_ueberschreibt_keine_fremde_verschiebung() {
     );
 }
 
-/// Überlange „Endung“: Vorher war der Konfliktname für jeden Zähler gleich und ungültig,
-/// die Suche nach einem freien Namen lief endlos.
+/// Overlong "extension": previously the conflict name was the same and invalid for every
+/// counter, so the search for a free name never ended.
 #[test]
 fn mehrere_konflikte_mit_ueberlangem_namen() {
     let listing = within(20, || {
@@ -112,8 +112,8 @@ fn mehrere_konflikte_mit_ueberlangem_namen() {
     assert!(listing.keys().all(|k| Name::new(&k[1..]).is_ok()));
 }
 
-/// Server-Nutzer löscht einen Ordner samt Inhalt und legt einen leeren gleichnamigen an.
-/// Vorher kam der gelöschte Inhalt zurück.
+/// A server user deletes a folder with its contents and creates an empty one with the same name.
+/// Previously the deleted content came back.
 #[test]
 fn server_ersetzt_ordner_durch_leeren_gleichnamigen() {
     let mut w = World::new(1, false);
@@ -127,7 +127,7 @@ fn server_ersetzt_ordner_durch_leeren_gleichnamigen() {
     assert!(w.server_listing().contains_key("/D"));
 }
 
-/// Wie oben, aber lokal wurde die Datei im Ordner gerade bearbeitet: Die Änderung gewinnt.
+/// As above, but the file in the folder was just edited locally: the edit wins.
 #[test]
 fn server_ersetzt_ordner_aber_lokale_aenderung_bleibt() {
     let mut w = World::new(1, false);
@@ -158,7 +158,7 @@ fn tausch_mit_ueberlangen_namen() {
     w.assert_converged();
 }
 
-/// Gerätename mit „~“, dem Trennzeichen in temporären Ausweichnamen.
+/// Device name containing "~", the separator in temporary yield names.
 #[test]
 fn geraetename_mit_tilde() {
     for server_side in [false, true] {
@@ -184,8 +184,8 @@ fn geraetename_mit_tilde() {
     }
 }
 
-/// Per SMB wird auf dem NAS „b“ in „a“ umbenannt, während „A“ existiert. Der Mac kennt nur einen
-/// der beiden Namen. Vorher kam der Sync nie zur Ruhe, und die lokale Änderung an b ging nie hoch.
+/// Via SMB, "b" is renamed to "a" on the NAS while "A" exists. The Mac knows only one of the two
+/// names. Previously the sync never settled, and the local change to b was never uploaded.
 #[test]
 fn namensvariante_auf_dem_server_bei_mac_ohne_gross_klein() {
     let (converged, uploaded, listing) = within(20, || {
@@ -210,10 +210,10 @@ fn namensvariante_auf_dem_server_bei_mac_ohne_gross_klein() {
     assert!(listing.values().any(|c| *c == Some(3)), "{listing:?}");
 }
 
-// ------------------------------------------------------------------ verspätete Ergebnisse
+// ------------------------------------------------------------------ late results
 
-/// Ein Download ist fertig, aber bevor sein Ergebnis verarbeitet wird, löscht der Nutzer den
-/// Ordner, und ein Scan meldet das. Das Ergebnis darf L nicht inkonsistent machen.
+/// A download has finished, but before its result is processed, the user deletes the folder
+/// and a scan reports this. The result must not make L inconsistent.
 #[test]
 fn spaetes_download_ergebnis_nach_geloeschtem_ordner() {
     let mut w = World::new(1, false);
@@ -229,16 +229,16 @@ fn spaetes_download_ergebnis_nach_geloeschtem_ordner() {
     w.client_rm(0, "/D");
     w.scan_client(0);
     for o in outcomes {
-        w.deliver(0, o); // prüft die Invarianten
+        w.deliver(0, o); // checks the invariants
     }
     w.sync();
     w.assert_converged();
-    // Der Nutzer hat b nie gesehen: Im Zweifel bleibt es erhalten.
+    // The user never saw b: when in doubt, it is kept.
     assert_eq!(w.server_file("/D/b"), Some(1), "{:?}", w.server_listing());
 }
 
-/// Upload läuft, währenddessen speichert das Programm erneut per „Atomic Save“ (neue Inode).
-/// Vorher entstand eine unnötige Konfliktkopie.
+/// An upload is running while the application saves again via "atomic save" (new inode).
+/// Previously this produced an unnecessary conflict copy.
 #[test]
 fn upload_ergebnis_nach_atomic_save() {
     let mut w = World::new(1, false);
@@ -263,8 +263,8 @@ fn upload_ergebnis_nach_atomic_save() {
     );
 }
 
-/// Neue Datei wird angelegt, währenddessen per „Atomic Save“ ersetzt. Vorher wurde der neue
-/// Server-Knoten gelöscht und ein weiterer angelegt (Versionen und Freigaben gingen verloren).
+/// A new file is being created and meanwhile replaced via "atomic save". Previously the new
+/// server node was deleted and another one created (versions and shares were lost).
 #[test]
 fn anlegen_ergebnis_nach_atomic_save_behaelt_den_knoten() {
     let mut w = World::new(1, false);
@@ -278,8 +278,8 @@ fn anlegen_ergebnis_nach_atomic_save_behaelt_den_knoten() {
     for o in outcomes {
         w.deliver(0, o);
     }
-    // Sofort planen, ohne neuen vollständigen Scan (wie nach einem FSEvents-Teilscan):
-    // Der Knoten darf nicht als lokal gelöscht gelten.
+    // Plan immediately, without a new full scan (as after a partial FSEvents scan):
+    // the node must not be considered deleted locally.
     let ops = w.clients[0].engine.plan();
     assert!(
         !ops.iter()
@@ -296,14 +296,14 @@ fn anlegen_ergebnis_nach_atomic_save_behaelt_den_knoten() {
     assert_eq!(w.server_node("/f"), node, "derselbe Server-Knoten");
 }
 
-// ------------------------------------------------------------------ grobe Zeitstempel
+// ------------------------------------------------------------------ coarse timestamps
 
-/// Grobe Zeitstempel: Eine Änderung gleicher Größe im selben Zeitstempel-Intervall ändert den
-/// Fingerprint nicht. Das Ersetzen muss den Inhalt neu prüfen, sonst ginge die Änderung verloren.
+/// Coarse timestamps: a same-size change within the same timestamp interval doesn't change the
+/// fingerprint. Replacing must re-check the content, otherwise the change would be lost.
 #[test]
 fn ersetzen_prueft_inhalt_bei_gleichem_fingerprint() {
     let mut w = World::new(1, false);
-    w.clients[0].fs.granularity = 1_000_000_000; // alle Zeitstempel im selben Intervall
+    w.clients[0].fs.granularity = 1_000_000_000; // all timestamps in the same interval
     w.client_write(0, "/f", 1);
     w.sync();
     w.server_write("/f", 2);
@@ -312,7 +312,7 @@ fn ersetzen_prueft_inhalt_bei_gleichem_fingerprint() {
         ops.iter()
             .any(|op| matches!(op, Op::Local(_, LocalOp::Replace { .. })))
     );
-    // Gleiche Größe wie Inhalt 1 (siehe `content`), gleiches Zeitstempel-Intervall.
+    // Same size as content 1 (see `content`), same timestamp interval.
     assert_eq!(content(998).size, content(1).size);
     w.client_write(0, "/f", 998);
     for op in ops {
@@ -330,7 +330,7 @@ fn ersetzen_prueft_inhalt_bei_gleichem_fingerprint() {
     assert!(t.contains(&2), "{:?}", w.server_listing());
 }
 
-/// Dasselbe für das Löschen.
+/// The same for deleting.
 #[test]
 fn loeschen_prueft_inhalt_bei_gleichem_fingerprint() {
     let mut w = World::new(1, false);

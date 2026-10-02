@@ -1,18 +1,20 @@
-//! Die Sync-Engine: Drei-Wege-Abgleich zwischen Server (R), vereinbartem Stand (S) und lokaler Platte (L).
+//! The sync engine: three-way reconciliation between the server (R), the synced state (S) and the
+//! local disk (L).
 //!
-//! Die Regeln sind in `docs/adr/0001-sync-engine.md` beschrieben. Kurzfassung:
+//! The rules are described in `docs/adr/0001-sync-engine.md`. Summary:
 //!
-//! - Je Knoten wird **Ort** (Eltern + Name) und **Inhalt** getrennt verglichen.
-//! - Nur eine Seite geändert → auf die andere Seite übertragen.
-//! - Beide Seiten gleich geändert → nur S nachziehen.
-//! - Inhalt auf beiden Seiten verschieden geändert → Konfliktkopie, nichts wird überschrieben.
-//! - Ort auf beiden Seiten verschieden geändert → Server gewinnt (lokal verschieben).
-//! - Löschen gegen Änderung → **die Änderung gewinnt** (auf beiden Seiten).
-//! - Ordner werden nur gelöscht, wenn sie leer sind; was noch darin überleben muss, holt den Ordner zurück.
+//! - For each node, **location** (parent + name) and **content** are compared separately.
+//! - Only one side changed → apply the change to the other side.
+//! - Both sides changed identically → only update S.
+//! - Content changed differently on both sides → conflict copy; nothing is overwritten.
+//! - Location changed differently on both sides → the server wins (move locally).
+//! - Deletion versus change → **the change wins** (on both sides).
+//! - Directories are only deleted when they are empty; anything inside that must survive brings
+//!   the directory back.
 //!
-//! Sicherheitsnetze: Jede Operation trägt Vorbedingungen (Fingerprint, Revision, leerer Ordner,
-//! freier Name), Server-Operationen sind idempotent (Outbox mit [`OpId`]), und lokaler Inhalt wird
-//! nur ersetzt oder gelöscht, wenn er nachweislich dem vereinbarten Stand entspricht.
+//! Safety nets: every operation carries preconditions (fingerprint, revision, empty directory,
+//! free name), server operations are idempotent (outbox with [`OpId`]), and local content is only
+//! replaced or deleted when it provably matches the synced state.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -25,47 +27,47 @@ use crate::types::{
     Config, LocalEntry, LocalId, LocalObservation, OpId, RemoteChange, RemoteEntry, SyncedEntry,
 };
 
-/// Längste Kette, die bei der Suche nach Tausch-Zyklen verfolgt wird.
+/// Longest chain that is followed when searching for swap cycles.
 const MAX_CHAIN: usize = 64;
 
-/// Präfix temporärer Ausweichnamen.
+/// Prefix of temporary yield names.
 pub const TEMP_PREFIX: &str = ".xlrx-tmp-";
 
-/// Präfix der temporären Dateien, in die der Ausführende herunterlädt, bevor er sie an ihren Platz
-/// tauscht. Bleibt nach einem Absturz eine liegen, wird sie nie hochgeladen (der Ausführende räumt sie weg).
+/// Prefix of the temporary files the executor downloads into before swapping them into place.
+/// If one is left behind after a crash, it is never uploaded (the executor cleans it up).
 pub const DOWNLOAD_TEMP_PREFIX: &str = ".xlrx-dl-";
 
-/// Heimatname eines temporären Ausweichnamens (Teil nach dem ersten „~“; der Gerätename im
-/// Präfix enthält nie „~“). Ist der Heimatname beim Ausweichen gekürzt worden, wird der gekürzte
-/// Name wiederhergestellt.
+/// Home name of a temporary yield name (the part after the first "~"; the device name in the
+/// prefix never contains "~"). If the home name was truncated when yielding, the truncated
+/// name is restored.
 fn temp_home(name: &Name) -> Option<Name> {
     let rest = name.as_str().strip_prefix(TEMP_PREFIX)?;
     let home = rest.split_once('~').map(|(_, h)| h).unwrap_or("");
     Some(Name::new(home).unwrap_or_else(|_| Name::new("Wiederhergestellt").expect("gültiger Name")))
 }
 
-/// Persistierter Zustand. Nach einem Absturz wird die Engine daraus neu aufgebaut
-/// ([`Engine::from_state`]); der lokale Baum wird per Scan neu erhoben.
-/// (Im Client wird er strukturiert in SQLite gespeichert, im Simulator als Kopie.)
+/// Persisted state. After a crash, the engine is rebuilt from it
+/// ([`Engine::from_state`]); the local tree is rebuilt by a scan.
+/// (In the client it is stored in structured form in SQLite; in the simulator, as a copy.)
 #[derive(Clone, Debug)]
 pub struct State {
     pub config: Config,
-    /// Journal-Position, bis zu der R den Server widerspiegelt. `None` vor dem ersten Abruf.
+    /// Journal position up to which R mirrors the server. `None` before the first fetch.
     pub cursor: Option<Seq>,
     pub remote: Tree<NodeId, RemoteEntry>,
     pub synced: Synced,
-    /// Server-Operationen, die gesendet wurden oder werden. Werden erst nach verarbeitetem Ergebnis entfernt.
+    /// Server operations that were or will be sent. Removed only once their result is processed.
     pub outbox: BTreeMap<OpId, RemoteOp>,
-    /// Knoten, deren S-Stand durch eigene Operationen neuer ist als R. Bis R diese Sequenz erreicht hat,
-    /// gilt für sie S als Server-Stand, und sie werden nicht neu geplant.
+    /// Nodes whose S state is newer than R due to our own operations. Until R has reached this
+    /// sequence, S counts as their server state, and they are not re-planned.
     pub pending: BTreeMap<NodeId, Seq>,
-    /// Lokale Ausweich-Umbenennungen (Tausch-Zyklen): Objekt → (Ordner, temporärer Name).
-    /// Solange es dort liegt, gilt für den Abgleich sein vereinbarter Ort, damit das Ausweichen
-    /// nie als Nutzeränderung zählt. Wird vor dem Ausführen persistiert.
+    /// Local yield renames (swap cycles): object → (directory, temporary name).
+    /// While the object is there, its synced location is used for reconciliation, so that yielding
+    /// never counts as a user change. Persisted before execution.
     pub local_temps: BTreeMap<LocalId, (LocalId, Name)>,
     pub next_op: u64,
     pub name_counter: u64,
-    /// Wie oft das Sicherheitsnetz einen Warte-Zyklus auflösen musste (Diagnose).
+    /// How often the safety net had to break a wait cycle (diagnostics).
     pub breakers_used: u64,
     pub last_breaker: Option<String>,
 }
@@ -93,23 +95,23 @@ struct Ctx {
     ops: Vec<Op>,
     busy_n: BTreeSet<NodeId>,
     busy_l: BTreeSet<LocalId>,
-    /// Stellen, an denen eine Regel wartet, mit einer sicheren Aktion, die das Warten auflöst.
+    /// Places where a rule is waiting, each with a safe action that resolves the wait.
     stuck: Vec<Breaker>,
 }
 
-/// Sichere Aktionen, mit denen ein unvorhergesehener Warte-Zyklus aufgelöst wird.
-/// Keine davon kann Daten verlieren: Es wird nur umbenannt oder etwas behalten statt gelöscht.
+/// Safe actions used to break an unforeseen wait cycle.
+/// None of them can lose data: they only rename, or keep something instead of deleting it.
 #[derive(Clone, Copy, Debug)]
 enum Breaker {
-    /// Lokales Objekt vorübergehend auf einen freien Namen schieben.
+    /// Temporarily move a local object to a free name.
     TempLocal(LocalId),
-    /// Server-Objekt vorübergehend auf einen freien Namen schieben.
+    /// Temporarily move a server object to a free name.
     TempRemote(NodeId),
-    /// Verknüpfung lösen: Der Ordner wird behalten und neu angelegt statt gelöscht.
+    /// Unlink: the directory is kept and recreated instead of being deleted.
     Unlink(NodeId),
 }
 
-/// Schlüssel für die inkrementelle Planung.
+/// Key for incremental planning.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Key {
     Node(NodeId),
@@ -125,24 +127,24 @@ pub struct Engine {
     sent: BTreeSet<OpId>,
     need_scan: bool,
     need_fetch: bool,
-    /// Aufeinanderfolgende Planungen ohne Fortschritt bei frischem Zustand.
+    /// Consecutive planning runs without progress while the state is fresh.
     stalled: u32,
-    /// Inkrementelle Planung: Objekte, deren Lage sich seit der letzten Planung geändert hat.
+    /// Incremental planning: objects whose situation has changed since the last planning run.
     dirty: BTreeSet<Key>,
-    /// Objekte, die bei der letzten Planung warten mussten; sie werden jedes Mal neu geprüft.
+    /// Objects that had to wait in the last planning run; they are re-checked every time.
     waiting: BTreeSet<Key>,
-    /// Verknüpfte Knoten, deren lokales Objekt fehlt (Kandidaten für das Neu-Verknüpfen).
+    /// Linked nodes whose local object is missing (candidates for rebinding).
     orphans: BTreeSet<NodeId>,
-    /// Die nächste Planung prüft alles (nach Start, vollständigem Scan oder Server-Stand).
+    /// The next planning run checks everything (after startup, a full scan or a full server state).
     full: bool,
-    /// Der lokale Baum ist widersprüchlich geworden (Teil-Scan mit unbekannten Vorfahren, verspätetes
-    /// Ergebnis auf veraltetem Stand). Bis zum nächsten vollständigen Scan wird nichts geplant:
-    /// Ein unvollständiges Bild darf nie als „lokal gelöscht“ gelesen werden.
+    /// The local tree has become inconsistent (partial scan with unknown ancestors, late result
+    /// based on an outdated state). Nothing is planned until the next full scan:
+    /// an incomplete picture must never be read as "deleted locally".
     local_untrusted: bool,
 }
 
-/// So viele Planungen ohne Fortschritt (bei frischem Server- und lokalem Stand) müssen
-/// vergehen, bevor das Sicherheitsnetz eingreift.
+/// Number of planning runs without progress (with fresh server and local state) that must
+/// pass before the safety net steps in.
 const STALL_LIMIT: u32 = 3;
 
 impl Engine {
@@ -150,9 +152,9 @@ impl Engine {
         Self::from_state(State::new(config))
     }
 
-    /// Neustart aus persistiertem Zustand. Lokale Operationen, die noch liefen, gelten als verloren;
-    /// ein Scan stellt fest, was davon geschehen ist. Server-Operationen aus der Outbox werden
-    /// mit derselben ID erneut gesendet.
+    /// Restart from persisted state. Local operations that were still running are considered lost;
+    /// a scan determines which of them actually happened. Server operations from the outbox are
+    /// resent with the same ID.
     pub fn from_state(st: State) -> Self {
         let fold = st.config.local_case_insensitive;
         Self {
@@ -180,7 +182,7 @@ impl Engine {
         &self.local
     }
 
-    /// Hat die Engine schon einen lokalen Stand (vollständiger Scan seit dem Start)?
+    /// Does the engine already have a local state (a full scan since startup)?
     pub fn has_local_tree(&self) -> bool {
         self.local_root.is_some()
     }
@@ -189,7 +191,7 @@ impl Engine {
         self.need_scan
     }
 
-    /// Nur ein vollständiger Scan ([`Self::on_local_snapshot`]) hilft weiter.
+    /// Only a full scan ([`Self::on_local_snapshot`]) can make progress.
     pub fn wants_full_scan(&self) -> bool {
         self.local_root.is_none() || self.local_untrusted
     }
@@ -203,7 +205,7 @@ impl Engine {
         self.need_fetch
     }
 
-    /// Keine offenen Operationen.
+    /// No outstanding operations.
     pub fn is_idle(&self) -> bool {
         self.st.outbox.is_empty() && self.inflight_local.is_empty()
     }
@@ -213,16 +215,16 @@ impl Engine {
     }
 
     // ------------------------------------------------------------------------------------------
-    // Eingaben
+    // Inputs
     // ------------------------------------------------------------------------------------------
 
-    /// Änderungen aus dem Server-Journal seit dem letzten Cursor.
+    /// Changes from the server journal since the last cursor.
     pub fn on_remote_changes(&mut self, changes: Vec<RemoteChange>, cursor: Seq) {
         let root = self.root();
         let mut inserted = Vec::new();
         let mut deleted = Vec::new();
-        // Erst alle neuen Zustände übernehmen, dann Löschungen auswerten: Ein Knoten, der im selben
-        // Stapel aus einem gelöschten Ordner heraus verschoben wurde, darf nicht mitgelöscht werden.
+        // First apply all new states, then process deletions: a node that was moved out of a
+        // deleted directory in the same batch must not be deleted along with it.
         for ch in changes {
             if ch.node == root {
                 continue;
@@ -236,13 +238,13 @@ impl Engine {
             }
         }
         for n in deleted {
-            // Gelöscht oder aus dem Sichtbereich verschoben: samt (verbliebenem) Unterbaum entfernen.
+            // Deleted or moved out of view: remove it together with its (remaining) subtree.
             for d in self.st.remote.descendants(n) {
                 self.r_remove(d);
             }
             self.r_remove(n);
         }
-        // Ein Knoten, dessen Elternknoten nach dem ganzen Stapel fehlt, ist nicht sichtbar.
+        // A node whose parent node is missing after the whole batch is not visible.
         for n in inserted {
             if let Some(p) = self.st.remote.get(n).map(|e| e.parent)
                 && p != root
@@ -257,7 +259,7 @@ impl Engine {
         self.finish_remote_update(cursor);
     }
 
-    /// Vollständiger Server-Stand (erster Abruf oder nach gekürztem Journal).
+    /// Full server state (first fetch, or after a truncated journal).
     pub fn on_remote_snapshot(&mut self, entries: Vec<(NodeId, RemoteEntry)>, cursor: Seq) {
         let mut t = Tree::new(true);
         for (n, e) in entries {
@@ -290,7 +292,7 @@ impl Engine {
         self.need_fetch = false;
     }
 
-    /// Vollständiger Scan des lokalen Sync-Ordners.
+    /// Full scan of the local sync directory.
     pub fn on_local_snapshot(&mut self, root: LocalId, observations: Vec<LocalObservation>) {
         let mut t = Tree::new(self.st.config.local_case_insensitive);
         for o in observations {
@@ -323,8 +325,8 @@ impl Engine {
         self.rebind();
     }
 
-    /// Einzelne lokale Änderungen (z.B. aus FSEvents und einem Rescan der betroffenen Ordner).
-    /// Vorher muss es einen vollständigen Scan gegeben haben.
+    /// Individual local changes (e.g. from FSEvents and a rescan of the affected directories).
+    /// A full scan must have happened beforehand.
     pub fn on_local_changes(&mut self, upserts: Vec<LocalObservation>, removed: Vec<LocalId>) {
         let Some(root) = self.local_root else {
             self.need_scan = true;
@@ -358,9 +360,9 @@ impl Engine {
             upserted.push(o.id);
             self.l_insert(o.id, o.entry);
         }
-        // Konsistenz: Jedes gemeldete Objekt muss von der Wurzel aus erreichbar sein. Sonst fehlt eine
-        // Meldung (unbekannter Vorfahr, Zyklus mit noch nicht gemeldeter Verschiebung) – dann nichts
-        // entfernen (das sähe wie Löschen aus), sondern vollständig neu scannen.
+        // Consistency: every reported object must be reachable from the root. Otherwise a report
+        // is missing (unknown ancestor, cycle with a move not yet reported) – in that case remove
+        // nothing (that would look like a deletion), but do a full rescan instead.
         let broken = upserted
             .into_iter()
             .any(|l| self.local.depth(l, root).is_none());
@@ -386,13 +388,13 @@ impl Engine {
         self.rebind();
     }
 
-    /// Hält die Verknüpfung lokal ↔ Server stabil, wenn sich die lokale Identität ändert.
+    /// Keeps the local ↔ server link stable when the local identity changes.
     ///
-    /// 1. Hat eine verknüpfte ID jetzt eine andere Art (Inode-Wiederverwendung), wird die Verknüpfung gelöst.
-    /// 2. Ist die verknüpfte ID verschwunden und liegt am selben Ort ein neues, unverknüpftes Objekt
-    ///    gleicher Art, gilt es als dasselbe Objekt. Das ist das übliche „Atomic Save“ vieler Programme
-    ///    (neue Datei schreiben, dann über das Original umbenennen) und wird als Inhaltsänderung behandelt,
-    ///    nicht als Löschen + Neuanlegen.
+    /// 1. If a linked ID now has a different kind (inode reuse), the link is removed.
+    /// 2. If the linked ID has disappeared and a new, unlinked object of the same kind is at the
+    ///    same location, it is considered the same object. This is the common "atomic save" of many
+    ///    programs (write a new file, then rename it over the original) and is treated as a content
+    ///    change, not as deletion + creation.
     fn rebind(&mut self) {
         let candidates: Vec<NodeId> = self.orphans.iter().copied().collect();
         for n in candidates {
@@ -405,7 +407,7 @@ impl Engine {
                 self.s_update(n, |e| e.local = LocalId::GONE);
             }
         }
-        // Nur Knoten ohne lokales Objekt bleiben Kandidaten.
+        // Only nodes without a local object remain candidates.
         let synced = &self.st.synced;
         let local = &self.local;
         self.orphans
@@ -443,7 +445,7 @@ impl Engine {
     }
 
     // ------------------------------------------------------------------------------------------
-    // Ergebnisse
+    // Results
     // ------------------------------------------------------------------------------------------
 
     pub fn on_local_result(&mut self, id: OpId, result: LocalResult) {
@@ -457,9 +459,9 @@ impl Engine {
         }
     }
 
-    /// Lokaler Elternordner bekannt? Ergebnisse können verspätet eintreffen, wenn ein Scan den
-    /// Ordner schon als gelöscht gemeldet hat. Dann wird nichts eingetragen; der nächste Scan zeigt,
-    /// was wirklich auf der Platte liegt (L bleibt lieber veraltet als unvollständig).
+    /// Is the local parent directory known? Results can arrive late, after a scan has already
+    /// reported the directory as deleted. In that case nothing is recorded; the next scan shows
+    /// what is really on disk (L would rather stay outdated than become incomplete).
     fn local_parent_known(&mut self, parent: LocalId) -> bool {
         let known = Some(parent) == self.local_root || self.local.contains(parent);
         if !known {
@@ -476,7 +478,7 @@ impl Engine {
                 node,
                 node_parent,
             } => {
-                // Hat ein Scan das neue Objekt schon gesehen, ist sein Eintrag neuer als das Ergebnis.
+                // If a scan has already seen the new object, its entry is newer than the result.
                 if !self.local.contains(new_id) {
                     if !self.local_parent_known(parent) {
                         return;
@@ -550,7 +552,7 @@ impl Engine {
                 ..
             } => {
                 if self.local.contains(new_id) {
-                    self.l_remove(local); // ein Scan hat das Ergebnis schon gesehen
+                    self.l_remove(local); // a scan has already seen the result
                 } else if let Some(e) = self.l_remove(local) {
                     self.l_insert(
                         new_id,
@@ -583,8 +585,8 @@ impl Engine {
                 if self.st.local_temps.get(&local) != Some(&(parent, name.clone())) {
                     self.st.local_temps.remove(&local);
                 }
-                // L nur nachziehen, wenn es noch den Stand vor der Verschiebung zeigt. Zeigt es etwas
-                // anderes, hat ein Scan schon Neueres gesehen.
+                // Only update L if it still shows the state before the move. If it shows something
+                // else, a scan has already seen something newer.
                 let before = self
                     .local
                     .get(local)
@@ -592,7 +594,7 @@ impl Engine {
                 if before {
                     let known = Some(parent) == self.local_root || self.local.contains(parent);
                     if !known || parent == local || self.local.is_within(parent, local) {
-                        // Auf veraltetem Stand nicht abbildbar (anderes Ergebnis steht noch aus).
+                        // Cannot apply to the outdated state (another result is still pending).
                         self.mark_untrusted();
                     } else {
                         self.l_update(local, |e| {
@@ -618,9 +620,9 @@ impl Engine {
             }
             LocalOp::DeleteDir { local, node, .. } => {
                 if self.local.has_children(local) {
-                    // Der Ordner war beim Löschen leer, L kennt aber noch Kinder: L ist veraltet
-                    // (die Kinder wurden inzwischen verschoben). Erst der Scan sagt, wo sie sind;
-                    // als gelöscht dürfen sie keinesfalls gelten.
+                    // The directory was empty when it was deleted, but L still has children: L is
+                    // outdated (the children have since been moved). Only the scan tells where they
+                    // are; under no circumstances may they be considered deleted.
                     self.mark_untrusted();
                     return;
                 }
@@ -638,7 +640,7 @@ impl Engine {
         };
         self.mark_remote_op(&op);
         if result == RemoteResult::Transient {
-            // Unbekannt, ob ausgeführt: später mit derselben ID erneut senden (Server dedupliziert).
+            // Unknown whether executed: resend later with the same ID (the server deduplicates).
             self.sent.remove(&id);
             return;
         }
@@ -701,9 +703,9 @@ impl Engine {
                 },
                 RemoteResult::Updated { rev, seq },
             ) => {
-                // Server und lokale Quelle hatten danach denselben Inhalt. Wurde die lokale Datei
-                // inzwischen per „Atomic Save“ ersetzt (neue lokale ID), gilt das trotzdem; nur der
-                // Fingerprint gehört dann nicht zur aktuellen Datei.
+                // Server and local source had the same content afterwards. If the local file
+                // has since been replaced by an "atomic save" (new local ID), this still holds;
+                // only the fingerprint then does not belong to the current file.
                 if let Some(s) = self.st.synced.get(node) {
                     let same_local = s.local == source;
                     self.s_update(node, |s| {
@@ -730,8 +732,8 @@ impl Engine {
                     seq,
                 },
             ) => {
-                // Der Server hatte inzwischen neueren Inhalt und hat unseren als Konfliktkopie abgelegt.
-                // Die lokale Datei gehört jetzt zur Kopie; das Original wird neu heruntergeladen.
+                // The server had newer content in the meantime and stored ours as a conflict copy.
+                // The local file now belongs to the copy; the original is downloaded again.
                 if let Some(s) = self.st.synced.get(node).cloned()
                     && s.local == source
                 {
@@ -817,10 +819,10 @@ impl Engine {
         );
     }
 
-    /// Verknüpft nur, wenn weder Knoten noch lokale ID schon verknüpft sind.
+    /// Links only if neither the node nor the local ID is already linked.
     ///
-    /// Gibt es die lokale ID nicht mehr (z.B. „Atomic Save“, während das Ergebnis unterwegs war),
-    /// wird sofort das Neu-Verknüpfen versucht. Sonst sähe der Knoten lokal gelöscht aus.
+    /// If the local ID no longer exists (e.g. an "atomic save" while the result was in transit),
+    /// rebinding is attempted immediately. Otherwise the node would look deleted locally.
     fn link_if_free(&mut self, node: NodeId, e: SyncedEntry) {
         if !self.st.synced.contains(node) && self.st.synced.node_of(e.local).is_none() {
             let absent = !self.local.contains(e.local);
@@ -838,11 +840,11 @@ impl Engine {
     }
 
     // ------------------------------------------------------------------------------------------
-    // Planung
+    // Planning
     // ------------------------------------------------------------------------------------------
 
-    /// Plant die nächsten Operationen. Kann ohne Ergebnis aufgerufen werden; liefert dann nichts Neues.
-    /// Der Zustand muss danach persistiert werden, bevor die Operationen ausgeführt werden.
+    /// Plans the next operations. May be called without a new result; it then returns nothing new.
+    /// The state must be persisted afterwards, before the operations are executed.
     pub fn plan(&mut self) -> Vec<Op> {
         let mut cx = Ctx::default();
         for (id, op) in &self.st.outbox {
@@ -865,7 +867,7 @@ impl Engine {
         let resent = cx.ops.len();
         let mutations = self.st.synced.mutations();
 
-        // Arbeitsliste: alles (nach Start/vollständigem Scan) oder nur Geändertes und Wartendes.
+        // Work list: everything (after startup/full scan) or only what has changed or is waiting.
         let mut initial: Vec<Key> = Vec::new();
         if std::mem::take(&mut self.full) {
             initial.extend(self.st.synced.ids().into_iter().map(Key::Node));
@@ -882,7 +884,7 @@ impl Engine {
             let k = unorder(w);
             let count = evaluated.entry(k).or_insert(0);
             if *count >= 3 {
-                // Mehrfach in diesem Durchlauf geändert: beim nächsten Mal weiter.
+                // Changed several times in this pass: continue next time.
                 deferred.insert(k);
                 continue;
             }
@@ -903,8 +905,8 @@ impl Engine {
         }
         self.dirty.extend(deferred);
 
-        // Sicherheitsnetz: Nichts geplant, nichts verändert, nichts unterwegs – aber Regeln warten
-        // aufeinander. Dann löst eine sichere Aktion den Zyklus auf, statt für immer zu hängen.
+        // Safety net: nothing planned, nothing changed, nothing in flight – yet rules are waiting
+        // on each other. Then a safe action breaks the cycle instead of hanging forever.
         let idle = cx.ops.len() == resent
             && self.st.synced.mutations() == mutations
             && self.st.outbox.is_empty()
@@ -928,14 +930,14 @@ impl Engine {
                 Breaker::TempRemote(m) => self.yield_remote_temp(m, &mut cx),
                 Breaker::Unlink(n) => {
                     self.s_remove(n);
-                    // (s_remove markiert die Nachbarn für die nächste Planung)
+                    // (s_remove marks the neighbors for the next planning run)
                 }
             }
         }
         cx.ops
     }
 
-    /// Prüft einen Schlüssel der Arbeitsliste.
+    /// Evaluates one key of the work list.
     fn evaluate(&mut self, k: Key, cx: &mut Ctx) {
         match k {
             Key::Node(n) => {
@@ -961,7 +963,7 @@ impl Engine {
         }
     }
 
-    /// Ist für diesen Schlüssel nichts mehr zu tun (oder läuft gerade eine Operation)?
+    /// Is there nothing left to do for this key (or is an operation currently running)?
     fn is_settled(&self, k: Key, cx: &Ctx) -> bool {
         match k {
             Key::Node(n) => {
@@ -1001,7 +1003,7 @@ impl Engine {
         }
     }
 
-    /// Reihenfolge der Arbeitsliste: Knoten vor lokalen Objekten, flache vor tiefen.
+    /// Work list order: nodes before local objects, shallow before deep.
     fn order(&self, k: Key) -> (u8, usize, u64) {
         match k {
             Key::Node(n) => {
@@ -1019,10 +1021,10 @@ impl Engine {
     }
 
     // ------------------------------------------------------------------------------------------
-    // Änderungen an den Bäumen – markieren betroffene Nachbarn für die inkrementelle Planung
+    // Tree mutations – mark affected neighbors for incremental planning
     // ------------------------------------------------------------------------------------------
 
-    /// Alle an einer Operation Beteiligten neu prüfen (nach Erfolg wie nach Fehlschlag).
+    /// Re-check everything involved in an operation (after success as well as after failure).
     fn mark_local_op(&mut self, op: &LocalOp) {
         match op {
             LocalOp::CreateDir {
@@ -1105,7 +1107,7 @@ impl Engine {
         }
     }
 
-    /// Ordner, dessen Existenz oder Verknüpfung sich geändert hat: auch alle Kinder neu prüfen.
+    /// A directory whose existence or link has changed: re-check all of its children as well.
     fn mark_node_dir(&mut self, n: NodeId) {
         self.dirty.insert(Key::Node(n));
         let kids: Vec<NodeId> = self.st.remote.children(n).collect();
@@ -1245,8 +1247,8 @@ impl Engine {
         }
     }
 
-    /// Nur für Tests/Simulator: Findet eine vollständige Planung Arbeit, die die inkrementelle
-    /// Planung übersehen hat? Aufzurufen direkt nach einer Planung ohne Ergebnis.
+    /// Tests/simulator only: does a full planning run find work that incremental planning has
+    /// missed? To be called right after a planning run that produced nothing.
     pub fn verify_incremental(&self) -> Result<(), String> {
         let mut probe = self.clone();
         probe.full = true;
@@ -1288,17 +1290,17 @@ impl Engine {
         }
     }
 
-    /// Auf dem Server gelöscht, lokal vorhanden.
+    /// Deleted on the server, present locally.
     fn plan_remote_gone(&mut self, n: NodeId, s: &SyncedEntry, le: &LocalEntry, cx: &mut Ctx) {
         if self.local_differs(s, le) {
-            // Lokale Änderung gewinnt gegen das Löschen: Verknüpfung lösen, das Objekt wird neu hochgeladen.
-            // (Zuerst prüfen: Eine lokale Änderung darf nie einem neuen Server-Knoten zugeschlagen werden.)
+            // The local change wins over the deletion: unlink; the object is uploaded again.
+            // (Check this first: a local change must never be attributed to a new server node.)
             self.s_remove(n);
             return;
         }
-        // „Atomic Save“ auf dem Server: Am selben Ort liegt jetzt ein neuer Knoten gleicher Art.
-        // Dann ist das (unveränderte) lokale Objekt dessen Vorgänger: neu verknüpfen statt löschen
-        // und neu laden. Der neue Inhalt kommt danach als gewöhnliche Server-Änderung.
+        // "Atomic save" on the server: a new node of the same kind is now at the same location.
+        // Then the (unchanged) local object is its predecessor: rebind instead of deleting and
+        // re-downloading. The new content then arrives as an ordinary server change.
         if let Some(m) = self.eff_occupant(s.parent, &s.name, Some(n))
             && !self.st.synced.contains(m)
             && !self.st.pending.contains_key(&m)
@@ -1316,8 +1318,8 @@ impl Engine {
                 },
             );
             if s.kind == Kind::Dir {
-                // Die vereinbarten Kinder gehören jetzt zum neuen Ordner. Sonst sähe es so aus, als
-                // hätte man sie lokal hineinverschoben, und auf dem Server gelöschte Kinder kämen zurück.
+                // The synced children now belong to the new directory. Otherwise they would appear
+                // to have been moved in locally, and children deleted on the server would return.
                 for c in self.st.synced.children(n) {
                     self.s_update(c, |e| e.parent = m);
                 }
@@ -1342,11 +1344,11 @@ impl Engine {
                 );
             }
             Kind::Dir => {
-                // Kinder entscheiden: Was gelöscht wird oder wegzieht, abwarten. Was bleiben muss
-                // (neu, lokal hineinverschoben), holt den Ordner auf den Server zurück.
-                let mut deleting = false; // Kinder, die gelöscht werden (oder sich lösen)
-                let mut leaving = false; // Kinder, die der Server woanders hin verschoben hat
-                let mut keep = false; // Kinder, die hier bleiben müssen
+                // The children decide: wait for whatever is being deleted or moving away. Anything
+                // that must stay (new, moved in locally) brings the directory back to the server.
+                let mut deleting = false; // children being deleted (or unlinked)
+                let mut leaving = false; // children the server has moved elsewhere
+                let mut keep = false; // children that must stay here
                 for k in self.local.children(s.local) {
                     match self.st.synced.node_of(k) {
                         None => keep = true,
@@ -1355,20 +1357,20 @@ impl Engine {
                             match self.eff_remote_loc(m) {
                                 None => deleting = true,
                                 Some(r) if Some(&r) != s_loc.as_ref() => leaving = true,
-                                Some(_) => keep = true, // lokal hineinverschoben
+                                Some(_) => keep = true, // moved in locally
                             }
                         }
                     }
                 }
-                // Erst die Löschungen abwarten, damit unveränderte Kinder nicht mit zurückkommen.
-                // Wegziehende Kinder blockieren nicht: Ihr Ziel kann davon abhängen, dass dieser
-                // Ordner verschwindet oder neu angelegt wird.
+                // Wait for the deletions first, so that unchanged children do not come back too.
+                // Children moving away do not block: their target may depend on this directory
+                // disappearing or being recreated.
                 if deleting || (leaving && !keep) {
                     cx.stuck.push(Breaker::Unlink(n));
                     return;
                 }
                 if keep {
-                    // Es liegt noch etwas darin, das bleiben muss: Ordner auf dem Server neu anlegen.
+                    // Something inside it must stay: recreate the directory on the server.
                     self.s_remove(n);
                 } else {
                     self.emit_local(
@@ -1385,10 +1387,10 @@ impl Engine {
         }
     }
 
-    /// Lokal gelöscht, auf dem Server vorhanden.
+    /// Deleted locally, present on the server.
     fn plan_local_gone(&mut self, n: NodeId, s: &SyncedEntry, re: &RemoteEntry, cx: &mut Ctx) {
         if remote_differs(s, re) {
-            // Änderung auf dem Server gewinnt gegen das lokale Löschen: neu herunterladen.
+            // The change on the server wins over the local deletion: download again.
             self.s_remove(n);
             return;
         }
@@ -1403,11 +1405,11 @@ impl Engine {
                 },
             ),
             Kind::Dir => {
-                // Spiegelbildlich: Was auf dem Server neu oder geändert darin liegt, holt den Ordner
-                // lokal zurück. Unveränderte Kinder werden gelöscht oder ziehen weg: abwarten.
-                let mut deleting = false; // lokal gelöscht, auf dem Server unverändert
-                let mut leaving = false; // lokal woanders hin verschoben
-                let mut keep = false; // muss hier bleiben (neu oder auf dem Server geändert)
+                // Mirror image: whatever inside it is new or changed on the server brings the
+                // directory back locally. Unchanged children get deleted or move away: wait.
+                let mut deleting = false; // deleted locally, unchanged on the server
+                let mut leaving = false; // moved elsewhere locally
+                let mut keep = false; // must stay here (new, or changed on the server)
                 for m in self.eff_children(n) {
                     match self.st.synced.get(m) {
                         None => keep = true,
@@ -1419,8 +1421,8 @@ impl Engine {
                                 && !self.st.pending.contains_key(&m)
                                 && r.is_some_and(|r| r.content != sm.content);
                             if moved || edited || self.push_would_cycle(m) {
-                                // geändert, oder die lokale Verschiebung kann nicht hochgeladen
-                                // werden (Zyklus) und das Kind kehrt hierher zurück
+                                // changed, or the local move cannot be uploaded (cycle)
+                                // and the child returns here
                                 keep = true;
                             } else if self.local.contains(sm.local) {
                                 leaving = true;
@@ -1435,7 +1437,7 @@ impl Engine {
                     return;
                 }
                 if keep {
-                    // Auf dem Server liegt darin etwas, das bleiben muss: Ordner lokal wiederherstellen.
+                    // Something inside it on the server must stay: restore the directory locally.
                     self.s_remove(n);
                 } else {
                     self.emit_remote(
@@ -1451,7 +1453,7 @@ impl Engine {
         }
     }
 
-    /// Auf beiden Seiten vorhanden.
+    /// Present on both sides.
     fn plan_both(
         &mut self,
         n: NodeId,
@@ -1461,8 +1463,8 @@ impl Engine {
         cx: &mut Ctx,
     ) {
         if s.kind == Kind::File {
-            // Gleicher Inhalt, aber neuer Fingerprint (z.B. `touch`) bzw. neue Revision (gleicher
-            // Inhalt erneut hochgeladen): nur S auffrischen, damit Vorbedingungen aktuell bleiben.
+            // Same content but a new fingerprint (e.g. `touch`) or a new revision (same content
+            // uploaded again): only refresh S, so that preconditions stay up to date.
             let fresh_fp = le.content == s.content && le.fp != s.fp;
             let fresh_rev = re.content == s.content && re.rev != s.rev;
             if fresh_fp || fresh_rev {
@@ -1496,10 +1498,10 @@ impl Engine {
             } else {
                 self.remote_move_to_local(n, s.local, le, l_loc, &r_loc, cx);
             }
-            return; // Inhalt erst, wenn der Ort geklärt ist
+            return; // content only once the location is settled
         }
-        // Liegt das Objekt noch auf einem eigenen Ausweichnamen, obwohl es nirgendwohin mehr muss
-        // (z.B. weil der Server die Verschiebung zurückgenommen hat): zurück an den echten Ort.
+        // The object is still on one of our own yield names although it no longer needs to go
+        // anywhere (e.g. because the server reverted the move): move it back to its real location.
         if self.st.local_temps.contains_key(&s.local) && self.local_loc(le).as_ref() != Some(&r_loc)
         {
             self.local_move_to(n, s.local, le, &r_loc, cx);
@@ -1552,7 +1554,7 @@ impl Engine {
                 });
             }
             (true, true) => {
-                // Echter Konflikt: Unseren Inhalt als Kopie sichern, danach das Original herunterladen.
+                // Real conflict: save our content as a copy, then download the original.
                 let name = self.conflict_name(s.parent, Some(le.parent), &s.name);
                 self.emit_remote(
                     cx,
@@ -1573,7 +1575,7 @@ impl Engine {
         }
     }
 
-    /// Lokales Objekt an den Server-Ort verschieben (Server-Änderung übernehmen oder Server gewinnt).
+    /// Move the local object to the server location (apply a server change, or the server wins).
     fn local_move_to(
         &mut self,
         n: NodeId,
@@ -1583,10 +1585,10 @@ impl Engine {
         cx: &mut Ctx,
     ) {
         let Some(lp) = self.local_of_node(target.0) else {
-            return; // Zielordner existiert lokal (noch) nicht
+            return; // target directory does not exist locally (yet)
         };
         if lp == l || self.local.is_within(lp, l) {
-            return; // Ziel liegt lokal innerhalb des Objekts; löst sich über die anderen Regeln auf
+            return; // target lies locally inside the object; resolved by the other rules
         }
         match self.local_occupant(lp, &target.1, Some(l)) {
             None => self.emit_local(
@@ -1602,14 +1604,14 @@ impl Engine {
             ),
             Some(o) => {
                 let Some(m) = self.st.synced.node_of(o) else {
-                    return; // unverknüpftes Objekt: dessen Regel weicht aus
+                    return; // unlinked object: its own rule yields
                 };
                 if cx.busy_l.contains(&o) || cx.busy_n.contains(&m) {
                     return;
                 }
-                // Groß-/Kleinschreibungsvariante auf dem Server (z.B. per SMB „b“ → „a“ neben „A“):
-                // o bleibt, wo es ist, lokal gibt es aber nur einen Namen für beide. Wie bei neuen
-                // Knoten weicht der Ankömmling auf dem Server auf einen Konfliktnamen aus.
+                // Case variant on the server (e.g. via SMB "b" → "a" next to "A"): o stays where it
+                // is, but locally there is only one name for both. As with new nodes, the newcomer
+                // yields to a conflict name on the server.
                 if let Some(mt) = self.eff_remote_loc(m)
                     && mt.0 == target.0
                     && mt.1 != target.1
@@ -1628,7 +1630,7 @@ impl Engine {
                     );
                     return;
                 }
-                // Kann o selbst nicht weg, weil sein Ziel lokal in ihm liegt, muss es zuerst Platz machen.
+                // If o's target lies inside o locally, o cannot leave and must make room first.
                 let o_target_nested = self
                     .eff_remote_loc(m)
                     .and_then(|t| self.local_of_node(t.0))
@@ -1637,8 +1639,8 @@ impl Engine {
                     || self.deleted_remotely_with_content(o)
                     || o_target_nested
                 {
-                    // Tausch-Zyklus, oder der Platzhalter ist ein gelöschter Ordner, dessen Inhalt
-                    // erst wegziehen muss (womöglich hierher): Platzhalter weicht aus.
+                    // Swap cycle, or the occupant is a deleted directory whose content must first
+                    // move away (possibly to here): the occupant yields.
                     self.yield_local_temp(o, cx);
                 } else {
                     cx.stuck.push(Breaker::TempLocal(o));
@@ -1647,7 +1649,7 @@ impl Engine {
         }
     }
 
-    /// Lokale Ortsänderung auf den Server übertragen.
+    /// Push a local location change to the server.
     fn remote_move_to_local(
         &mut self,
         n: NodeId,
@@ -1658,13 +1660,13 @@ impl Engine {
         cx: &mut Ctx,
     ) {
         let Some((p, name)) = l_loc else {
-            return; // lokaler Elternordner noch nicht auf dem Server
+            return; // local parent directory not on the server yet
         };
         if !self.eff_exists(p) {
-            return; // Elternordner auf dem Server gelöscht; dessen Regel stellt ihn wieder her
+            return; // parent directory deleted on the server; its rule restores it
         }
         if p == n || self.eff_is_within(p, n) {
-            // Würde auf dem Server einen Zyklus erzeugen: Server gewinnt.
+            // Would create a cycle on the server: the server wins.
             self.local_move_to(n, l, le, r_loc, cx);
             return;
         }
@@ -1684,7 +1686,7 @@ impl Engine {
                     return;
                 }
                 let Some(sm) = self.st.synced.get(m).cloned() else {
-                    // Auf dem Server neu angelegtes Objekt hat den Namen: lokal ausweichen.
+                    // An object newly created on the server holds the name: yield locally.
                     self.yield_local_name(l, le, p, cx);
                     return;
                 };
@@ -1700,18 +1702,18 @@ impl Engine {
                     || (m_deleted_locally && self.eff_is_within(n, m))
                     || self.deleted_locally_with_content(m)
                 {
-                    // Zyklus, oder der Platzhalter ist ein lokal gelöschter Ordner, dessen Inhalt
-                    // auf dem Server erst wegziehen muss: Platzhalter weicht auf dem Server aus.
+                    // Cycle, or the occupant is a locally deleted directory whose content
+                    // must first move away on the server: the occupant yields on the server.
                     self.yield_remote_temp(m, cx);
                 } else {
                     cx.stuck.push(Breaker::TempRemote(m));
                 }
-                // sonst: m verlässt den Namen auf dem Server bald (lokal verschoben/gelöscht) → warten
+                // otherwise: m soon vacates the name on the server (moved/deleted locally) → wait
             }
         }
     }
 
-    /// Auf dem Server vorhanden, (noch) nicht verknüpft.
+    /// Present on the server, not linked (yet).
     fn plan_remote_new(&mut self, n: NodeId, cx: &mut Ctx) {
         let Some(re) = self.st.remote.get(n).cloned() else {
             return;
@@ -1747,7 +1749,7 @@ impl Engine {
             },
             Some(o) => {
                 let Some(m) = self.st.synced.node_of(o) else {
-                    return; // unverknüpftes lokales Objekt: wird verknüpft oder weicht aus
+                    return; // unlinked local object: gets linked or yields
                 };
                 if cx.busy_l.contains(&o)
                     || cx.busy_n.contains(&m)
@@ -1756,8 +1758,8 @@ impl Engine {
                     return;
                 }
                 let Some(target) = self.eff_remote_loc(m) else {
-                    // m wurde auf dem Server gelöscht; die lokale Löschung folgt. Muss dafür erst
-                    // Inhalt wegziehen (womöglich in n), weicht der Ordner aus.
+                    // m was deleted on the server; the local deletion follows. If content must
+                    // first move away for that (possibly into n), the directory yields.
                     if self.deleted_remotely_with_content(o) {
                         self.yield_local_temp(o, cx);
                     }
@@ -1765,18 +1767,18 @@ impl Engine {
                 };
                 let o_loc = self.loc_of(o);
                 if Some(&target) != o_loc.as_ref() {
-                    // m zieht lokal noch weg (Server hat es verschoben). Fehlt dafür der Zielordner
-                    // (z.B. weil er genau hier entstehen soll), weicht m vorübergehend aus, sonst
-                    // warten beide aufeinander. Hat dagegen der Nutzer m lokal hierher verschoben,
-                    // weicht m über seine eigene Regel aus.
+                    // m is still moving away locally (the server moved it). If the target directory
+                    // for that is missing (e.g. because it is to be created right here), m yields
+                    // temporarily; otherwise both wait for each other. If instead the user moved m
+                    // here locally, m yields via its own rule.
                     let remote_moved = self
                         .st
                         .synced
                         .get(m)
                         .is_some_and(|sm| (sm.parent, sm.name.clone()) != target);
                     let blocked = match self.local_of_node(target.0) {
-                        None => true,                            // Zielordner fehlt noch
-                        Some(tl) => self.local.is_within(tl, o), // Ziel liegt in o selbst
+                        None => true,                            // target directory still missing
+                        Some(tl) => self.local.is_within(tl, o), // target lies inside o itself
                     };
                     if remote_moved && blocked {
                         self.yield_local_temp(o, cx);
@@ -1785,7 +1787,7 @@ impl Engine {
                     }
                     return;
                 }
-                // m bleibt: Namen kollidieren nur lokal (Groß-/Kleinschreibung). Auf dem Server umbenennen.
+                // m stays: the names only collide locally (letter case). Rename on the server.
                 if target.1 != re.name {
                     let name = self.conflict_name(re.parent, Some(lp), &re.name);
                     self.emit_remote(
@@ -1803,23 +1805,23 @@ impl Engine {
         }
     }
 
-    /// Lokal vorhanden, (noch) nicht verknüpft.
+    /// Present locally, not linked (yet).
     fn plan_local_new(&mut self, l: LocalId, cx: &mut Ctx) {
         let Some(le) = self.local.get(l).cloned() else {
             return;
         };
         if le.name.as_str().starts_with(DOWNLOAD_TEMP_PREFIX) {
-            return; // halbfertiger Download des Ausführenden, nie hochladen
+            return; // the executor's half-finished download; never upload
         }
         if temp_home(&le.name).is_some() {
-            // Ein (nicht mehr verknüpftes) Objekt auf einem Ausweichnamen: erst zurückbenennen,
-            // damit der temporäre Name nie auf den Server gelangt.
+            // A (no longer linked) object on a yield name: rename it back first, so that the
+            // temporary name never reaches the server.
             self.st.local_temps.remove(&l);
             self.cleanup_temp_name(l, &le, cx);
             return;
         }
         let Some(p) = self.local_parent_node(le.parent) else {
-            return; // Elternordner zuerst
+            return; // parent directory first
         };
         if !self.eff_exists(p) {
             return;
@@ -1843,19 +1845,19 @@ impl Engine {
                     } else if (self.local.contains(sm.local) && self.loc_of(sm.local).is_none())
                         || self.deleted_locally_with_content(m)
                     {
-                        // m liegt lokal in einem noch nicht hochgeladenen Ordner und blockiert den Namen,
-                        // den dieser Ordner (oder ein Vorfahr) braucht, oder m ist ein lokal gelöschter
-                        // Ordner, dessen Inhalt auf dem Server erst wegziehen muss: m weicht kurz aus.
+                        // m is in a local directory not yet uploaded and blocks the name that this
+                        // directory (or an ancestor) needs, or m is a locally deleted directory
+                        // whose content must first move away on the server: m yields briefly.
                         self.yield_remote_temp(m, cx);
                     }
-                    // sonst: m verlässt den Namen bald → warten
+                    // otherwise: m will soon vacate the name → wait
                 } else if let Some(rm) = self.st.remote.get(m).cloned() {
                     let same_local_key = self.local.key(&rm.name) == self.local.key(&le.name);
                     let same = rm.kind == le.kind
                         && same_local_key
                         && (rm.kind == Kind::Dir || rm.content == le.content);
                     if same {
-                        // Beide Seiten haben dasselbe angelegt (z.B. Ersteinrichtung): nur verknüpfen.
+                        // Both sides created the same thing (e.g. initial setup): just link them.
                         self.s_insert(
                             m,
                             SyncedEntry {
@@ -1925,9 +1927,9 @@ impl Engine {
         self.emit_create(cx, p, name, l, le, origin);
     }
 
-    /// Ein vollständig synchronisiertes Objekt trägt noch einen temporären Ausweichnamen
-    /// (z.B. nach Absturz oder gleichzeitigem Löschen): auf den Heimatnamen zurückbenennen.
-    /// Die Umbenennung ist lokal und wird danach wie jede Nutzer-Umbenennung hochgeladen.
+    /// A fully synchronized object still carries a temporary yield name
+    /// (e.g. after a crash or a concurrent deletion): rename it back to its home name.
+    /// The rename is local and is then uploaded like any user rename.
     fn cleanup_temp_name(&mut self, l: LocalId, le: &LocalEntry, cx: &mut Ctx) {
         if self.st.local_temps.contains_key(&l) {
             return;
@@ -1956,7 +1958,7 @@ impl Engine {
         );
     }
 
-    /// Lokales Objekt weicht auf einen Konfliktnamen aus (rein lokal; danach wird der neue Name hochgeladen).
+    /// The local object yields to a conflict name (purely local; the new name is uploaded later).
     fn yield_local_name(&mut self, l: LocalId, le: &LocalEntry, p: NodeId, cx: &mut Ctx) {
         let name = self.conflict_name(p, Some(le.parent), &le.name);
         self.emit_local(
@@ -1972,7 +1974,7 @@ impl Engine {
         );
     }
 
-    /// Bricht einen lokalen Tausch-Zyklus: `o` vorübergehend auf einen freien Namen schieben.
+    /// Breaks a local swap cycle: temporarily move `o` to a free name.
     fn yield_local_temp(&mut self, o: LocalId, cx: &mut Ctx) {
         let Some(oe) = self.local.get(o).cloned() else {
             return;
@@ -1992,7 +1994,7 @@ impl Engine {
         );
     }
 
-    /// Bricht einen Tausch-Zyklus auf dem Server: `m` vorübergehend auf einen freien Namen schieben.
+    /// Breaks a swap cycle on the server: temporarily move `m` to a free name.
     fn yield_remote_temp(&mut self, m: NodeId, cx: &mut Ctx) {
         let Some((p, home)) = self.eff_remote_loc(m) else {
             return;
@@ -2010,8 +2012,8 @@ impl Engine {
         );
     }
 
-    /// Lokaler Ordner, dessen Knoten auf dem Server gelöscht ist, der aber noch Inhalt hat, der erst
-    /// wegziehen muss. Steht er dabei im Weg, kann er Teil eines Warte-Zyklus sein.
+    /// A local directory whose node has been deleted on the server, but which still has content
+    /// that must move away first. If it is in the way, it can be part of a wait cycle.
     fn deleted_remotely_with_content(&self, o: LocalId) -> bool {
         let Some(m) = self.st.synced.node_of(o) else {
             return false;
@@ -2021,7 +2023,7 @@ impl Engine {
             && self.local.has_children(o)
     }
 
-    /// Spiegelbild: Server-Ordner, der lokal gelöscht ist, aber auf dem Server noch Inhalt hat.
+    /// Mirror image: a server directory deleted locally that still has content on the server.
     fn deleted_locally_with_content(&self, m: NodeId) -> bool {
         let Some(sm) = self.st.synced.get(m) else {
             return false;
@@ -2029,8 +2031,8 @@ impl Engine {
         sm.kind == Kind::Dir && !self.local.contains(sm.local) && !self.eff_children(m).is_empty()
     }
 
-    /// Würde das Hochladen der lokalen Ortsänderung von `m` auf dem Server einen Zyklus erzeugen?
-    /// Dann gewinnt der Server, und `m` bleibt (bzw. kehrt zurück) an seinem Server-Ort.
+    /// Would uploading the local location change of `m` create a cycle on the server?
+    /// Then the server wins, and `m` stays at (or returns to) its server location.
     fn push_would_cycle(&self, m: NodeId) -> bool {
         let Some(sm) = self.st.synced.get(m) else {
             return false;
@@ -2041,8 +2043,8 @@ impl Engine {
         p == m || self.eff_is_within(p, m)
     }
 
-    /// Folgt der Kette „o will an einen Ort, an dem schon jemand liegt, der ebenfalls weg will …“.
-    /// `true`, wenn sie bei `l` ankommt (lokaler Tausch-Zyklus).
+    /// Follows the chain "o wants to go to a place already taken by someone who also wants to
+    /// leave …". `true` if it arrives at `l` (local swap cycle).
     fn local_cycle(&self, o: LocalId, l: LocalId) -> bool {
         let mut cur = o;
         for _ in 0..MAX_CHAIN {
@@ -2058,13 +2060,13 @@ impl Engine {
                         return false;
                     };
                     if ce.parent == tl && self.local.key(&ce.name) == self.local.key(&target.1) {
-                        return false; // cur ist schon am Ziel
+                        return false; // cur is already at its target
                     }
                     self.local_occupant(tl, &target.1, Some(cur))
                 }
                 None => {
-                    // Der Zielordner fehlt lokal und muss erst entstehen (ggf. samt fehlender
-                    // Vorfahren): Wer belegt den Platz des obersten fehlenden Ordners?
+                    // The target directory is missing locally and must be created first (possibly
+                    // with missing ancestors): who occupies the place of the topmost missing one?
                     let mut t = target.0;
                     let mut found = None;
                     for _ in 0..MAX_CHAIN {
@@ -2092,7 +2094,7 @@ impl Engine {
         false
     }
 
-    /// Wie [`Self::local_cycle`], aber für gewünschte Verschiebungen auf dem Server.
+    /// Like [`Self::local_cycle`], but for desired moves on the server.
     fn remote_cycle(&self, m: NodeId, n: NodeId) -> bool {
         let mut cur = m;
         for _ in 0..MAX_CHAIN {
@@ -2112,7 +2114,7 @@ impl Engine {
     }
 
     // ------------------------------------------------------------------------------------------
-    // Hilfsfunktionen
+    // Helpers
     // ------------------------------------------------------------------------------------------
 
     fn new_op_id(&mut self) -> OpId {
@@ -2136,14 +2138,14 @@ impl Engine {
         cx.ops.push(Op::Local(id, op));
     }
 
-    /// Ort eines lokalen Objekts im Knoten-Raum. `None`, wenn der lokale Elternordner noch unverknüpft ist.
+    /// Location of a local object in node space. `None` if its local parent is not linked yet.
     fn local_loc(&self, le: &LocalEntry) -> Option<(NodeId, Name)> {
         self.local_parent_node(le.parent)
             .map(|p| (p, le.name.clone()))
     }
 
-    /// Ort eines lokalen Objekts für den Abgleich. Liegt es auf einem eigenen temporären
-    /// Ausweichnamen, zählt sein vereinbarter Ort (das Ausweichen ist keine Nutzeränderung).
+    /// Location of a local object for reconciliation. If it is on one of our own temporary
+    /// yield names, its synced location counts (yielding is not a user change).
     fn loc_of(&self, l: LocalId) -> Option<(NodeId, Name)> {
         let le = self.local.get(l)?;
         if let Some((tp, tn)) = self.st.local_temps.get(&l)
@@ -2165,7 +2167,7 @@ impl Engine {
         }
     }
 
-    /// Lokaler Ordner zu einem Knoten, falls er lokal existiert.
+    /// Local directory for a node, if it exists locally.
     fn local_of_node(&self, n: NodeId) -> Option<LocalId> {
         if n == self.root() {
             return self.local_root;
@@ -2186,7 +2188,7 @@ impl Engine {
             || (s.kind == Kind::File && le.content != s.content)
     }
 
-    /// Server-Ort eines Knotens unter Berücksichtigung eigener, in R noch nicht sichtbarer Operationen.
+    /// Server location of a node, taking into account our own operations not yet visible in R.
     fn eff_remote_loc(&self, n: NodeId) -> Option<(NodeId, Name)> {
         if self.st.pending.contains_key(&n) {
             return self.st.synced.get(n).map(|s| (s.parent, s.name.clone()));
@@ -2233,7 +2235,7 @@ impl Engine {
         })
     }
 
-    /// Liegt `id` auf dem Server (effektiv) gleich `ancestor` oder darunter?
+    /// Is `id` (effectively) equal to or below `ancestor` on the server?
     fn eff_is_within(&self, id: NodeId, ancestor: NodeId) -> bool {
         let mut cur = id;
         for _ in 0..=(self.st.remote.len() + self.st.pending.len() + 1) {
@@ -2248,11 +2250,11 @@ impl Engine {
                 None => return false,
             }
         }
-        // Zyklus: vorsichtshalber „ja“ (verhindert eine Verschiebung)
+        // Cycle: answer "yes" to be safe (prevents a move)
         true
     }
 
-    /// Freier Konfliktname „Name (Konflikt Gerät N).ext“ – frei auf dem Server und lokal.
+    /// Free conflict name `Name (Konflikt <device> N).ext` – free both on the server and locally.
     fn conflict_name(
         &mut self,
         remote_parent: NodeId,
@@ -2269,8 +2271,8 @@ impl Engine {
         }
     }
 
-    /// Temporärer Ausweichname. Er trägt den Heimatnamen in sich („.xlrx-tmp-Gerät-7~Bericht.txt“),
-    /// damit jedes Gerät ein dort hängengebliebenes Objekt zurückbenennen kann.
+    /// Temporary yield name. It embeds the home name (".xlrx-tmp-Device-7~Report.txt"),
+    /// so that any device can rename back an object that got stuck there.
     fn temp_name(
         &mut self,
         remote_parent: Option<NodeId>,
@@ -2312,12 +2314,12 @@ impl Engine {
             .collect()
     }
 
-    /// Gerätename für temporäre Namen: ohne „~“, das dort Präfix und Heimatnamen trennt.
+    /// Device name for temporary names: without "~", which separates prefix and home name there.
     fn temp_device(&self) -> String {
         self.device().replace('~', "-")
     }
 
-    /// Lesbare Zusammenfassung des Zustands (für Fehlersuche im Simulator).
+    /// Human-readable summary of the state (for debugging in the simulator).
     pub fn debug_summary(&self) -> String {
         use std::fmt::Write as _;
         let mut out = String::new();
@@ -2367,10 +2369,10 @@ impl Engine {
     }
 
     // ------------------------------------------------------------------------------------------
-    // Prüfungen
+    // Checks
     // ------------------------------------------------------------------------------------------
 
-    /// Prüft innere Konsistenz. Im Test führt ein Fehler zum Abbruch.
+    /// Checks internal consistency. In tests, an error aborts the run.
     pub fn check_invariants(&self) -> Result<(), String> {
         self.st.synced.check()?;
         let root = self.root();

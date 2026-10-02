@@ -1,6 +1,6 @@
-//! Durchsatz-Messungen für Chunking und Hashing.
+//! Throughput measurements for chunking and hashing.
 //!
-//! `cargo bench -p xlrx-chunk` – auf dem DS918+ zusätzlich `examples/hashdir.rs` mit echten Daten nutzen.
+//! `cargo bench -p xlrx-chunk` – on the DS918+, also use `examples/hashdir.rs` with real data.
 
 use std::hint::black_box;
 

@@ -1,4 +1,4 @@
-//! Kleiner, deterministischer Zufallsgenerator (SplitMix64). Gleicher Seed ⇒ gleicher Ablauf, auf jeder Plattform.
+//! Small deterministic random number generator (SplitMix64). Same seed ⇒ same run, on any platform.
 
 #[derive(Clone, Debug)]
 pub struct Rng(u64);
@@ -16,12 +16,12 @@ impl Rng {
         z ^ (z >> 31)
     }
 
-    /// Gleichverteilt in `0..n` (`n > 0`).
+    /// Uniformly distributed in `0..n` (`n > 0`).
     pub fn below(&mut self, n: usize) -> usize {
         (self.next_u64() % n as u64) as usize
     }
 
-    /// Mit Wahrscheinlichkeit `per_mille / 1000` wahr.
+    /// True with probability `per_mille / 1000`.
     pub fn chance(&mut self, per_mille: u32) -> bool {
         (self.next_u64() % 1000) < u64::from(per_mille)
     }

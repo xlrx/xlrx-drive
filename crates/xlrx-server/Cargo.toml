@@ -1,6 +1,6 @@
 [package]
 name = "xlrx-server"
-description = "Server von xlrx-drive: API, Sync, Anmeldung"
+description = "xlrx-drive server: API, sync, sign-in"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

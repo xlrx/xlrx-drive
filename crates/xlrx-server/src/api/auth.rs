@@ -1,4 +1,4 @@
-//! Anmeldung: Passwort → TOTP/Wiederherstellungscode/Passkey, oder Passkey allein; Abmelden; Step-up.
+//! Sign-in: password → TOTP/recovery code/passkey, or passkey alone; sign-out; step-up.
 
 use axum::Json;
 use axum::extract::State;
@@ -31,7 +31,7 @@ pub struct LoginReq {
 
 #[derive(Serialize)]
 pub struct LoginResp {
-    /// Zwischenschritt-Token für den zweiten Faktor (5 Minuten gültig).
+    /// Intermediate-step token for the second factor (valid for 5 minutes).
     pub challenge: String,
     pub totp: bool,
     pub passkey: bool,
@@ -107,7 +107,7 @@ pub async fn login(
     }))
 }
 
-/// Zwischenschritt nach dem Passwort. Jeder Versuch zählt; nach 5 Fehlversuchen verfällt er.
+/// Intermediate step after the password. Every attempt counts; it expires after 5 failed attempts.
 async fn second_factor(st: &AppState, token: &str) -> ApiResult<(Vec<u8>, UserRow)> {
     let hash = hash_token(token);
     let row: Option<(i64, i32)> = sqlx::query_as(
@@ -139,7 +139,7 @@ async fn delete_challenge(st: &AppState, hash: &[u8]) -> ApiResult<()> {
     Ok(())
 }
 
-/// Anmeldung abgeschlossen: Sitzung anlegen, Cookie setzen.
+/// Sign-in completed: create a session, set the cookie.
 pub async fn complete_login(
     st: &AppState,
     user: &UserRow,
@@ -231,9 +231,9 @@ pub async fn recovery(
 
 #[derive(Deserialize)]
 pub struct PasskeyBeginReq {
-    /// Anmeldung nur mit Passkey.
+    /// Passkey-only sign-in.
     pub username: Option<String>,
-    /// Oder: Passkey als zweiter Faktor nach dem Passwort.
+    /// Or: passkey as the second factor after the password.
     pub challenge: Option<String>,
 }
 
@@ -315,7 +315,7 @@ pub struct PasskeyFinishReq {
     pub credential: PublicKeyCredential,
 }
 
-/// Prüft eine Passkey-Antwort und aktualisiert Zähler und letzte Nutzung.
+/// Verifies a passkey response and updates the counter and last use.
 async fn finish_auth(
     st: &AppState,
     ceremony: &str,

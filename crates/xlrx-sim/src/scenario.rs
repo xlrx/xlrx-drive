@@ -1,4 +1,4 @@
-//! Handgeschriebene Szenarien mit Pfaden statt Zufall – für lesbare Verhaltenstests.
+//! Hand-written scenarios using paths instead of randomness, for readable behavior tests.
 //!
 //! ```ignore
 //! let mut w = World::new(2, false);
@@ -16,7 +16,7 @@ use crate::driver;
 use crate::fs::SimFs;
 use crate::server::SimServer;
 
-/// Inhalt aus einer Nummer (Tag); `tag_of` ist die Umkehrung.
+/// Content from a number (tag); `tag_of` is the inverse.
 pub fn content(tag: u64) -> FileContent {
     let mut h = [0u8; 32];
     h[..8].copy_from_slice(&tag.to_le_bytes());
@@ -32,7 +32,7 @@ pub fn tag_of(c: &FileContent) -> u64 {
     u64::from_le_bytes(b)
 }
 
-/// Zählt Übertragungen, um Effizienz zu prüfen (z.B. Ersteinrichtung ohne Downloads).
+/// Counts transfers to check efficiency (e.g. initial setup without downloads).
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Transfers {
     pub downloads: usize,
@@ -53,10 +53,10 @@ pub struct World {
     pub transfers: Transfers,
 }
 
-/// Inhalt eines Baums: Pfad → `None` (Ordner) bzw. `Some(tag)` (Datei).
+/// Contents of a tree: path → `None` (folder) or `Some(tag)` (file).
 pub type Listing = BTreeMap<String, Option<u64>>;
 
-/// Ergebnis einer ausgeführten, aber noch nicht an die Engine gemeldeten Operation.
+/// Result of an operation that was executed but not yet reported to the engine.
 #[derive(Debug)]
 pub enum Outcome {
     Local(OpId, LocalResult),
@@ -104,7 +104,7 @@ impl World {
         self.clock
     }
 
-    /// Anderer Gerätename (nur vor dem ersten Sync sinnvoll).
+    /// Changes the device name (only meaningful before the first sync).
     pub fn set_device(&mut self, c: usize, device: &str) {
         let cl = &mut self.clients[c];
         let config = Config {
@@ -116,7 +116,7 @@ impl World {
         cl.device = device.to_owned();
     }
 
-    // ------------------------------------------------------------ Client-Dateisystem
+    // ------------------------------------------------------------ Client file system
 
     fn client_dir(&mut self, c: usize, parts: &[Name], create: bool) -> Option<u64> {
         let clock = self.tick();
@@ -139,7 +139,7 @@ impl World {
         self.clients[c].fs.lookup(d, last)
     }
 
-    /// Schreibt eine Datei (legt sie samt Ordnern an oder ändert den Inhalt am Ort).
+    /// Writes a file (creates it along with its folders, or changes its content in place).
     pub fn client_write(&mut self, c: usize, path: &str, tag: u64) {
         let parts = split(path);
         let (last, dir) = parts.split_last().expect("Pfad");
@@ -155,7 +155,7 @@ impl World {
         }
     }
 
-    /// „Atomic Save“: neue Datei schreiben und über das Original umbenennen (neue Inode).
+    /// "Atomic save": write a new file and rename it over the original (new inode).
     pub fn client_atomic_save(&mut self, c: usize, path: &str, tag: u64) {
         let f = self.client_lookup(c, path).expect("Datei existiert");
         let clock = self.tick();
@@ -190,7 +190,7 @@ impl World {
         self.clients[c].fs.rm_rf(x);
     }
 
-    // ------------------------------------------------------------ Server (z.B. Web-UI)
+    // ------------------------------------------------------------ Server (e.g. web UI)
 
     fn server_dir(&mut self, parts: &[Name], create: bool) -> Option<NodeId> {
         let mut cur = self.server.root;
@@ -246,7 +246,7 @@ impl World {
 
     // ------------------------------------------------------------ Sync
 
-    /// Abrufen und vollständig scannen, ohne zu planen.
+    /// Fetch and run a full scan, without planning.
     pub fn scan_client(&mut self, c: usize) {
         let cursor = self.clients[c].engine.state().cursor.unwrap_or(Seq(0));
         let (changes, new_cursor) = self.server.changes_since(cursor);
@@ -260,7 +260,7 @@ impl World {
         self.check(c);
     }
 
-    /// Abrufen, scannen und planen, ohne auszuführen (für Szenarien mit Ereignissen dazwischen).
+    /// Fetch, scan and plan without executing (for scenarios with events in between).
     pub fn plan_client(&mut self, c: usize) -> Vec<Op> {
         self.scan_client(c);
         let ops = self.clients[c].engine.plan();
@@ -268,7 +268,7 @@ impl World {
         ops
     }
 
-    /// Führt eine Operation aus, meldet das Ergebnis aber noch nicht (siehe [`Self::deliver`]).
+    /// Executes an operation but does not report the result yet (see [`Self::deliver`]).
     pub fn execute(&mut self, c: usize, op: Op) -> Outcome {
         match op {
             Op::Local(id, lop) => {
@@ -297,7 +297,7 @@ impl World {
         }
     }
 
-    /// Meldet ein Ergebnis an die Engine (auch verspätet).
+    /// Reports a result to the engine (possibly late).
     pub fn deliver(&mut self, c: usize, o: Outcome) {
         match o {
             Outcome::Local(id, r) => self.clients[c].engine.on_local_result(id, r),
@@ -313,7 +313,7 @@ impl World {
         }
     }
 
-    /// Ein Client: abrufen, scannen, planen, ausführen – bis nichts mehr zu tun ist.
+    /// One client: fetch, scan, plan, execute, until there is nothing left to do.
     pub fn sync_client(&mut self, c: usize) {
         for _ in 0..500 {
             let mut ops = self.plan_client(c);
@@ -332,7 +332,7 @@ impl World {
         panic!("Client {c} kommt nicht zur Ruhe");
     }
 
-    /// Alle Clients reihum synchronisieren, bis sich nichts mehr ändert.
+    /// Sync all clients in turn until nothing changes any more.
     pub fn sync(&mut self) {
         for _ in 0..20 {
             let before = self.server.seq();
@@ -346,8 +346,8 @@ impl World {
         panic!("Sync kommt nicht zur Ruhe");
     }
 
-    /// Plant und führt alle Operationen aus, stürzt aber ab, bevor ein Ergebnis verarbeitet wird.
-    /// (Server und Dateisystem sind danach verändert, die Engine weiß davon nichts.)
+    /// Plans and executes all operations, but crashes before any result is processed.
+    /// (Afterwards the server and file system have changed, but the engine knows nothing of it.)
     pub fn execute_then_crash(&mut self, c: usize) {
         let ops = self.plan_client(c);
         for op in ops {
@@ -356,13 +356,13 @@ impl World {
         self.crash(c);
     }
 
-    /// Simuliert einen Absturz: Die Engine startet aus dem zuletzt persistierten Zustand.
+    /// Simulates a crash: the engine restarts from the last persisted state.
     pub fn crash(&mut self, c: usize) {
         let cl = &mut self.clients[c];
         cl.engine = Engine::from_state(cl.persisted.clone());
     }
 
-    // ------------------------------------------------------------ Ansichten
+    // ------------------------------------------------------------ Views
 
     pub fn server_listing(&self) -> Listing {
         self.server
@@ -385,7 +385,7 @@ impl World {
         self.server_listing().get(path).copied().flatten()
     }
 
-    /// Prüft, dass alle Clients exakt den Server-Stand haben.
+    /// Checks that all clients have exactly the server's state.
     pub fn assert_converged(&self) {
         let s = self.server_listing();
         for c in 0..self.clients.len() {

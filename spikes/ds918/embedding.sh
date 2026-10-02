@@ -1,6 +1,6 @@
 #!/bin/sh
-# Lokales Embedding-Modell ohne AVX (PLAN 7.5): ONNX Runtime (multilingual-e5-small) gegen llama.cpp
-# (EmbeddingGemma 300M). Läuft im Container auf dem NAS; lädt die Modelle einmal aus dem Internet.
+# Local embedding model without AVX (PLAN 7.5): ONNX Runtime (multilingual-e5-small) vs. llama.cpp
+# (EmbeddingGemma 300M). Runs in a container on the NAS; downloads the models from the internet once.
 #   sudo sh spikes/ds918/embedding.sh
 set -u
 cd "$(dirname "$0")"

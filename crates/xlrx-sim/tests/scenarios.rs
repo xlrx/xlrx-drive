@@ -1,5 +1,5 @@
-//! Verhaltenstests der Sync-Engine in lesbaren Szenarien.
-//! Jeder Test beschreibt eine Regel aus `docs/adr/0001-sync-engine.md`.
+//! Behavior tests of the sync engine as readable scenarios.
+//! Each test describes a rule from `docs/adr/0001-sync-engine.md`.
 
 use xlrx_sim::scenario::World;
 
@@ -18,7 +18,7 @@ fn neue_datei_kommt_auf_allen_geraeten_an() {
 
 #[test]
 fn ersteinrichtung_verknuepft_gleiche_staende_ohne_uebertragung() {
-    // Typisch bei der Migration von Synology Drive: Server und Mac haben schon dieselben Dateien.
+    // Typical when migrating from Synology Drive: server and Mac already have the same files.
     let mut w = World::new(1, false);
     w.server_write("/a.txt", 1);
     w.server_write("/Ordner/b.txt", 2);
@@ -38,8 +38,8 @@ fn gleichzeitiges_bearbeiten_erzeugt_konfliktkopie_statt_ueberschreiben() {
     let mut w = World::new(2, false);
     w.client_write(0, "/a.txt", 1);
     w.sync();
-    w.client_write(0, "/a.txt", 2); // Mac 0 bearbeitet
-    w.client_write(1, "/a.txt", 3); // Mac 1 bearbeitet gleichzeitig
+    w.client_write(0, "/a.txt", 2); // Mac 0 edits
+    w.client_write(1, "/a.txt", 3); // Mac 1 edits at the same time
     w.sync();
     w.assert_converged();
     let contents: Vec<u64> = w.server_listing().values().filter_map(|c| *c).collect();
@@ -61,8 +61,8 @@ fn bearbeiten_gewinnt_gegen_loeschen_auf_dem_server() {
     let mut w = World::new(1, false);
     w.client_write(0, "/a.txt", 1);
     w.sync();
-    w.server_rm("/a.txt"); // jemand löscht in der Web-UI
-    w.client_write(0, "/a.txt", 2); // gleichzeitig wird lokal bearbeitet
+    w.server_rm("/a.txt"); // someone deletes it in the web UI
+    w.client_write(0, "/a.txt", 2); // meanwhile it is edited locally
     w.sync();
     assert_eq!(w.server_file("/a.txt"), Some(2));
     w.assert_converged();
@@ -85,8 +85,8 @@ fn ordner_loeschen_behaelt_neue_datei_darin() {
     let mut w = World::new(2, false);
     w.client_write(0, "/Ordner/alt.txt", 1);
     w.sync();
-    w.client_rm(0, "/Ordner"); // Mac 0 löscht den Ordner
-    w.client_write(1, "/Ordner/neu.txt", 2); // Mac 1 legt gleichzeitig etwas hinein
+    w.client_rm(0, "/Ordner"); // Mac 0 deletes the folder
+    w.client_write(1, "/Ordner/neu.txt", 2); // Mac 1 puts something into it at the same time
     w.sync();
     assert_eq!(
         w.server_file("/Ordner/neu.txt"),
@@ -108,7 +108,7 @@ fn atomic_save_ist_eine_aenderung_und_behaelt_die_identitaet() {
     w.client_write(0, "/Text.pages", 1);
     w.sync();
     let before = w.server_node("/Text.pages");
-    w.client_atomic_save(0, "/Text.pages", 2); // neue Datei über die alte umbenannt
+    w.client_atomic_save(0, "/Text.pages", 2); // new file renamed over the old one
     w.sync();
     assert_eq!(w.server_file("/Text.pages"), Some(2));
     assert_eq!(
@@ -157,8 +157,8 @@ fn verschieben_ueber_kreuz_fuehrt_nicht_zu_zyklus() {
     w.client_write(0, "/A/a.txt", 1);
     w.client_write(0, "/B/b.txt", 2);
     w.sync();
-    w.client_mv(0, "/B", "/A/B"); // lokal: B in A
-    w.server_mv("/A", "/B/A"); // Server: A in B
+    w.client_mv(0, "/B", "/A/B"); // locally: B into A
+    w.server_mv("/A", "/B/A"); // server: A into B
     w.sync();
     w.assert_converged();
     let tags: Vec<u64> = w.server_listing().values().filter_map(|c| *c).collect();
@@ -189,8 +189,8 @@ fn absturz_nach_upload_erzeugt_keine_duplikate() {
     w.sync();
     w.client_write(0, "/b.txt", 2);
     w.client_mv(0, "/a.txt", "/c.txt");
-    // Hochladen und Umbenennen erreichen den Server, aber der Client stürzt ab, bevor er die
-    // Antworten verarbeitet. Nach dem Neustart wiederholt er die Operationen mit derselben ID.
+    // Upload and rename reach the server, but the client crashes before processing the
+    // responses. After restarting, it repeats the operations with the same ID.
     w.execute_then_crash(0);
     w.sync();
     assert_eq!(
