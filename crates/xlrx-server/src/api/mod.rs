@@ -7,6 +7,7 @@ pub mod files;
 pub mod me;
 pub mod setup;
 pub mod sync;
+pub mod uploads;
 
 use axum::Router;
 use axum::extract::{Request, State};
@@ -17,7 +18,7 @@ use axum::http::header::{
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
@@ -103,6 +104,10 @@ pub fn router(state: AppState) -> Router {
             get(files::content).put(files::replace_content),
         )
         .route("/nodes/{id}/files", post(files::upload))
+        .route("/uploads", post(uploads::create))
+        .route("/uploads/{id}", get(uploads::status).delete(uploads::abort))
+        .route("/uploads/{id}/parts", put(uploads::put_part))
+        .route("/uploads/{id}/commit", post(uploads::commit))
         .route("/nodes/{id}/folders", post(files::create_folder))
         .route("/nodes/{id}/versions", get(files::versions))
         .route("/versions/{id}/content", get(files::version_content))

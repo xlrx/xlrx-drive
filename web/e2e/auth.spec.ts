@@ -1,6 +1,6 @@
 // Account setup, login with authenticator app and passkey, administration, browsing files – in a
 // real browser.
-import { createHash, createHmac } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -105,6 +105,40 @@ async function connectDevice(page: Page) {
 	await expect(tab.getByText('Noch keine Geräte.')).toBeVisible();
 	expect((await tab.request.get('/api/roots', { headers: auth })).status()).toBe(401);
 	await tab.close();
+}
+
+/**
+ * A file over 8 MiB goes in parts: a lost part is sent again on its own, and after a refused part
+ * "Fortsetzen" sends only what is missing.
+ */
+async function uploadLarge(page: Page, data: string) {
+	const MIB = 1024 * 1024;
+	const content = randomBytes(18 * MIB);
+	const seen: number[] = [];
+	let lose = true;
+	let refuse = true;
+	await page.route(/\/api\/uploads\/[^/]+\/parts\?offset=\d+$/, async (route) => {
+		const offset = Number(new URL(route.request().url()).searchParams.get('offset'));
+		seen.push(offset);
+		if (offset === 8 * MIB && lose) {
+			lose = false;
+			return route.abort('failed');
+		}
+		if (offset === 16 * MIB && refuse) {
+			refuse = false;
+			return route.fulfill({ status: 400, contentType: 'application/json', body: '{"error":"Testfehler"}' });
+		}
+		return route.continue();
+	});
+	await page.getByRole('link', { name: 'Dateien', exact: true }).click();
+	await page.getByTestId('upload-input').setInputFiles({ name: 'Gross.bin', mimeType: 'application/octet-stream', buffer: content });
+	await expect(page.getByText('Testfehler')).toBeVisible({ timeout: 15_000 });
+	await page.getByRole('button', { name: 'Fortsetzen' }).click();
+	await expect(page.getByRole('link', { name: 'Gross.bin', exact: true })).toBeVisible({ timeout: 15_000 });
+	await page.unroute(/\/api\/uploads\//);
+	expect(seen).toEqual([0, 8 * MIB, 8 * MIB, 16 * MIB, 16 * MIB]);
+	expect(readFileSync(join(data, 'homes/admin/Drive/Gross.bin')).equals(content)).toBe(true);
+	await page.getByRole('button', { name: 'Uploads schließen' }).click();
 }
 
 /** Browses "My Drive" of the signed-in admin: folders, preview, download, rescan. */
@@ -315,6 +349,7 @@ test('Einrichtung, Anmeldung, Verwaltung und Dateien', async ({ page }) => {
 	if (data) {
 		await browseFiles(page, data);
 		await changeFiles(page, data);
+		await uploadLarge(page, data);
 	}
 	await connectDevice(page);
 });

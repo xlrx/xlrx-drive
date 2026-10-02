@@ -1,5 +1,6 @@
 // Upload queue of the file views: one file at a time, with progress and a question when a name
-// is taken (replace keeps the old content as a version).
+// is taken (replace keeps the old content as a version). Large files go in parts; one that failed
+// can be continued where it stopped.
 
 export interface UploadItem {
 	key: number;
@@ -8,6 +9,17 @@ export interface UploadItem {
 	loaded: number;
 	state: 'waiting' | 'asking' | 'uploading' | 'done' | 'skipped' | 'error';
 	error?: string;
+	/** The server keeps what arrived: "Fortsetzen" sends only the rest. */
+	resumable?: boolean;
+}
+
+interface Entry {
+	file: File;
+	parentId: number;
+	item: UploadItem;
+	/** Decided when the name was taken (kept for continuing). */
+	target?: UploadTarget;
+	parts: Resumable;
 }
 
 interface Question {
@@ -20,7 +32,8 @@ interface Question {
 export function useUploads(onChange: () => void) {
 	const items = ref<UploadItem[]>([]);
 	const question = shallowRef<Question | null>(null);
-	const queue: { file: File; parentId: number; item: UploadItem }[] = [];
+	const queue: Entry[] = [];
+	const failed = new Map<number, Entry>();
 	let running = false;
 	let remembered: ConflictChoice | null = null;
 	let next = 0;
@@ -35,7 +48,7 @@ export function useUploads(onChange: () => void) {
 				state: 'waiting'
 			});
 			items.value.push(item);
-			queue.push({ file, parentId, item });
+			queue.push({ file, parentId, item, parts: {} });
 		}
 		if (!running) void run();
 	}
@@ -57,13 +70,18 @@ export function useUploads(onChange: () => void) {
 	async function run() {
 		running = true;
 		while (queue.length) {
-			const { file, parentId, item } = queue.shift()!;
+			const entry = queue.shift()!;
+			const { item } = entry;
 			item.state = 'uploading';
+			item.error = undefined;
+			item.resumable = false;
 			try {
-				await uploadOne(file, parentId, item);
+				await uploadOne(entry);
 			} catch (e) {
 				item.state = 'error';
 				item.error = errorMessage(e);
+				item.resumable = !!entry.parts.uploadId;
+				failed.set(item.key, entry);
 			}
 			onChange();
 		}
@@ -71,8 +89,16 @@ export function useUploads(onChange: () => void) {
 		remembered = null;
 	}
 
-	async function uploadOne(file: File, parentId: number, item: UploadItem) {
+	async function uploadOne(entry: Entry) {
+		const { file, parentId, item } = entry;
 		const progress = (n: number) => (item.loaded = n);
+		if (entry.target) {
+			// Continuing: the decision about the name was made already.
+			await uploadFile(file, entry.target, progress, entry.parts);
+			item.loaded = file.size;
+			item.state = 'done';
+			return;
+		}
 		// Check the name first, so a large file is not sent only to be refused.
 		const children = await apiGet<NodeInfo[]>(`/nodes/${parentId}/children`);
 		const existing = children.find((c) => sameName(c.name, file.name));
@@ -92,13 +118,11 @@ export function useUploads(onChange: () => void) {
 			item.state = 'skipped';
 			return;
 		}
-		if (choice === 'replace' && existing) {
-			const q = uploadQuery(file, { base_rev: String(existing.rev) });
-			await sendFile('PUT', `/nodes/${existing.id}/content?${q}`, file, progress);
-		} else {
-			const q = uploadQuery(file, { name: file.name, ...(choice === 'keep_both' ? { keep_both: 'true' } : {}) });
-			await sendFile('POST', `/nodes/${parentId}/files?${q}`, file, progress);
-		}
+		entry.target =
+			choice === 'replace' && existing
+				? { kind: 'replace', node_id: existing.id, base_rev: existing.rev }
+				: { kind: 'new', parent_id: parentId, name: file.name, keep_both: choice === 'keep_both' };
+		await uploadFile(file, entry.target, progress, entry.parts);
 		item.loaded = file.size;
 		item.state = 'done';
 	}
@@ -107,7 +131,18 @@ export function useUploads(onChange: () => void) {
 
 	function clear() {
 		items.value = items.value.filter((i) => ['waiting', 'asking', 'uploading'].includes(i.state));
+		for (const key of failed.keys()) if (!items.value.some((i) => i.key === key)) failed.delete(key);
 	}
 
-	return { items, question, active, add, clear };
+	/** Tries a failed upload again; with parts on the server, only the rest is sent. */
+	function resume(key: number) {
+		const entry = failed.get(key);
+		if (!entry) return;
+		failed.delete(key);
+		entry.item.state = 'waiting';
+		queue.push(entry);
+		if (!running) void run();
+	}
+
+	return { items, question, active, add, clear, resume };
 }

@@ -157,6 +157,9 @@ async fn serve(state: AppState) -> Result<(), String> {
         xlrx_server::files::ops::recover(&state, None)
             .await
             .map_err(|e| format!("Offene Vorgänge: {e:?}"))?;
+        xlrx_server::api::uploads::recover(&state)
+            .await
+            .map_err(|e| format!("Unterbrochene Uploads: {e:?}"))?;
         let st = state.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
@@ -168,6 +171,9 @@ async fn serve(state: AppState) -> Result<(), String> {
                 }
                 if let Err(e) = xlrx_server::files::content::collect_versions(&st).await {
                     tracing::warn!(error = ?e, "Aufräumen der Versionen fehlgeschlagen");
+                }
+                if let Err(e) = xlrx_server::api::uploads::housekeeping(&st).await {
+                    tracing::warn!(error = ?e, "Aufräumen der Uploads fehlgeschlagen");
                 }
             }
         });

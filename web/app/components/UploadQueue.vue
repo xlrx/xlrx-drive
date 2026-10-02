@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // Progress of the running uploads (bottom right).
 defineProps<{ items: UploadItem[]; active: boolean }>();
-const emit = defineEmits<{ close: [] }>();
+const emit = defineEmits<{ close: []; resume: [key: number] }>();
 const label: Record<UploadItem['state'], string> = {
 	waiting: 'wartet',
 	asking: 'wartet auf Antwort',
@@ -27,6 +27,9 @@ const label: Record<UploadItem['state'], string> = {
 				</div>
 				<progress v-if="i.state === 'uploading'" :value="i.loaded" :max="Math.max(i.size, 1)"></progress>
 				<p v-if="i.error" class="error">{{ i.error }}</p>
+				<button v-if="i.state === 'error'" type="button" class="again" @click="emit('resume', i.key)">
+					{{ i.resumable ? 'Fortsetzen' : 'Erneut versuchen' }}
+				</button>
 			</li>
 		</ul>
 	</section>
@@ -45,4 +48,5 @@ progress { width: 100%; height: 0.4rem; }
 .done .state { color: var(--ok); }
 .error .state { color: var(--danger); }
 li .error { margin: 0.2rem 0 0; font-size: 0.85rem; }
+.again { margin-top: 0.3rem; padding: 0.25rem 0.6rem; font-size: 0.85rem; }
 </style>

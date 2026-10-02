@@ -166,7 +166,7 @@ pub async fn notify(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
-fn hex32(s: &str) -> ApiResult<[u8; 32]> {
+pub(crate) fn hex32(s: &str) -> ApiResult<[u8; 32]> {
     let mut out = [0u8; 32];
     if s.len() != 64 {
         return Err(ApiError::bad("Ungültiger Hash."));
@@ -180,7 +180,7 @@ fn hex32(s: &str) -> ApiResult<[u8; 32]> {
     Ok(out)
 }
 
-fn hex(h: &[u8]) -> String {
+pub(crate) fn hex(h: &[u8]) -> String {
     h.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -192,7 +192,7 @@ fn state_dir(st: &AppState) -> ApiResult<PathBuf> {
 }
 
 /// Content uploaded by this person ahead of an operation (`PUT /sync/content/{hash}`).
-fn uploaded_path(st: &AppState, user: i64, hash: &[u8; 32]) -> ApiResult<PathBuf> {
+pub(crate) fn uploaded_path(st: &AppState, user: i64, hash: &[u8; 32]) -> ApiResult<PathBuf> {
     Ok(state_dir(st)?
         .join(store::STAGING)
         .join(format!("content-{user}-{}", hex(hash))))

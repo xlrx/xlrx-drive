@@ -18,10 +18,12 @@ use super::fs::SERVER_TEMP_PREFIX;
 pub const STAGING: &str = "store/staging";
 pub const VERSIONS: &str = "store/versions";
 pub const TRASH: &str = "store/trash";
+/// Uploads in parts while they arrive (kept as long as the upload is active, unlike staging).
+pub const UPLOADS: &str = "store/uploads";
 
 /// Creates the store directories.
 pub fn init(state_dir: &Path) -> io::Result<()> {
-    for d in [STAGING, VERSIONS, TRASH] {
+    for d in [STAGING, VERSIONS, TRASH, UPLOADS] {
         fs::create_dir_all(state_dir.join(d))?;
     }
     Ok(())

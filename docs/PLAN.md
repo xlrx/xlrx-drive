@@ -309,6 +309,12 @@ Das ist das Herzstück. Es ist bewusst nach dem Vorbild der Dropbox-„Nucleus�
      `Name (Konflikt – Klaus' MacBook 2026-10-02 14.03).ext` daneben an. Beide bleiben erhalten.
      Diese Auflösung findet serverseitig statt, damit sich alle Clients gleich verhalten.
 - **Viele kleine Dateien:** Batch-Endpunkte (mehrere Dateien pro Request, gestreamt) vermeiden ein Request-Gewitter, z.B. bei git-Checkouts.
+- **Umgesetzt (M1):** Upload-Sitzungen (`POST /api/uploads` mit Ziel „neue Datei“, „neuer Inhalt“ oder „Inhalt für den Sync“,
+  `PUT /api/uploads/{id}/parts?offset=…` mit höchstens 8 MiB und optionaler SHA-256-Prüfsumme, `GET` für den Stand, `…/commit` mit
+  optionalem Inhalts-Hash). Ein Teil wird erst bestätigt, wenn er auf der Platte ist (fsync). Schon Empfangenes wird nie überschrieben.
+  Nach einem Abbruch schickt der Client nur die fehlenden Bereiche. Ein Absturz mitten im Speichern wird beim Neustart sicher aufgelöst.
+  Unbenutzte Sitzungen verschwinden nach 24 h. Die Web-App lädt Dateien über 8 MiB so hoch, mit automatischer Wiederholung und „Fortsetzen“.
+  **Delta-Uploads** (nur fehlende Chunks, Chunk-Index) folgen mit dem Mac-Client (M5); sie passen als „Bereiche, die der Server schon hat“ hinein.
 - Ändert sich eine Datei während des Uploads, schlägt der Hash-Check am Ende fehl. Der Upload wird dann später wiederholt.
   Das betrifft z.B. Lightroom-Kataloge und SQLite-Dateien. Für geöffnete Datenbanken gilt zusätzlich eine Ruhezeit vor dem Upload.
 
@@ -1121,8 +1127,9 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
   - Ändern über die API: Ordner, Hochladen, Ersetzen mit Versionen (inhaltsadressiert, Reflink), Umbenennen/Verschieben, Papierkorb – jeweils mit Absichtsprotokoll, sodass ein Absturz an jeder Stelle nichts verliert (in Tests für jede Stelle nachgestellt).
   - Änderungs-Feed im Format der Sync-Engine und Live-Ereignisse (SSE); Schreib-Operationen der Sync-Engine über das API (Vorbedingungen, idempotente Op-IDs).
   - Anmeldung von Geräten (Mac/iPhone) über den Browser mit PKCE, rotierende Refresh-Tokens mit Erkennung von Wiederverwendung, Geräteliste mit Abmelden (16.1).
+  - Uploads in Teilen (≤ 8 MiB), wiederaufnehmbar, jeder Teil geprüft und vor der Bestätigung auf der Platte (5.3).
   - Web-App mit Durchsuchen, Vorschau, Hochladen, Versionen, Papierkorb und Live-Aktualisierung; Startseite mit Begrüßung und Berglandschaft nach Tageszeit aus dem App-Entwurf.
-- **Offen für M1:** Uploads in Chunks mit Wiederaufnahme, Vorschaubilder.
+- **Offen für M1:** Vorschaubilder.
 
 **Nächster Schritt:** Rest von M1, dann Inbetriebnahme auf dem DS918+ mit den Spike-Messungen.
 

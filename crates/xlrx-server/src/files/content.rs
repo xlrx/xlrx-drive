@@ -124,6 +124,11 @@ pub async fn stage(st: &AppState, body: Body, size: Option<u64>) -> ApiResult<St
     }
     file.sync_all().await.map_err(io_err)?;
     drop(file);
+    hash_staged(&mut staged).await?;
+    Ok(staged)
+}
+
+async fn hash_staged(staged: &mut Staged) -> ApiResult<()> {
     let p = staged.path.clone();
     let digest = blocking(move || digest_file(&mut Chunker::new(), &p))
         .await?
@@ -135,6 +140,18 @@ pub async fn stage(st: &AppState, body: Body, size: Option<u64>) -> ApiResult<St
     };
     staged.hash = digest.content.hash.0;
     staged.size = digest.content.size;
+    Ok(())
+}
+
+/// Takes over a complete file in the state directory (an upload put together from parts) as
+/// staged content and hashes it. From now on the file belongs to the returned `Staged`.
+pub async fn adopt(path: PathBuf) -> ApiResult<Staged> {
+    let mut staged = Staged {
+        path,
+        hash: [0; 32],
+        size: 0,
+    };
+    hash_staged(&mut staged).await?;
     Ok(staged)
 }
 

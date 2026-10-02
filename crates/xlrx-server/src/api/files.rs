@@ -388,7 +388,7 @@ pub struct UploadQuery {
     pub size: Option<u64>,
 }
 
-fn mtime(ms: Option<i64>) -> Option<OffsetDateTime> {
+pub(crate) fn mtime(ms: Option<i64>) -> Option<OffsetDateTime> {
     ms.and_then(|ms| OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000).ok())
 }
 

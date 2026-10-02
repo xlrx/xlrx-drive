@@ -294,10 +294,24 @@ impl Client {
 
     /// A request with a raw body (uploads).
     pub async fn send_bytes(&mut self, method: &str, path: &str, body: Vec<u8>) -> Resp {
+        self.send_bytes_with(method, path, body, &[]).await
+    }
+
+    /// A request with a raw body and extra headers.
+    pub async fn send_bytes_with(
+        &mut self,
+        method: &str,
+        path: &str,
+        body: Vec<u8>,
+        headers: &[(&str, &str)],
+    ) -> Resp {
         let mut req = Request::builder()
             .method(method)
             .uri(path)
             .header(header::CONTENT_TYPE, "application/octet-stream");
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
         if let Some(c) = &self.cookie {
             req = req.header(header::COOKIE, format!("xlrx_session={c}"));
         }

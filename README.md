@@ -14,7 +14,7 @@ Volltext-/KI-Suche, Teilen zwischen Benutzern, effizienter und zuverlässiger Sy
 | `crates/xlrx-chunk` | FastCDC + BLAKE3, Hash-Cache mit Schutz vor groben Zeitstempeln |
 | `crates/xlrx-sync` | Sync-Engine (sans-IO, drei Bäume, inkrementelle Planung) |
 | `crates/xlrx-sim` | Deterministischer Simulator: Abstürze, Netzfehler, späte Ergebnisse, SMB-Namensvarianten, grobe Zeitstempel |
-| `crates/xlrx-server` | Konten und Anmeldung (Passwort + TOTP oder Passkey, Wiederherstellungscodes, Step-up, Verwaltung, Audit-Log), Anmeldung von Geräten (PKCE, rotierende Tokens); Ablagen mit Abgleich und Überwachung (inotify), Hochladen, Umbenennen/Verschieben, Versionen, Papierkorb – absturzsicher |
+| `crates/xlrx-server` | Konten und Anmeldung (Passwort + TOTP oder Passkey, Wiederherstellungscodes, Step-up, Verwaltung, Audit-Log), Anmeldung von Geräten (PKCE, rotierende Tokens); Uploads in Teilen (wiederaufnehmbar); Ablagen mit Abgleich und Überwachung (inotify), Hochladen, Umbenennen/Verschieben, Versionen, Papierkorb – absturzsicher |
 | `web/` | Nuxt-App (Vue 3): Anmeldung, Einrichtung, Sicherheit mit Geräteliste, Geräte verbinden, Verwaltung; Dateien durchsuchen, Vorschau, Hochladen, Versionen, Papierkorb |
 | `deploy/` | Dockerfile, compose (PostgreSQL 18 + pgvector, Server, Caddy mit eigener IP und HTTP/3) |
 

@@ -168,7 +168,7 @@ async function newVersion(e: Event) {
 	const n = node.value;
 	if (!file || !n) return;
 	await act(async () => {
-		await sendFile('PUT', `/nodes/${n.id}/content?${uploadQuery(file, { base_rev: String(n.rev) })}`, file);
+		await uploadFile(file, { kind: 'replace', node_id: n.id, base_rev: n.rev });
 		notice.value = 'Neue Fassung gespeichert; die bisherige bleibt als Version erhalten.';
 	});
 }
@@ -341,7 +341,12 @@ async function newVersion(e: Event) {
 			:more="uploads.question.value.more"
 			@choose="(c, all) => uploads.question.value?.answer(c, all)"
 		/>
-		<UploadQueue :items="uploads.items.value" :active="uploads.active.value" @close="uploads.clear()" />
+		<UploadQueue
+			:items="uploads.items.value"
+			:active="uploads.active.value"
+			@close="uploads.clear()"
+			@resume="uploads.resume"
+		/>
 	</main>
 </template>
 
