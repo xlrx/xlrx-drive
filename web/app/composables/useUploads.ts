@@ -6,7 +6,7 @@ export interface UploadItem {
 	name: string;
 	size: number;
 	loaded: number;
-	state: 'waiting' | 'uploading' | 'done' | 'skipped' | 'error';
+	state: 'waiting' | 'asking' | 'uploading' | 'done' | 'skipped' | 'error';
 	error?: string;
 }
 
@@ -81,7 +81,9 @@ export function useUploads(onChange: () => void) {
 			const canReplace = existing.kind === 'file';
 			choice = remembered === 'replace' && !canReplace ? null : remembered;
 			if (!choice) {
+				item.state = 'asking';
 				const [c, forAll] = await ask(file.name, canReplace, queue.length > 0);
+				item.state = 'uploading';
 				choice = c;
 				if (forAll) remembered = c;
 			}
@@ -101,10 +103,10 @@ export function useUploads(onChange: () => void) {
 		item.state = 'done';
 	}
 
-	const active = computed(() => items.value.some((i) => i.state === 'waiting' || i.state === 'uploading'));
+	const active = computed(() => items.value.some((i) => ['waiting', 'asking', 'uploading'].includes(i.state)));
 
 	function clear() {
-		items.value = items.value.filter((i) => i.state === 'waiting' || i.state === 'uploading');
+		items.value = items.value.filter((i) => ['waiting', 'asking', 'uploading'].includes(i.state));
 	}
 
 	return { items, question, active, add, clear };

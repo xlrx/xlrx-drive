@@ -4,6 +4,7 @@ defineProps<{ items: UploadItem[]; active: boolean }>();
 const emit = defineEmits<{ close: [] }>();
 const label: Record<UploadItem['state'], string> = {
 	waiting: 'wartet',
+	asking: 'wartet auf Antwort',
 	uploading: 'lädt hoch',
 	done: 'fertig',
 	skipped: 'übersprungen',
