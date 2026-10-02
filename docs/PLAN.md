@@ -4,7 +4,7 @@
 > Volltextsuche, Teilen zwischen Benutzern, extrem effizienter und zuverlässiger Sync, Mac- und iOS-App.
 > Hosting: Docker (Container Manager) auf Synology, amd64.
 
-Stand: 2026-10-02 · Status: Entwurf v2 (Hardware, Zugriff, QUIC, lokale Embeddings eingearbeitet)
+Stand: 2026-10-02 · Status: Entwurf v3 (+ Object Storage für Backup und Außenzugriff, Datenklassen, KI-Rechner im Heimnetz)
 
 ---
 
@@ -43,7 +43,9 @@ Stand: 2026-10-02 · Status: Entwurf v2 (Hardware, Zugriff, QUIC, lokale Embeddi
 | Speichermodell | **Normale Dateien** auf dem Volume. Parallel nutzbar per SMB, File Station, Hyper Backup, Synology Photos. |
 | Mac-Client | **Beides, umschaltbar pro Sync-Ordner:** Spiegel-Ordner mit Selective Sync (Standard) **und** File-Provider-Modus (Dateien auf Abruf). |
 | Suche | Text aus PDF/Office/Mails, **OCR**, **semantische Suche**, **Bildsuche nach Inhalt**. |
-| ML-Rechenleistung | **Cloud-APIs mit Open-Source-Modellen**: Scaleway Generative APIs und/oder Cloudflare Workers AI. **Sensible Ordner bleiben lokal** und werden mit einem kleinen Embedding-Modell auf dem NAS durchsuchbar (siehe 7.5). |
+| ML-Rechenleistung | **Cloud-APIs mit Open-Source-Modellen**: Scaleway Generative APIs und/oder Cloudflare Workers AI. **Sensible Ordner bleiben lokal** und werden mit einem kleinen Embedding-Modell auf dem NAS durchsuchbar (siehe 7.5). Bei Bedarf kommt mehr lokale Rechenleistung über einen Rechner im Heimnetz (7.6). |
+| Datenklassen | Jeder Ordner ist **„Cloud erlaubt“** oder **„Nur lokal“** (vererbt). „Nur lokal“ ist **rechtlich begründet**, z.B. bei Gesundheitsdaten oder Daten Dritter. Diese Daten werden nie in der Cloud verarbeitet, auch nicht auf einer eigenen Cloud-VM. Sie landen in keinem S3-Cache und gehen nur clientseitig verschlüsselt ins Backup (siehe 7.4, 15.1). |
+| Rolle der Cloud | **Das NAS bleibt die Zentrale.** Object Storage (S3) dient als **verschlüsseltes externes Backup** und als **Beschleuniger für den Zugriff von außen** (Freigabe-Links, Downloads unterwegs). Eine Speicher-Schnittstelle im Server hält einen späteren Umzug in die Cloud offen (4.6). |
 | Nutzer | Familie/Team (bis ~20 Konten), Zugriff von unterwegs, **öffentliche Freigabe-Links**. |
 | Hardware | **DS918+**: Celeron J3455, 4 Kerne, **kein AVX**, DSM-Kernel 4.4, 16–20 GB RAM, **SSD-Lese-/Schreib-Cache**. Besonderheiten siehe 3.1. |
 | Bestandsdaten | `homes/<user>/Drive` (Synology Drive). Diese Ordner werden direkt als „Meine Ablage“ eingebunden. |
@@ -105,9 +107,13 @@ Die Kombination „normale Dateien + Google-Drive-UX + eigene Suche“ gibt es f
 │                                  └─ KI-Provider ──────────────────────────┼──► Scaleway (Paris)
 │  embed-local (OpenAI-kompatibel,    (OpenAI-kompatibel)                   │    Cloudflare Workers AI
 │   kleines Modell, ohne AVX) ◄────── lokal für sensible Ordner             │
+│                                                                           │
+│  xlrx-server ── Außen-Cache (nur „Cloud erlaubt“) ────────────────────────┼──► S3 Object Storage
+│  Hyper Backup (DSM) ── verschlüsseltes Backup ────────────────────────────┼──► S3 Object Storage
 └───────────────────────────────────────────────────────────────────────────┘
   /volume1/homes/<user>/Drive  Btrfs, normale Dateien    /volume1/xlrx-state/…  DB, Index, Thumbs
                                                           (profitiert vom SSD-Cache)
+  optional: KI-Rechner im Heimnetz (Mac mini / Mini-PC) für „Nur lokal“-Daten, siehe 7.6
 
 Clients
   Mac-App  ── xlrx-core (Rust via UniFFI) ── Spiegel-Modus (FSEvents) │ File-Provider-Modus
@@ -228,6 +234,20 @@ Die mtime des Clients wird übernommen (`utimensat`), damit SMB-Nutzer echte Än
   für Änderungen über die API. Entstehen über SMB trotzdem „Foo.txt“ und „foo.txt“, synchronisiert der Mac-Client
   eine davon als `foo (Groß-/Kleinschreibungskonflikt).txt`.
 - Unzulässige Zeichen und zu lange Pfade bekommen eine Warnung in der UI und werden nie still verworfen.
+
+### 4.6 Speicher-Schnittstelle (Cloud-Umzug offenhalten)
+Der Server greift auf Inhalte nur über eine Schnittstelle `ContentStore` zu: Inhalt nach Hash lesen (auch Byte-Bereiche),
+Version schreiben, Version aufbewahren, Papierkorb. Sync-Protokoll, Journal und Suche kennen nur Node-IDs und Hashes, keine Pfade auf der Platte.
+
+| Implementierung | Wann | Eigenschaften |
+|---|---|---|
+| `PlainFsStore` | **ab M1** | normale Dateien auf dem NAS, Watcher, Reflink-Versionen (dieses Kapitel) |
+| `S3CacheStore` | ab M3b | Spiegel einzelner Inhalte in S3 für den Außenzugriff (Kapitel 15.2), kein Primärspeicher |
+| `S3PackStore` | **nur bei Bedarf** | inhaltsadressierter Primärspeicher in S3: Chunks gebündelt in 16–64-MB-Objekten wie bei restic, mit Speicherbereinigung |
+
+Damit bleibt ein späterer Umzug machbar, etwa wenn der DS918+ ersetzt wird: auf ein neues NAS mit derselben Implementierung oder in die Cloud
+mit `S3PackStore`. Dann würde das NAS zum Spiegel-Client per Linux-Client ohne Oberfläche, damit SMB und Fotos weiter funktionieren.
+Heute wird davon nur die Schnittstelle gebaut, keine S3-Primärspeicherung.
 
 ---
 
@@ -361,7 +381,7 @@ Sonderports und kein eigenes Protokoll. Durch jede Firewall, die Web-Surfen erla
 | Dateiname, Pfad | Tantivy, Edge-N-Gramme für Suche während der Eingabe |
 | Text aus PDF/Office/Pages/Numbers/Keynote/EML/MSG/TXT/MD/Code | Apache Tika im Worker. PDFs ohne Textebene gehen zur OCR. |
 | Gescannte PDFs & Bilder mit Text | OCR per Vision-Modell (Cloud) oder Tesseract `deu+eng` lokal (Fallback bzw. sensible Ordner) |
-| Bildinhalt | Vision-Modell erzeugt Beschreibung, Tags, erkannten Text und Dokumenttyp (siehe 7.2) |
+| Bildinhalt | „Cloud erlaubt“: Vision-Modell erzeugt Beschreibung, Tags, erkannten Text und Dokumenttyp (siehe 7.2). „Nur lokal“: **CLIP-Bildvektoren** auf dem NAS (siehe 7.5) |
 | EXIF / Medien-Metadaten | Aufnahmedatum, Kamera, **Ort** (Offline-Reverse-Geocoding mit GeoNames: „Kroatien 2024“ findet Urlaubsfotos) |
 | Metadaten | Typ, Größe, Besitzer, Änderungsdatum, „bearbeitet von“, Freigabestatus, markiert |
 
@@ -379,14 +399,19 @@ keine erneute Analyse aus, nur die Pfadfelder im Index werden aktualisiert.
 - **Speichersparend:** HNSW-Index über **binär quantisierte** Vektoren (1024 Bit = 128 Byte/Vektor), danach
   **Re-Ranking** der Top-Kandidaten mit `halfvec`. So bleiben auch 3–4 Mio Vektoren im RAM-Budget.
 - Jeder Vektor trägt die Modell-ID. Ein Modellwechsel führt zu einem Neu-Embedding im Hintergrund, während der alte Index weiter antwortet.
-- **Zwei Vektor-Indizes:** `cloud` (z.B. `qwen3-embedding-8b`, 1024 Dim.) für normale Ordner und `lokal` (kleines Modell auf dem NAS,
-  siehe 7.5) für sensible Ordner. Jede Datei liegt in genau einem davon, je nach KI-Regel ihres Ordners.
+- **Drei Vektor-Indizes:**
+  - `cloud` (z.B. `qwen3-embedding-8b`, 1024 Dim.) für normale Ordner
+  - `lokal` (kleines Modell auf dem NAS, siehe 7.5) für sensible Ordner
+  - `clip` (Bildvektoren für Fotos in sensiblen Ordnern)
+
+  Jede Datei liegt je nach Datenklasse ihres Ordners in `cloud` **oder** in `lokal`/`clip`.
   Vektoren verschiedener Modelle sind nicht vergleichbar. Darum wird die Anfrage für jeden Index mit dem passenden Modell embedded,
   und die Ergebnislisten werden erst über die Rangfolge zusammengeführt (6.4).
 
 ### 6.4 Hybride Rangfolge
-1. Drei Listen parallel: lexikalisch Top-100 ‖ Vektor-Index `cloud` Top-100 ‖ Vektor-Index `lokal` Top-100. Das Query-Embedding
-   hat ein Timeout von ~400 ms; fällt eine Quelle aus, fehlt nur ihre Liste.
+1. Bis zu vier Listen parallel: lexikalisch Top-100 ‖ `cloud` Top-100 ‖ `lokal` Top-100 ‖ `clip` Top-100. Die Anfrage wird pro
+   Index mit dem passenden Modell embedded, für `clip` mit dem CLIP-Text-Encoder. Das Query-Embedding hat ein Timeout von ~400 ms;
+   fällt eine Quelle aus, fehlt nur ihre Liste.
 2. **Reciprocal Rank Fusion** arbeitet nur mit Rängen, nicht mit Scores. Darum lassen sich die Listen zweier Embedding-Modelle sauber mischen. Danach Boosts: Treffer im Dateinamen, Aktualität, eigene Nutzungshäufigkeit, „bei mir freigegeben“.
 3. Optional ein Re-Ranker (Cross-Encoder) über die Top-30.
 4. **Rechte:** Filter im Index über die Vorfahren-IDs (siehe 9.3). Zusätzlich prüft Postgres die finalen Treffer noch einmal (Defense in Depth).
@@ -468,16 +493,23 @@ Kosten senken lässt sich so:
 **Budget-Limit** pro Monat im Admin-Bereich: Ist es erreicht, pausiert die KI-Pipeline. Die lexikalische Suche läuft weiter.
 
 ### 7.4 Datenschutz
-- **Pro Ordner/Ablage eine KI-Regel** (vererbt): **„Cloud erlaubt“** oder **„Nur lokal“**.
+- **Pro Ordner/Ablage eine Datenklasse** (vererbt): **„Cloud erlaubt“** oder **„Nur lokal“**. Sie gilt für **alle** Cloud-Wege:
+  KI-APIs, eigene Cloud-VMs, den S3-Außen-Cache (15.2) und das Backup (15.1).
   - **Cloud erlaubt:** volle Funktion wie oben beschrieben.
-  - **Nur lokal** (z.B. Gesundheit, Verträge, Finanzen): Kein Byte verlässt das NAS. Extraktion per Tika, OCR per Tesseract,
-    **semantische Suche über das lokale Embedding-Modell** (7.5). Es gibt keine KI-Bildbeschreibungen, weil Vision-Modelle für
-    den J3455 zu groß sind. Fotos in diesen Ordnern bleiben über Name, Datum, Ort (EXIF) und erkannten Text auffindbar.
-  - Wechselt ein Ordner von „Cloud erlaubt“ auf „Nur lokal“, werden seine Cloud-Ergebnisse (Vektoren, Bildbeschreibungen) gelöscht und lokal neu erzeugt.
+  - **Nur lokal** (rechtlich begründet, z.B. Gesundheitsdaten, Daten Dritter, Verträge): **Verarbeitung ausschließlich im Heimnetz.**
+    Auch eine eigene, gemietete Cloud-VM ist ausgeschlossen, denn sie wäre ebenfalls Auftragsverarbeitung.
+    - Extraktion per Tika, OCR per Tesseract
+    - **semantische Textsuche** über das lokale Embedding-Modell
+    - **Bildsuche nach Inhalt** über lokale CLIP-Vektoren (7.5)
+    - Freigabe-Links sind möglich, werden aber immer direkt vom NAS ausgeliefert, nie über den S3-Cache.
+    - Ins Backup gelangen die Daten nur **clientseitig verschlüsselt** (15.1).
+  - Wechselt ein Ordner von „Cloud erlaubt“ auf „Nur lokal“, werden seine Cloud-Ergebnisse (Vektoren, Bildbeschreibungen) **und seine
+    S3-Cache-Objekte** gelöscht, und alles wird lokal neu erzeugt. Die Löschung wird protokolliert.
   - Voreinstellung für neue Ablagen ist einstellbar. Sicherer Standard: „Nur lokal“, bis aktiv freigegeben.
+  - Ein Verzeichnis der Verarbeitungstätigkeiten zeigt pro Ablage, welche Daten wohin gehen. Im Admin-Bereich ist es als Export verfügbar.
 - Es werden nur minimierte Daten gesendet: Text-Chunks oder Bilder verkleinert auf ≤ 1024 px, **ohne EXIF/GPS**.
   Dateinamen und Pfade werden standardmäßig nicht mitgeschickt.
-- Bei geteilten Ablagen entscheidet der Besitzer bzw. Verwalter über die KI-Erlaubnis.
+- Bei geteilten Ablagen entscheidet der Besitzer bzw. Verwalter über die Datenklasse.
 - Vor dem Go-live: AVV mit dem Anbieter abschließen und die Bedingungen zu Speicherung und Training prüfen. Laut Anbieterangaben wird nicht gespeichert und nicht trainiert.
 
 ### 7.5 Lokales Embedding-Modell auf dem NAS
@@ -504,8 +536,26 @@ Kosten senken lässt sich so:
 - **Alles lokal statt Cloud** wäre technisch möglich (ein einziger Vektorraum, keine Cloud-Abhängigkeit für Text). Bei ~1 Mio Chunks
   läge die Erst-Indexierung auf dem J3455 aber bei **etwa 1–3 Wochen**, und die Qualität wäre geringer. Daher die Empfehlung: Cloud für
   normale Ordner, lokal für sensible.
-- **Ausbauoption:** Kommt später ein Apple-Silicon-Mac (z.B. Mac mini) ins Heimnetz, kann `embed-local` dort laufen, z.B. Ollama.
-  Das ist eine Konfigurationsänderung, und die Daten bleiben im eigenen Netz. Der Mac ist etwa 20–50× schneller, dann wären auch lokale Bildbeschreibungen möglich.
+- **Bildsuche ohne Cloud: CLIP.** Statt Bildbeschreibungen, für die der J3455 zu schwach ist, berechnet `embed-local` für Fotos in
+  „Nur lokal“-Ordnern **CLIP-Bildvektoren**, z.B. `clip-ViT-B-32-multilingual-v1`. Der Bild-Encoder ist klein (~4,4 GFLOP pro Bild),
+  nach Überschlag ~0,5 s pro Bild auf 2 Kernen. 10.000 Fotos sind damit in wenigen Stunden fertig. Der mehrsprachige Text-Encoder
+  macht deutsche Anfragen wie „Hund im Schnee“ direkt mit den Bildern vergleichbar. Die Qualität liegt unter echten Bildbeschreibungen,
+  reicht aber für Motive gut aus. Die Vektoren kommen in einen eigenen Index `clip` (siehe 6.3).
+
+### 7.6 Mehr Rechenleistung für „Nur lokal“-Daten
+Für „Cloud erlaubt“ liefern die APIs die großen Modelle. Für „Nur lokal“ kommt zusätzliche Rechenleistung **nur aus dem Heimnetz**.
+`embed-local` ist ein OpenAI-kompatibler Endpunkt. Ein zusätzlicher Rechner ist deshalb eine Konfigurationsänderung ohne Code.
+
+| Option | Kosten | Was zusätzlich möglich wird |
+|---|---|---|
+| **Nur DS918+** (Start) | – | `e5-small`, CLIP, Tesseract-OCR, alles langsam |
+| **Mini-PC mit Intel N100/N150**, 16 GB | ~150–250 € einmalig, wenige Watt | AVX2: `bge-m3` bzw. `qwen3-embedding-0.6b`, schnelleres CLIP und OCR, kleine Vision-Modelle (langsam) |
+| **Mac mini (Apple Silicon)**, 16 GB+ | ab ~700 € einmalig | Embedding-Modelle bis ~4B Parameter, **echte Bildbeschreibungen** mit 7–12B-Vision-Modellen in wenigen Sekunden pro Bild, Apple-Vision-OCR (sehr gut auf Deutsch). Etwa 20–50× so schnell wie das NAS |
+
+Entscheidung **nach dem M0-Spike**: Reicht der DS918+ für die Menge an „Nur lokal“-Daten, bleibt es dabei. Ein Wechsel des
+lokalen Embedding-Modells löst ein Neu-Embedding der lokalen Indizes aus. Das läuft im Hintergrund, während der alte Index weiter antwortet.
+Gemietete Cloud-VMs (Scaleway DEV1-M, Hetzner CX43 o.ä.) kommen für „Nur lokal“ nicht in Frage. Für „Cloud erlaubt“ bringen sie
+gegenüber den APIs keinen Vorteil.
 
 ---
 
@@ -669,7 +719,11 @@ search_vectors_cloud(node_id, chunk_no, model, ancestor_ids, vec halfvec(1024))
       -- HNSW auf binary_quantize(vec), Filter auf ancestor_ids
 search_vectors_local(node_id, chunk_no, model, ancestor_ids, vec halfvec(384))
       -- lokales Modell (7.5), Dimension je nach Modell
-ai_policy(node_id, policy[cloud|local])                     -- KI-Regel pro Ordner, vererbt
+search_vectors_clip(node_id, model, ancestor_ids, vec halfvec(512))
+      -- CLIP-Bildvektoren für „Nur lokal“-Fotos
+data_class(node_id, class[cloud|local])                     -- Datenklasse pro Ordner, vererbt
+s3_cache(content_hash, bucket_key, size, reason[link|remote], expires_at, last_hit)
+      -- Außen-Cache (15.2), nur für Inhalte der Klasse „cloud“
 jobs(id, kind, key, priority, state, attempts, run_after, last_error, …)
 ai_usage(day, provider, model, tokens_in, tokens_out, cost)
 ```
@@ -687,7 +741,7 @@ Geräte melden sich per Browser-Login mit PKCE an. Pro Gerät gibt es einen wide
 Auth      POST /auth/login · /auth/webauthn/* · /auth/totp · /auth/device/* · GET /me/devices
 Nodes     GET /nodes/{id} · /nodes/{id}/children · POST /nodes (Ordner) · PATCH /nodes/{id} (rename/move)
           DELETE /nodes/{id} (→ Papierkorb) · POST /nodes/{id}/restore · GET /nodes/{id}/versions
-Inhalt    GET /content/{version} (Range) · GET /thumb/{hash}/{size} · GET /preview/{version}
+Inhalt    GET /content/{version} (Range; von außen ggf. 307 → signierte S3-URL, 15.2) · GET /thumb/{hash}/{size} · GET /preview/{version}
 Upload    POST /uploads · PUT /uploads/{id}/chunks/{hash} · POST /uploads/{id}/commit · POST /uploads/batch
 Sync      GET /sync/changes?cursor&roots · GET /sync/snapshot?page · GET /sync/notify (SSE)
 Suche     GET /search?q&filter… · GET /search/suggest?q
@@ -712,13 +766,59 @@ Metriken  /metrics (Prometheus) · /healthz
 - **Erreichbarkeit von außen:** eigene Domain, Portweiterleitung **TCP 443 + UDP 443** auf den vorgelagerten Reverse Proxy.
   Der Proxy muss HTTP/3 können (Caddy empfohlen, siehe 5.9), SSE ungepuffert durchreichen und darf keine knappen Body-Limits haben.
   Chunks sind ≤ 8 MB. Split-DNS für das LAN.
-- **Backup:**
-  - Hyper Backup über `homes` und `xlrx-spaces` (normale Dateien + `.xlrx/versions`)
-  - nächtlicher `pg_dump` in einen Backup-Ordner, der mitgesichert wird
-  - Btrfs-Snapshots (Snapshot Replication) als zusätzliches Netz
-  - Suchindex, Vektoren und Thumbnails werden **nicht** gesichert; sie werden neu aufgebaut. KI-Ergebnisse liegen in Postgres und gehen nicht verloren.
 - **Monitoring:** `/healthz`, Prometheus-Metriken, strukturierte Logs, Admin-Dashboard (Job-Queue, Index-Status, Fehler).
 - **Updates:** neues Image ziehen, automatische Migration mit vorherigem Dump, Rollback-Anleitung.
+- **Object-Storage-Anbieter:** Empfehlung **Hetzner Object Storage** (Rechenzentren in Deutschland/Finnland).
+  - Basispaket ~6,50 €/Monat inkl. ~1 TB Speicher und ~1 TB Datenverkehr nach außen, danach ~6,50 €/TB Speicher und ~1 €/TB Verkehr.
+  - Scaleway kostet im Vergleich ~8 €/TB in einer Zone bzw. ~16 €/TB über mehrere Zonen, und Verkehr nach außen ~10 €/TB nach 75 GB.
+  - Die Verfügbarkeit bei Hetzner vor der Bestellung prüfen, 2026 gab es Engpässe.
+  - Die KI-APIs bleiben bei Scaleway. Das sind zwei Anbieter mit jeweils eigenem AVV.
+
+### 15.1 Backup (3-2-1)
+| Ebene | Was | Schützt vor |
+|---|---|---|
+| Btrfs-Snapshots (Snapshot Replication), stündlich/täglich | `homes`, `xlrx-spaces` | Versehentliches Löschen, Ransomware über SMB (Snapshots sind schreibgeschützt, optional unveränderlich) |
+| xlrx-Versionen + Papierkorb | jede Datei | Überschreiben, Sync-Fehler |
+| **Hyper Backup → S3**, nächtlich, **clientseitig verschlüsselt** | `homes`, `xlrx-spaces` inkl. `.xlrx/versions`, `pg_dump`-Ordner | Ausfall, Diebstahl, Brand des NAS |
+
+- **Verschlüsselung:** Hyper-Backup-Verschlüsselung ist Pflicht. Passwort und Schlüsseldatei liegen offline (Passwortmanager + Papier im Haus).
+  Ohne sie gibt es keine Wiederherstellung. Der Anbieter sieht nur verschlüsselte Blöcke.
+- **„Nur lokal“-Ordner:** eigene Hyper-Backup-Aufgabe. Ob verschlüsselte Kopien außer Haus rechtlich zulässig sind, klärst du
+  einmal, z.B. mit der zuständigen Stelle. Nötig wären dafür ein AVV mit dem Speicheranbieter und ein Schlüssel nur bei dir.
+  Wenn nicht, sichert diese Aufgabe auf eine **USB-Platte oder eine zweite Synology an einem anderen Ort** statt nach S3.
+  Der Admin-Bereich zeigt die Pfadliste aller „Nur lokal“-Ordner zum Abgleich mit den Hyper-Backup-Aufgaben.
+- **Nicht gesichert:** Suchindex, Vektoren, Thumbnails und `staging`. Sie werden neu aufgebaut. Extrahierte Texte und KI-Ergebnisse liegen in Postgres
+  und sind über den Dump gesichert. Ein Neuaufbau kostet also kein zweites Mal API-Geld.
+- **Aufbewahrung:** Hyper Backup „Smart Recycle“, z.B. 30 tägliche, 12 wöchentliche, 12 monatliche Stände.
+- **Erst-Upload:** 3 TB brauchen bei 40–100 Mbit/s Upload etwa 3–7 Tage. Mit Bandbreitenlimit tagsüber und Vollgas nachts.
+- **Kosten** für 3 TB bei Hetzner: ~19 €/Monat. Glacier-Klassen sind billiger, passen aber nicht, weil Hyper Backup direkten Lesezugriff braucht.
+- **Wiederherstellung üben:** Vierteljährlich einen zufälligen Ordner und den `pg_dump` in eine Testumgebung zurückspielen. Der Admin-Bereich erinnert daran.
+- Das Backup ist eine **Sofortmaßnahme in M0**. Es braucht keine Entwicklung und schützt die Daten schon heute.
+
+### 15.2 Außen-Beschleuniger (S3-Cache)
+**Problem:** Jeder Download von außen, über Freigabe-Links oder vom Handy unterwegs, läuft heute durch den Upload des Heimanschlusses
+(typisch 40–100 Mbit/s) und durch die schwache NAS-CPU.
+
+**Lösung:** Ausgewählte Inhalte aus **„Cloud erlaubt“-Ordnern** werden in einen privaten S3-Bucket gespiegelt und von dort direkt ausgeliefert.
+- **Was wird gespiegelt:**
+  1. Dateien hinter **Freigabe-Links**: Das Spiegeln startet beim Anlegen des Links im Hintergrund. Bis es fertig ist, liefert das NAS selbst aus.
+  2. **Vorausladen** für Personen, die oft unterwegs sind: neue und geänderte Dateien in ihren Ordnern sowie ihre „Vorgeschlagenen“ Dateien
+     von der Startseite (8.2). Das passiert nachts bzw. wenn die Leitung frei ist.
+  3. Dateien, die von außen **mehrfach** abgerufen werden, z.B. neue Familienfotos, die mehrere Personen unterwegs öffnen.
+- **Auslieferung:** Fragt ein Client von außen eine gespiegelte Datei an, antwortet der Server mit einer Weiterleitung (`307`) auf eine
+  **vorab signierte S3-URL**, die nur wenige Minuten gültig ist. Browser und `URLSession` folgen automatisch, Byte-Ranges funktionieren.
+  Im LAN wird nie umgeleitet.
+- **Aktualität:** Der Cache ist inhaltsadressiert (Hash). Eine neue Version erzeugt ein neues Objekt, das alte wird entfernt.
+  Rechteprüfung und Link-Passwort laufen weiterhin auf dem NAS, S3 sieht nur anonyme Hash-Namen.
+- **Aufräumen:** Wird ein Link widerrufen oder läuft er ab, wird das Objekt sofort gelöscht. Sonst gilt LRU mit Größenbudget
+  (z.B. 200 GB) und maximal 30 Tagen Lebensdauer. Wird ein Ordner auf „Nur lokal“ umgestellt, werden alle seine Objekte sofort gelöscht (7.4).
+- **Nie im Cache:** Inhalte aus „Nur lokal“-Ordnern. Die Prüfung erfolgt beim Hochladen, nicht nur beim Einplanen, und ist durch einen Test abgesichert wie bei der KI.
+- **Grenzen:** Linkseite, Anmeldung und Rechteprüfung kommen weiter vom NAS. Ist das NAS oder der Heimanschluss offline, funktionieren
+  auch gespiegelte Links nicht. Uploads von unterwegs gehen weiter direkt ans NAS; das ist unkritisch, weil der Download des
+  Heimanschlusses meist schnell ist.
+- **Kosten:** Ein Cache bis ~200 GB und bis 1 TB Abrufe pro Monat passen bei Hetzner ins Basispaket. Teilt er sich das Paket
+  mit dem Backup, kommen nur einige Euro pro Monat dazu.
+- **Zugangsdaten getrennt:** eigener Bucket und eigener API-Schlüssel nur für den Cache. Hyper Backup hat einen anderen Schlüssel für den Backup-Bucket.
 
 ---
 
@@ -731,6 +831,8 @@ Metriken  /metrics (Prometheus) · /healthz
   geprüft, nicht nur beim Einplanen. Ein Test stellt sicher, dass kein Request dieser Ordner das Haus verlässt.
 - Parser-Isolation im Worker (read-only, Ressourcenlimits, Timeouts pro Datei).
 - Nutzerinhalte von einer separaten Origin bzw. als Attachment mit CSP `sandbox` ausliefern.
+- S3: private Buckets, getrennte API-Schlüssel für Cache (Server) und Backup (Hyper Backup), signierte URLs mit wenigen Minuten Gültigkeit.
+  Objektnamen sind Hashes, sie enthalten keine Datei- oder Pfadnamen.
 - Audit-Log für Admin-Aktionen, Freigaben und Link-Zugriffe.
 - `cargo audit`/`cargo deny` und `npm audit` in der CI. Security-Review vor dem Öffnen nach außen.
 
@@ -760,7 +862,8 @@ Zuverlässigkeit entsteht durch Tests, nicht durch Hoffnung. Darum hat das Teste
    Ein *Illegal Instruction* bricht den Build.
 7. **Transport:** Tests mit gesperrtem UDP (Fallback auf HTTP/2 ohne Abbruch), Netzwechsel während eines Uploads (QUIC-Migration),
    SSE durch den Reverse Proxy (keine Pufferung, Reconnect mit Cursor).
-8. **Datenschutz-Regel:** Integrationstest mit einem Fake-Cloud-Provider. Aus „Nur lokal“-Ordnern darf dort kein einziger Request ankommen.
+8. **Datenschutz-Regel:** Integrationstest mit einem Fake-Cloud-Provider und einem Fake-S3. Aus „Nur lokal“-Ordnern darf dort kein
+   einziger Request ankommen, weder KI noch Cache. Nach einem Klassenwechsel auf „Nur lokal“ müssen alle Cache-Objekte gelöscht sein.
 9. **Last/Skalierung:** synthetischer Baum mit 3 Mio Dateien. Gemessen werden Listing, Sync, Suche und Erst-Indexierung gegen die Zielwerte.
 10. **Dogfooding:** mehrere Wochen produktiver Eigenbetrieb **bevor** Synology Drive abgelöst wird.
 
@@ -807,12 +910,13 @@ Zwei parallele Stränge: **A – Server/Web/Suche** liefert früh Nutzen, währe
 
 | # | Meilenstein | Inhalt | Fertig, wenn … | Größe |
 |---|---|---|---|---|
-| **M0** | Fundament + DS918-Spike | Workspace, CI (Rust/Web/Apple, x86-64-v2 + QEMU-Check), Docker-Images, compose, Caddy-Beispiel, Postgres-Schema, Auth (Passwort + Passkey), Admin-Grundgerüst. **Spike auf dem DS918+:** lokale Embedding-Laufzeit ohne AVX (ONNX vs. llama.cpp, e5-small vs. embeddinggemma), QUIC- vs. HTTP/2-Durchsatz, BLAKE3-Geschwindigkeit, Reflinks im `homes`-Mount, ACL-Vererbung, Hilfsdateien von Synology Drive | `docker compose up` auf der Synology zeigt den Login über die eigene Domain per HTTP/3. Messwerte stehen in `spikes/ds918/` | M |
-| **M1** | Server-Kern + Web-Basis | Roots (bestehende Drive-Ordner einbinden), Watcher + Abgleich-Scan, Journal, Upload/Download (Chunks), Versionen (Reflink), Papierkorb, Web: Durchsuchen, Upload, Vorschau, Thumbnails | Web-UI zeigt die echten Daten aus Synology Drive, Änderungen per SMB erscheinen in Sekunden | L |
+| **M0** | Fundament + DS918-Spike | Workspace, CI (Rust/Web/Apple, x86-64-v2 + QEMU-Check), Docker-Images, compose, Caddy-Beispiel, Postgres-Schema, Auth (Passwort + Passkey), Admin-Grundgerüst. **Spike auf dem DS918+:** lokale Embedding-Laufzeit ohne AVX (ONNX vs. llama.cpp, e5-small vs. embeddinggemma), QUIC- vs. HTTP/2-Durchsatz, BLAKE3-Geschwindigkeit, Reflinks im `homes`-Mount, ACL-Vererbung, Hilfsdateien von Synology Drive. **Sofortmaßnahme ohne Code:** verschlüsseltes Hyper Backup → S3 + Snapshot-Plan (15.1) | `docker compose up` auf der Synology zeigt den Login über die eigene Domain per HTTP/3. Messwerte stehen in `spikes/ds918/`. Erstes Backup ist durchgelaufen, eine Test-Wiederherstellung hat geklappt | M |
+| **M1** | Server-Kern + Web-Basis | Speicher-Schnittstelle `ContentStore` mit `PlainFsStore` (4.6), Roots (bestehende Drive-Ordner einbinden), Watcher + Abgleich-Scan, Journal, Upload/Download (Chunks), Versionen (Reflink), Papierkorb, Web: Durchsuchen, Upload, Vorschau, Thumbnails | Web-UI zeigt die echten Daten aus Synology Drive, Änderungen per SMB erscheinen in Sekunden | L |
 | **B1** | Sync-Kern in Simulation | xlrx-chunk, xlrx-sync (sans-IO), xlrx-sim, Konfliktregeln, Invarianten | 1 Mio Seeds ohne Verletzung | L |
 | **M2** | Volltextsuche I | Tika-Extraktion, Tesseract-OCR, Tantivy (de/en), Filter/Syntax, Snippets, Rechte-Filter, Such-UI | Suche nach Inhalt in PDF/Office/Scans, p95 < 300 ms bei Bestandsgröße | M |
-| **M3** | Teilen, Aktivität, Startseite | Ablagen, Gruppen, Freigaben, Links, Aktivitätsstream, Vorschläge, Benachrichtigungen | Familie nutzt Web-UI für Teilen und findet Dinge über die Startseite | L |
-| **M4** | KI-Suche | Provider-Abstraktion (Scaleway/Cloudflare/lokal), Vision-Analyse, Embeddings, **lokales Embedding-Modell für „Nur lokal“-Ordner**, zwei Vektor-Indizes, hybride Rangfolge, Budget, KI-Ordnerregeln, Kostenschätzung | „Rechnung Heizung 2025“ und „Hund am Strand“ liefern sinnvolle Treffer. Sensible Ordner sind semantisch durchsuchbar, ohne dass ein Byte das NAS verlässt. Kosten im Rahmen | M–L |
+| **M3** | Teilen, Aktivität, Startseite | Ablagen, Gruppen, **Datenklassen pro Ordner (7.4)**, Freigaben, Links, Aktivitätsstream, Vorschläge, Benachrichtigungen | Familie nutzt Web-UI für Teilen und findet Dinge über die Startseite | L |
+| **M3b** | Außen-Beschleuniger | `S3CacheStore`, Spiegeln von Link-Dateien, Vorausladen für Personen unterwegs, 307 auf signierte URLs, Aufräumen, Datenklassen-Prüfung (15.2) | Ein Link auf ein 2-GB-Video lädt extern mit voller Geschwindigkeit, ohne den Heimanschluss zu belasten. „Nur lokal“-Inhalte nachweislich nie im Bucket | M |
+| **M4** | KI-Suche | Provider-Abstraktion (Scaleway/Cloudflare/lokal), Vision-Analyse, Embeddings, **lokales Embedding-Modell + CLIP für „Nur lokal“-Ordner**, drei Vektor-Indizes, hybride Rangfolge, Budget, Kostenschätzung | „Rechnung Heizung 2025“ und „Hund am Strand“ liefern sinnvolle Treffer. Sensible Ordner sind semantisch und nach Bildinhalt durchsuchbar, ohne dass ein Byte das Heimnetz verlässt. Kosten im Rahmen | M–L |
 | **M5** | Mac-App (Spiegel-Modus) | xlrx-client + FFI, SyncAgent, Menüleisten-App, Selective Sync, FinderSync, LAN-Direktverbindung | 4 Wochen Dogfooding ohne Datenverlust → **Synology-Drive-Client abschalten** | XL |
 | **M6** | iOS-App | Startseite, Suche, Durchsuchen, Vorschau, File Provider (Dateien-App), Share-Extension, Push | Alltagstauglich auf iPhone/iPad, über TestFlight verteilt | L |
 | **M7** | Mac File-Provider-Modus | FP-Extension, Offline-Pinning, Moduswechsel pro Ordner | Große Ablagen auf Abruf, stabil im Dogfooding | L |
@@ -831,11 +935,13 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
 |---|---|
 | Datenverlust durch Sync-Fehler | sans-IO + Simulation, Invarianten, Massenlösch-Schutz, Server-Versionen und Papierkorb, Btrfs-Snapshots, Synology Drive bis M5 als Rückfallebene |
 | Eigenheiten der File-Provider-API | Spiegel-Modus ist der Standard, FP kommt erst in M7. Beide nutzen denselben Kern. |
-| Datenschutz bei Cloud-KI | Scaleway (EU), KI-Erlaubnis pro Ordner, Datenminimierung, AVV, lokale Fallbacks |
+| Datenschutz bei Cloud-KI / S3 | Datenklasse pro Ordner gilt für alle Cloud-Wege, Prüfung beim Versand, Tests mit Fake-Provider, Datenminimierung, AVV je Anbieter, „Nur lokal“ strikt im Heimnetz |
+| Backup existiert, Wiederherstellung klappt aber nicht | clientseitige Verschlüsselung mit offline verwahrtem Schlüssel, vierteljährliche Wiederherstellungsprobe, Erinnerung im Admin-Bereich |
+| Cloud-Umzug später nötig (DS918+ altert) | Speicher-Schnittstelle ab M1 (4.6), `S3PackStore` nur bei Bedarf |
 | KI-Kosten laufen davon | Kostenschätzung vor Start, Batch-API, Dedup per Hash, Budget-Limit mit Auto-Pause |
 | NAS-Ressourcen (J3455, 4 schwache Kerne) | schwere Arbeit in der Cloud, CPU-Limits für Worker/embed-local, Nachtfenster, RAM-sparende Vektor-Quantisierung, SSD-Cache |
 | J3455 ohne AVX → ML-Laufzeiten stürzen ab | x86-64-v2-Builds, QEMU-Check in der CI, Laufzeit-Auswahl per Spike in M0 |
-| Lokale Embeddings zu langsam | kleines Modell (e5-small), nur erste Chunks embedden, Nachtfenster. Später Auslagerung auf einen Mac im LAN möglich |
+| Lokale Embeddings zu langsam | kleines Modell (e5-small), nur erste Chunks embedden, Nachtfenster. Bei Bedarf KI-Rechner im Heimnetz (7.6) |
 | UDP 443 blockiert / QUIC auf dem J3455 zu CPU-hungrig | automatischer Fallback auf HTTP/2, eigener LAN-Endpunkt nur mit HTTP/2, Messung im Spike |
 | inotify-Limits / alter Kernel | Limit anheben, Abgleich-Scans als Sicherheitsnetz |
 | Externe Änderungen kollidieren mit Uploads | Intent-Log, Prüfung vor dem Ersetzen, Konfliktkopie statt Überschreiben |
@@ -846,7 +952,9 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
 ## 21. Offene Fragen
 
 Beantwortet (2026-10-02): DS918+ mit SSD-Cache · Daten in `homes/<user>/Drive` · eigene Domain mit Portweiterleitung und
-vorgelagertem Reverse Proxy · Apple Developer Account vorhanden · sensible Ordner bleiben lokal.
+vorgelagertem Reverse Proxy · Apple Developer Account vorhanden · sensible Ordner bleiben lokal, **aus rechtlichen Gründen**
+(also auch keine eigene Cloud-VM) · NAS bleibt Zentrale, S3 für Backup und Außen-Beschleuniger · Ziele der Cloud-Nutzung: schneller
+Zugriff von außen, externe Sicherheitskopie, mehr KI-Rechenleistung.
 
 Noch offen:
 1. **Welcher Reverse Proxy** ist vorgelagert (DSM-intern, Nginx Proxy Manager, Caddy, Traefik …), und läuft er auf dem NAS oder auf
@@ -857,3 +965,7 @@ Noch offen:
 5. Gibt es neben `homes/<user>/Drive` **Team-Ordner** in Synology Drive, die zu „Geteilten Ablagen“ werden sollen?
 6. Sind **Windows** oder **Android** absehbar nötig? Das beeinflusst Prioritäten, nicht die Architektur.
 7. Wird **Bearbeiten von Office-Dokumenten im Browser** gewünscht (Collabora/OnlyOffice), oder reicht Vorschau + Bearbeiten lokal?
+8. **Backup der „Nur lokal“-Ordner:** Ist eine clientseitig verschlüsselte Kopie bei einem S3-Anbieter (mit AVV, Schlüssel nur bei dir)
+   zulässig, oder muss die Kopie außer Haus auf eigene Hardware (USB-Platte bzw. zweite Synology an einem anderen Ort)?
+9. **S3-Anbieter:** Hetzner Object Storage (Empfehlung: günstiger, viel Datenverkehr inklusive) oder Scaleway (ein Anbieter für KI und Speicher)?
+10. **Upload-Bandbreite** des Heimanschlusses? Davon hängen die Dauer des Erst-Backups und der Nutzen des Außen-Beschleunigers ab.
