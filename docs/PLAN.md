@@ -647,6 +647,8 @@ bei neuen Freigaben. Pro Person einstellbar.
 
 **Nuxt 4** (Vue 3, Single-Page-App als statischer Build, vom Server ausgeliefert), TypeScript. Der API-Client wird aus OpenAPI generiert (utoipa).
 Live-Updates kommen per Server-Sent Events. PWA-fähig, Deutsch/Englisch, Dark Mode.
+Startseite und Anmeldung zeigen die radierte Berglandschaft aus dem App-Entwurf (12), passend zur Tageszeit
+(Morgen 5–10, Tag 10–17, Abend 17–21, Nacht 21–5 Uhr) und ohne Bewegung, wenn das System „Bewegung reduzieren“ verlangt.
 
 Bereiche wie bei Google Drive: **Startseite**, **Meine Ablage**, **Geteilte Ablagen**, **Für mich freigegeben**, **Zuletzt verwendet**,
 **Markiert**, **Papierkorb**, **Aktivität**, **Admin**.
@@ -704,6 +706,9 @@ Finder-Tags synchronisieren.
 - **Uploads im Hintergrund** über `URLSession`-Background-Transfers.
 - **Push** bei Freigaben und Aktivität (APNs).
 - Optional später: Foto-Backup aus der Mediathek.
+- **Gestaltung** nach dem Entwurf in Claude Design (Canvas „xlrx-drive iOS“): Papierton und Tinte, Schrift Geist, auf der Startseite
+  die radierte Berglandschaft nach Tageszeit. Ihr Generator steckt schon in der Web-App (`web/app/utils/landscape.ts`) und wird
+  für iOS nach Swift portiert. Bei 390 pt Breite muss er dieselben Pfade liefern wie der Entwurf.
 
 ---
 
@@ -1108,8 +1113,9 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
   - Ablagen („Meine Ablage“ = `homes/NAME/Drive`) mit Knoten und lückenlosem Journal.
   - Abgleich-Scan (Identität über die Inode, Schutz vor wiederverwendeten Inodes und leeren/fehlenden Freigaben, „racy“-Zeitstempel) und Überwachung per inotify mit Teil-Abgleich: Änderungen von außen erscheinen in Sekunden.
   - Ändern über die API: Ordner, Hochladen, Ersetzen mit Versionen (inhaltsadressiert, Reflink), Umbenennen/Verschieben, Papierkorb – jeweils mit Absichtsprotokoll, sodass ein Absturz an jeder Stelle nichts verliert (in Tests für jede Stelle nachgestellt).
-  - Änderungs-Feed im Format der Sync-Engine und Live-Ereignisse (SSE); Web-App mit Durchsuchen, Vorschau, Hochladen, Versionen, Papierkorb und Live-Aktualisierung.
-- **Offen für M1:** Schreib-Operationen der Sync-Engine über das API (Vorbedingungen, idempotente Op-IDs), Uploads in Chunks mit Wiederaufnahme, Vorschaubilder.
+  - Änderungs-Feed im Format der Sync-Engine und Live-Ereignisse (SSE); Schreib-Operationen der Sync-Engine über das API (Vorbedingungen, idempotente Op-IDs).
+  - Web-App mit Durchsuchen, Vorschau, Hochladen, Versionen, Papierkorb und Live-Aktualisierung; Startseite mit Begrüßung und Berglandschaft nach Tageszeit aus dem App-Entwurf.
+- **Offen für M1:** Anmeldung von Geräten (Tokens für Mac/iOS), Uploads in Chunks mit Wiederaufnahme, Vorschaubilder.
 
 **Nächster Schritt:** Rest von M1, dann Inbetriebnahme auf dem DS918+ mit den Spike-Messungen.
 

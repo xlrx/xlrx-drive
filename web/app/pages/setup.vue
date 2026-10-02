@@ -101,7 +101,7 @@ async function finish() {
 </script>
 
 <template>
-	<main class="narrow">
+	<main class="narrow with-scenery">
 		<div class="card">
 			<h1>Konto einrichten</h1>
 			<p v-if="step === 'loading'" class="muted">Einen Moment …</p>
@@ -151,5 +151,6 @@ async function finish() {
 			<RecoveryCodes v-else-if="step === 'codes'" :codes="codes" @done="finish" />
 			<p v-if="error && step !== 'invalid'" class="error" role="alert">{{ error }}</p>
 		</div>
+		<Landscape class="scenery" />
 	</main>
 </template>

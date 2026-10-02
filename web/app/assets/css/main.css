@@ -81,4 +81,11 @@ th { font-weight: 600; color: var(--muted); font-size: 0.85rem; }
 .badge { font-size: 0.75rem; padding: 0.1rem 0.45rem; border-radius: 99px; border: 1px solid var(--border); color: var(--muted); }
 .divider { display: flex; align-items: center; gap: 0.75rem; color: var(--muted); margin: 1.2rem 0; font-size: 0.85rem; }
 .divider::before, .divider::after { content: ''; flex: 1; border-top: 1px solid var(--border); }
+/* The landscape along the bottom of the window, behind the content; the page leaves room for it.
+   The sky fades in at the top instead of starting at a hard line. */
+.scenery {
+	position: fixed; left: 0; right: 0; bottom: 0; z-index: -1; pointer-events: none;
+	mask-image: linear-gradient(to bottom, transparent, #000 20%);
+}
+.with-scenery { padding-bottom: 190px; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

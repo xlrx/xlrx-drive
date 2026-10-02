@@ -57,6 +57,9 @@ const PDF =
 	'%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n' +
 	'3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n';
 
+/** The start page greets by time of day. */
+const GREETING = /^(Guten (Morgen|Tag|Abend), .+|Noch wach, .+\?)$/;
+
 /** Browses "My Drive" of the signed-in admin: folders, preview, download, rescan. */
 async function browseFiles(page: Page, data: string) {
 	const drive = join(data, 'homes/admin/Drive');
@@ -224,7 +227,8 @@ test('Einrichtung, Anmeldung, Verwaltung und Dateien', async ({ page }) => {
 	await expect(page.locator('.codes span')).toHaveCount(10);
 	await page.getByLabel('Ich habe die Codes sicher gespeichert.').check();
 	await page.getByRole('button', { name: 'Fertig' }).click();
-	await expect(page.getByRole('heading', { name: /Hallo/ })).toBeVisible();
+	await expect(page.getByRole('heading', { name: GREETING })).toBeVisible();
+	await expect(page.getByRole('img', { name: /^Berglandschaft/ })).toBeVisible();
 
 	// Add a passkey (the login counts as a fresh second factor).
 	await page.getByRole('link', { name: 'Sicherheit' }).click();
@@ -237,7 +241,7 @@ test('Einrichtung, Anmeldung, Verwaltung und Dateien', async ({ page }) => {
 	await expect(page.getByRole('heading', { name: 'Anmelden' })).toBeVisible();
 	await page.getByLabel('Benutzername').fill('admin');
 	await page.getByRole('button', { name: 'Mit Passkey anmelden' }).click();
-	await expect(page.getByRole('heading', { name: /Hallo/ })).toBeVisible();
+	await expect(page.getByRole('heading', { name: GREETING })).toBeVisible();
 
 	// Log out, log in with password + code (next time step: the setup code must not work again).
 	await page.getByRole('button', { name: 'Abmelden' }).click();
@@ -246,7 +250,7 @@ test('Einrichtung, Anmeldung, Verwaltung und Dateien', async ({ page }) => {
 	await page.getByRole('button', { name: 'Weiter' }).click();
 	await page.getByLabel('Code aus der Authenticator-App').fill(totp(secret, step() + 1));
 	await page.getByRole('button', { name: 'Anmelden' }).click();
-	await expect(page.getByRole('heading', { name: /Hallo/ })).toBeVisible();
+	await expect(page.getByRole('heading', { name: GREETING })).toBeVisible();
 
 	// Administration: new account with a setup link.
 	await page.getByRole('link', { name: 'Verwaltung' }).click();
@@ -270,4 +274,21 @@ test('Falsches Passwort zeigt einheitliche Meldung', async ({ page }) => {
 	await page.getByLabel('Passwort').fill('falsch falsch falsch');
 	await page.getByRole('button', { name: 'Weiter' }).click();
 	await expect(page.getByRole('alert')).toHaveText('Benutzername oder Passwort ist falsch.');
+});
+
+test('Landschaft folgt der Tageszeit', async ({ page }) => {
+	await page.clock.install({ time: new Date(2026, 9, 2, 20, 59, 30) });
+	await page.goto('/login');
+	const scene = page.getByRole('img', { name: /^Berglandschaft/ });
+	await expect(scene).toHaveAccessibleName('Berglandschaft am Abend mit Häuschen, Kiefern, grasenden Rehen und Vögeln');
+	// Smoke and birds move.
+	await expect(scene.locator('animateTransform')).not.toHaveCount(0);
+
+	// The page stays open past 21:00: night falls without a reload.
+	await page.clock.fastForward('01:00');
+	await expect(scene).toHaveAccessibleName('Berglandschaft bei Nacht mit Mondlicht mit Häuschen, Kiefern');
+
+	// Reduced motion: nothing moves any more.
+	await page.emulateMedia({ reducedMotion: 'reduce' });
+	await expect(scene.locator('animateTransform')).toHaveCount(0);
 });

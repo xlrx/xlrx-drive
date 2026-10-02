@@ -68,7 +68,7 @@ function switchTo(s: Step) {
 </script>
 
 <template>
-	<main class="narrow">
+	<main class="narrow with-scenery">
 		<div class="card">
 			<h1>Anmelden</h1>
 			<template v-if="step === 'password'">
@@ -120,6 +120,7 @@ function switchTo(s: Step) {
 			</template>
 			<p v-if="error" class="error" role="alert">{{ error }}</p>
 		</div>
+		<Landscape class="scenery" />
 	</main>
 </template>
 
