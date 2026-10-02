@@ -4,7 +4,7 @@
 > Volltextsuche, Teilen zwischen Benutzern, extrem effizienter und zuverlässiger Sync, Mac- und iOS-App.
 > Hosting: Docker (Container Manager) auf Synology, amd64.
 
-Stand: 2026-10-02 · Status: Entwurf zur Abstimmung
+Stand: 2026-10-02 · Status: Entwurf v2 (Hardware, Zugriff, QUIC, lokale Embeddings eingearbeitet)
 
 ---
 
@@ -43,9 +43,13 @@ Stand: 2026-10-02 · Status: Entwurf zur Abstimmung
 | Speichermodell | **Normale Dateien** auf dem Volume. Parallel nutzbar per SMB, File Station, Hyper Backup, Synology Photos. |
 | Mac-Client | **Beides, umschaltbar pro Sync-Ordner:** Spiegel-Ordner mit Selective Sync (Standard) **und** File-Provider-Modus (Dateien auf Abruf). |
 | Suche | Text aus PDF/Office/Mails, **OCR**, **semantische Suche**, **Bildsuche nach Inhalt**. |
-| ML-Rechenleistung | **Cloud-APIs mit Open-Source-Modellen**: Scaleway Generative APIs und/oder Cloudflare Workers AI. |
+| ML-Rechenleistung | **Cloud-APIs mit Open-Source-Modellen**: Scaleway Generative APIs und/oder Cloudflare Workers AI. **Sensible Ordner bleiben lokal** und werden mit einem kleinen Embedding-Modell auf dem NAS durchsuchbar (siehe 7.5). |
 | Nutzer | Familie/Team (bis ~20 Konten), Zugriff von unterwegs, **öffentliche Freigabe-Links**. |
-| Hardware | 16–20 GB RAM, amd64. |
+| Hardware | **DS918+**: Celeron J3455, 4 Kerne, **kein AVX**, DSM-Kernel 4.4, 16–20 GB RAM, **SSD-Lese-/Schreib-Cache**. Besonderheiten siehe 3.1. |
+| Bestandsdaten | `homes/<user>/Drive` (Synology Drive). Diese Ordner werden direkt als „Meine Ablage“ eingebunden. |
+| Zugriff von außen | Eigene Domain, Portweiterleitung, vorgelagerter Reverse Proxy mit Let's Encrypt. |
+| Transport | **Alles über HTTPS auf Port 443**, bevorzugt **HTTP/3 (QUIC)**, automatischer Fallback auf HTTP/2 über TCP (siehe 5.9). |
+| Apple | Apple Developer Account ist vorhanden. |
 | Datenmenge | 300k – 3 Mio Dateien, mehrere TB. |
 | Tech-Stack | **Rust** (Server + gemeinsame Sync-Engine), **Swift/SwiftUI** (Mac/iOS, Engine via UniFFI), **SvelteKit/TypeScript** (Web). |
 
@@ -53,7 +57,6 @@ Stand: 2026-10-02 · Status: Entwurf zur Abstimmung
 
 - **Login:** eigene Konten mit Passwort (argon2id) + **Passkeys** + TOTP-2FA. OIDC (z.B. Authentik, Synology SSO Server) erst später, optional.
 - **Plattformen v1:** Web, macOS, iOS. Windows/Linux/Android später. Der Rust-Kern macht das vorbereitet möglich.
-- **Apple Developer Program** (99 €/Jahr) ist vorhanden oder wird angelegt. Ohne geht es nicht: File-Provider-Entitlements, App Groups, Push, Notarisierung, TestFlight.
 - **Nicht in v1:** Office-Bearbeitung im Browser (später Collabora/OnlyOffice via WOPI), Gesichtserkennung, Ende-zu-Ende-Verschlüsselung, Kommentare an Dateien.
 - **Mindestversionen:** macOS 15, iOS 18 (Vorschlag, weil die File-Provider-APIs dort ausgereift sind).
 
@@ -80,18 +83,18 @@ Die Kombination „normale Dateien + Google-Drive-UX + eigene Suche“ gibt es f
 
 ```
                          Internet / LAN
-                               │
-             DSM Reverse Proxy (TLS, Let's Encrypt)
+                               │  TCP 443 (HTTP/2) + UDP 443 (HTTP/3/QUIC)
+           Vorgelagerter Reverse Proxy (TLS, Let's Encrypt, HTTP/3)
                                │
 ┌──────────────────────────────┼───────────────────────────────────────────┐
 │ Container Manager – Projekt "xlrx" (docker compose, amd64)                │
 │                                                                           │
 │  xlrx-server  (Rust, axum, tokio)                                         │
-│   ├─ REST/JSON + WebSocket-API, liefert Web-UI (SvelteKit, statisch) aus  │
+│   ├─ REST/JSON-API + Server-Sent Events, liefert Web-UI (statisch) aus    │
 │   ├─ Sync: Journal, Uploads/Downloads (Chunks), Versionen, Papierkorb     │
 │   ├─ Watcher: inotify + periodische Abgleich-Scans (externe Änderungen)   │
 │   ├─ Suche: Tantivy (lexikalisch) + pgvector (semantisch), hybrid         │
-│   ├─ Startseite / Aktivität / Benachrichtigungen (WebSocket, APNs)        │
+│   ├─ Startseite / Aktivität / Benachrichtigungen (SSE, APNs)              │
 │   └─ Auth, Freigaben, Links, Admin                                        │
 │          │                            │                                   │
 │  postgres 17 + pgvector         xlrx-worker  (Rust, gleiche Codebasis)    │
@@ -100,13 +103,15 @@ Die Kombination „normale Dateien + Google-Drive-UX + eigene Suche“ gibt es f
 │                                  ├─ Text-Extraktion (→ tika), EXIF, Geo   │
 │  tika  (Apache Tika Server)      ├─ OCR lokal (Tesseract, Fallback)       │
 │                                  └─ KI-Provider ──────────────────────────┼──► Scaleway (Paris)
-│                                     (OpenAI-kompatibel)                   │    Cloudflare Workers AI
+│  embed-local (OpenAI-kompatibel,    (OpenAI-kompatibel)                   │    Cloudflare Workers AI
+│   kleines Modell, ohne AVX) ◄────── lokal für sensible Ordner             │
 └───────────────────────────────────────────────────────────────────────────┘
-  /volume1/drive/…   Btrfs, normale Dateien     /volume?/xlrx-state/…  DB, Index, Thumbs (am besten SSD)
+  /volume1/homes/<user>/Drive  Btrfs, normale Dateien    /volume1/xlrx-state/…  DB, Index, Thumbs
+                                                          (profitiert vom SSD-Cache)
 
 Clients
   Mac-App  ── xlrx-core (Rust via UniFFI) ── Spiegel-Modus (FSEvents) │ File-Provider-Modus
-                                            FinderSync-Badges, Menüleiste, LaunchAgent
+              Transport: URLSession (HTTP/3)  FinderSync-Badges, Menüleiste, LaunchAgent
   iOS-App  ── xlrx-core ── File-Provider-Extension (Dateien-App), Share-Extension, Push
   Browser  ── Web-UI (SvelteKit, PWA)
 ```
@@ -124,11 +129,31 @@ auf die Daten und Netz nur zum KI-Anbieter. Wenn er abstürzt, läuft der Sync u
 | xlrx-server | 0,5–1 GB (+ Tantivy über Page-Cache/mmap) |
 | xlrx-worker | 1–2 GB (Spitzen bei LibreOffice/ffmpeg) |
 | Tika | ~1 GB Heap |
+| embed-local | 0,5–1 GB (Modell + Laufzeit) |
 | Rest | Page-Cache für Index & Dateien |
 
 ### Plattenbedarf für abgeleitete Daten (bei ~1,5 Mio Dateien, grob)
 Postgres 10–30 GB (inkl. extrahierter Texte und Vektoren), Tantivy 5–15 GB, Thumbnails/Vorschauen 50–100 GB.
-→ **Wenn möglich auf ein SSD-Volume legen.** Die Nutzdaten bleiben auf den HDDs.
+Alles liegt auf dem normalen Volume. Der vorhandene **SSD-Lese-/Schreib-Cache** fängt die zufälligen Zugriffe
+von Postgres und Tantivy ab. Ein separates SSD-Volume ist nicht nötig.
+
+### 3.1 Besonderheiten des DS918+
+Der DS918+ ist für dieses Vorhaben gut nutzbar, setzt aber Grenzen, die der Plan von Anfang an berücksichtigt:
+
+| Eigenschaft | Folge für den Plan |
+|---|---|
+| **Celeron J3455 ohne AVX/AVX2** (nur bis SSE4.2, „x86-64-v2“) | Viele ML-Laufzeiten (ONNX Runtime, PyTorch, Standard-Builds von llama.cpp) stürzen mit *Illegal Instruction* ab. **Alle Images werden für x86-64-v2 gebaut** (kein `target-cpu=native`, keine AVX-Annahmen, auch bei pgvector). Die CI führt die Binaries unter `qemu-x86_64 -cpu Denverton` aus, einer CPU ohne AVX. So fallen AVX-Abhängigkeiten auf, bevor sie auf dem NAS crashen. |
+| **4 schwache Kerne** | Der Sync-Server muss immer reaktionsfähig bleiben. Darum haben schwere Jobs (OCR, LibreOffice, lokale Embeddings) feste Kern-Limits: Der Worker bekommt max. 2 Kerne per `cpus:` in compose, mit niedriger Priorität. Vorschauen von Office-Dateien entstehen bei Bedarf und werden gecacht. |
+| **DSM-Kernel 4.4** | Kein dateisystemweites fanotify → inotify + Abgleich-Scans (4.4). Kein UDP-GSO → QUIC kostet hier spürbar mehr CPU als TCP (siehe 5.9). Btrfs-Reflinks funktionieren (`BTRFS_IOC_CLONE`). |
+| **Intel HD 500 (Quick Sync)** | Optional später: Video-Thumbnails per VAAPI (`/dev/dri` in den Worker durchreichen). |
+| **SSD-Cache** | Beschleunigt Postgres/Tantivy automatisch. DSM verlangt für einen Lese-/Schreib-Cache ohnehin zwei SSDs im RAID 1, ein einzelner SSD-Ausfall kostet also keine Daten. Postgres-WAL und Index-Merges erhöhen die Schreiblast. Die SSD-Lebensdauer sollte deshalb im DSM-Speicher-Manager im Blick bleiben. |
+
+Ein **Hardware-Spike in M0** misst die echten Werte auf deinem Gerät, bevor Feature-Entscheidungen davon abhängen:
+- Durchsatz des lokalen Embedding-Modells
+- QUIC- und HTTP/2-Durchsatz
+- Hash-Geschwindigkeit
+- Reflinks im `homes`-Mount
+- Vererbung der Synology-ACLs
 
 ---
 
@@ -137,23 +162,33 @@ Postgres 10–30 GB (inkl. extrahierter Texte und Vektoren), Tantivy 5–15 GB, 
 ### 4.1 Layout
 
 ```
-/volume1/drive/                       ← Synology-Freigabe "drive" (Btrfs), im Container: /data
-  users/klaus/…                       ← "Meine Ablage" von klaus
-  users/anna/…
-  spaces/familie/…                    ← "Geteilte Ablagen" (wie Google Shared Drives)
-  spaces/buero/…
-  .xlrx/                              ← nur für den Container-Benutzer sichtbar
+/volume1/homes/                       ← Synology-Freigabe "homes" (Btrfs), im Container: /mnt/homes
+  klaus/Drive/…                       ← "Meine Ablage" von klaus (bestehender Synology-Drive-Ordner)
+  anna/Drive/…
+  .xlrx/                              ← nur für den Container-Benutzer (Rechte 700)
     versions/ab/cd/<blake3>           ← alte Versionen (Reflink-Kopien, inhaltsadressiert)
     trash/<node-id>/…                 ← Papierkorb (Verschieben = rename, 30 Tage)
     staging/<upload-id>               ← laufende Uploads
+
+/volume1/xlrx-spaces/                 ← neue Freigabe für "Geteilte Ablagen", im Container: /mnt/spaces
+  familie/…                           ← wie Google Shared Drives
+  buero/…
+  .xlrx/                              ← eigener Versions-/Papierkorb-Bereich für diesen Mount
 ```
 
-- **Roots sind konfigurierbar:** Jede „Meine Ablage“ und jede geteilte Ablage zeigt auf einen Host-Pfad.
-  Damit lassen sich **bestehende Synology-Drive-Ordner direkt einbinden** (z.B. `/volume1/homes/klaus/Drive`).
-  Migration bedeutet dann Einbinden statt Kopieren.
-- `.xlrx/` liegt **im selben Mount** wie die Daten. Nur so funktionieren Btrfs-Reflinks; über Mount-Grenzen
-  hinweg lehnt der Kernel Clone-Operationen ab. Der Ordner gehört exklusiv dem Container-Benutzer. Mit
-  „Zugriffsbasierter Aufzählung“ ist er für SMB-Nutzer unsichtbar.
+- **Roots sind konfigurierbar:** Jede „Meine Ablage“ und jede geteilte Ablage zeigt auf einen Pfad im Container.
+  Die **bestehenden Ordner `homes/<user>/Drive` werden direkt eingebunden**. Migration bedeutet Einbinden statt Kopieren.
+- **Ein `.xlrx/` pro Mount:** Btrfs-Reflinks funktionieren nur innerhalb desselben Mounts; über Mount-Grenzen
+  hinweg lehnt der Kernel Clone-Operationen ab. Deshalb wird `homes` **als Ganzes** gemountet statt
+  jeder `Drive`-Ordner einzeln. `.xlrx` liegt auf oberster Ebene von `homes`. Normale Nutzer sehen per SMB nur ihre
+  eigene `home`-Freigabe, die übergeordnete `homes`-Freigabe sehen nur Admins.
+  Versionen und Papierkorb liegen bewusst **nicht** im `Drive`-Ordner. Sonst würde Synology Drive sie in der Parallelphase auf die Macs synchronisieren.
+- **Rechte:** Ein DSM-Benutzer `xlrx` bekommt Lese-/Schreibrechte auf `homes` und `xlrx-spaces`. Ob neue Dateien die
+  Synology-ACLs des Elternordners erben, sodass der jeweilige Nutzer sie per SMB weiter bearbeiten kann, wird im
+  M0-Spike geprüft. Falls nicht, setzt der Server die Rechte nach dem Schreiben explizit.
+- **Parallelphase mit Synology Drive:** Was xlrx in `Drive`-Ordner schreibt, synchronisiert Synology Drive weiter auf
+  die Macs, und umgekehrt sieht xlrx Änderungen von Synology Drive als externe Änderungen (4.4). Einzige Regel:
+  Auf einem Mac nie Synology-Drive-Client und xlrx-Client auf **denselben** lokalen Ordner loslassen.
 
 ### 4.2 Versionen ohne Platzkosten (Btrfs-Reflinks)
 Bevor eine Datei überschrieben wird, legt der Server einen **Reflink-Klon** der alten Version unter
@@ -183,7 +218,8 @@ Die mtime des Clients wird übernommen (`utimensat`), damit SMB-Nutzer echte Än
 - Externe Änderungen werden ins **Journal** übernommen wie jede andere Änderung. Die Zuordnung zum Benutzer
   geschieht nach bestem Wissen über die Datei-UID; sonst wird „extern“ angezeigt.
 - **Ignoriert:** `@eaDir`, `#recycle`, `#snapshot`, `.SynologyWorkingDirectory`, `@tmp`, `.DS_Store`, `._*`,
-  `Thumbs.db`, `~$*`-Lock-Dateien.
+  `Thumbs.db`, `~$*`-Lock-Dateien, `.xlrx` selbst. Die genauen Hilfsdateien von Synology Drive in `homes/<user>/Drive`
+  werden im M0-Spike erfasst und ergänzt.
 - Hinweis: Der DSM-Kernel ist je nach Modell 4.4 oder 5.10. Darum setzt der Plan kein dateisystemweites fanotify voraus.
 
 ### 4.5 Namen & Plattform-Eigenheiten
@@ -210,7 +246,9 @@ Das ist das Herzstück. Es ist bewusst nach dem Vorbild der Dropbox-„Nucleus�
 
 ### 5.2 Änderungen holen (Remote → Client)
 - `GET /api/sync/changes?cursor=…&roots=…` liefert verdichtete Änderungen seit dem Cursor (pro Node nur der letzte Zustand) und einen neuen Cursor.
-- **Push statt Polling:** WebSocket `/api/sync/notify` sendet `{seq}` bei neuen Änderungen. Der Client holt dann gezielt ab.
+- **Push statt Polling:** Ein langlebiger HTTP-Stream (`/api/sync/notify`, Server-Sent Events) sendet `{seq}` bei neuen
+  Änderungen. Der Client holt dann gezielt ab. SSE statt WebSocket, weil SSE ein normaler HTTP-Request ist: Es funktioniert
+  über HTTP/2 **und** HTTP/3 und braucht keinen Upgrade-Mechanismus, den Proxies und Firewalls blockieren könnten.
   Ziel im LAN: unter 2 s vom Speichern bis zum Download-Start auf dem anderen Gerät.
 - Ist der Cursor zu alt (Journal gekürzt), meldet der Server `reset`. Der Client macht dann ein seitenweises Snapshot-Listing und gleicht per Hash ab.
   Das ist sicher, weil inhaltsbasiert verglichen wird, und es löst keine Neu-Downloads aus.
@@ -222,7 +260,7 @@ Das ist das Herzstück. Es ist bewusst nach dem Vorbild der Dropbox-„Nucleus�
    Der Server antwortet: „Inhalt existiert schon“ (Dedup, sofort fertig) oder „diese Chunks fehlen“.
    Der Server kennt vorhandene Chunks über einen **Chunk-Index** (Chunk-Hash → Datei + Offset).
 3. `PUT /api/uploads/{id}/chunks/{hash}` läuft parallel und wiederaufnehmbar, zstd-komprimiert, wenn es sich lohnt. Requests sind ≤ 8 MB,
-   damit kein Proxy-Body-Limit greift (DSM-nginx, Cloudflare Tunnel 100 MB).
+   damit kein Body-Limit des vorgelagerten Proxys greift.
 4. `POST /api/uploads/{id}/commit`: Der Server setzt aus vorhandenen Chunks (Hash wird beim Lesen verifiziert) und neuen Chunks zusammen
    und schreibt atomar (siehe 4.3).
    - `base_version` passt nicht zur aktuellen Version → **Konflikt**. Der Server legt die eingehende Version als
@@ -279,11 +317,39 @@ Im Test führt eine Verletzung zum Abbruch. In Produktion folgt eine Selbstheilu
 - **Ignore-Regeln:** global (`.DS_Store`, `node_modules`, `*.tmp`, `.Trash`, …) plus `.xlrxignore` pro Ordner.
 
 ### 5.8 Effizienz-Details
-- LAN-Direktverbindung: Der Client erkennt, wenn der Server lokal erreichbar ist. Das geht per Split-DNS oder per LAN-URL mit gepinntem Server-Zertifikat. Dann umgeht er den Reverse Proxy.
+- LAN-Direktverbindung: Der Client erkennt, wenn der Server lokal erreichbar ist. Bevorzugt geht das per Split-DNS, dann gelten dieselbe Domain und
+  dasselbe Zertifikat. Alternativ per LAN-URL mit gepinntem Server-Zertifikat (siehe 5.9).
 - Parallele Transfers mit adaptiver Parallelität, Bandbreitenlimits und Zeitplänen.
 - FSEvents mit persistierter Event-ID (`sinceWhen`). Nach Neustart oder Schlaf werden nur die Änderungen seitdem verarbeitet, nicht alles gescannt.
 - Hintergrund-QoS (`utility`), Pausieren im Akkubetrieb oder Stromsparmodus optional.
 - Zielwerte: Leerlauf ~0 % CPU, Client-RAM < 200 MB bei 1 Mio Dateien, BLAKE3 > 1 GB/s auf Apple Silicon.
+
+### 5.9 Transport: HTTPS, bevorzugt HTTP/3 (QUIC)
+**Grundsatz:** Sync, Web-UI, Benachrichtigungen und Links laufen **ausschließlich über HTTPS auf Port 443**. Es gibt keine
+Sonderports und kein eigenes Protokoll. Durch jede Firewall, die Web-Surfen erlaubt, kommt also mindestens HTTP/2 über TCP.
+
+**HTTP/3 (QUIC)** ist der bevorzugte Weg, mit automatischem Fallback:
+- Der Proxy kündigt `Alt-Svc: h3=":443"` an. Clients versuchen QUIC über **UDP 443**. Ist UDP blockiert, bleibt die Verbindung
+  ohne Unterbrechung auf HTTP/2/TCP.
+- Ehrlicher Hinweis: QUIC kommt **nicht leichter** durch Firewalls. UDP 443 ist in Firmen- und Hotelnetzen sogar öfter gesperrt als TCP 443.
+  Die Firewall-Freundlichkeit kommt vom Port 443, der Fallback sorgt dafür, dass das immer funktioniert. QUIC lohnt sich trotzdem:
+  - **Verbindungsmigration:** Wechsel WLAN ↔ Mobilfunk ohne Abbruch laufender Uploads (ideal für iPhone und MacBook)
+  - schnellerer Verbindungsaufbau (1-RTT/0-RTT)
+  - **kein Head-of-Line-Blocking:** viele parallele Chunk-Transfers bleiben bei Paketverlust flüssig
+- **Apple-Clients nutzen `URLSession` als Transport.** URLSession spricht HTTP/3 nativ (`assumesHTTP3Capable`) und
+  beherrscht iOS-Hintergrund-Transfers. Es respektiert System-VPN und Proxy-Einstellungen und ist energieeffizient.
+  Der Rust-Kern enthält die Protokoll-Logik. Den eigentlichen Transport implementiert die Plattform über eine UniFFI-Schnittstelle.
+  Spätere Clients (Windows/Linux/Android) nutzen eine Rust-Implementierung (`quinn`/`h3` bzw. `reqwest`).
+- **QUIC-Terminierung im vorgelagerten Reverse Proxy.** Empfehlung: **Caddy**. Es spricht HTTP/3 ab Werk, holt Let's-Encrypt-Zertifikate automatisch,
+  hat kein Body-Limit und streamt SSE ohne Puffern. Traefik und nginx ≥ 1.25 gehen ebenfalls. Der Reverse Proxy in DSM kann **kein** HTTP/3.
+  Vom Proxy zum `xlrx-server` reicht HTTP/1.1 oder h2c im internen Docker-Netz.
+- **Router:** Neben TCP 443 auch **UDP 443** an den Proxy weiterleiten.
+- **DS918+-Besonderheit:** QUIC läuft im Userspace. Ohne UDP-GSO (Kernel 4.4) braucht es auf dem J3455 deutlich mehr CPU als TCP.
+  Für den WAN-Zugang (typisch 40–100 Mbit/s Upload) reicht das. Im LAN kann QUIC dagegen Gigabit ausbremsen. Falls der M0-Spike das bestätigt,
+  bekommen die Clients für das LAN einen eigenen Endpunkt nur mit HTTP/2, z.B. `drive-lan.<domain>` per Split-DNS mit gültigem Let's-Encrypt-Zertifikat (DNS-Challenge oder Wildcard).
+  Die Clients schalten automatisch um, sobald er erreichbar ist. Die UDP-Puffer (`net.core.rmem_max`/`wmem_max`) werden per Boot-Aufgabe vergrößert.
+- **Split-DNS** (Router, Pi-hole oder DSM-DNS-Server): Im LAN zeigt die Domain auf die NAS-IP. So gelten dasselbe Zertifikat
+  und dieselbe URL überall, und der Client muss nichts umschalten.
 
 ---
 
@@ -313,10 +379,15 @@ keine erneute Analyse aus, nur die Pfadfelder im Index werden aktualisiert.
 - **Speichersparend:** HNSW-Index über **binär quantisierte** Vektoren (1024 Bit = 128 Byte/Vektor), danach
   **Re-Ranking** der Top-Kandidaten mit `halfvec`. So bleiben auch 3–4 Mio Vektoren im RAM-Budget.
 - Jeder Vektor trägt die Modell-ID. Ein Modellwechsel führt zu einem Neu-Embedding im Hintergrund, während der alte Index weiter antwortet.
+- **Zwei Vektor-Indizes:** `cloud` (z.B. `qwen3-embedding-8b`, 1024 Dim.) für normale Ordner und `lokal` (kleines Modell auf dem NAS,
+  siehe 7.5) für sensible Ordner. Jede Datei liegt in genau einem davon, je nach KI-Regel ihres Ordners.
+  Vektoren verschiedener Modelle sind nicht vergleichbar. Darum wird die Anfrage für jeden Index mit dem passenden Modell embedded,
+  und die Ergebnislisten werden erst über die Rangfolge zusammengeführt (6.4).
 
 ### 6.4 Hybride Rangfolge
-1. Lexikalisch Top-100 ‖ Vektor Top-100 laufen parallel. Das Query-Embedding hat ein Timeout von ~400 ms; bei Fehler gibt es nur lexikalische Treffer.
-2. **Reciprocal Rank Fusion**, danach Boosts: Treffer im Dateinamen, Aktualität, eigene Nutzungshäufigkeit, „bei mir freigegeben“.
+1. Drei Listen parallel: lexikalisch Top-100 ‖ Vektor-Index `cloud` Top-100 ‖ Vektor-Index `lokal` Top-100. Das Query-Embedding
+   hat ein Timeout von ~400 ms; fällt eine Quelle aus, fehlt nur ihre Liste.
+2. **Reciprocal Rank Fusion** arbeitet nur mit Rängen, nicht mit Scores. Darum lassen sich die Listen zweier Embedding-Modelle sauber mischen. Danach Boosts: Treffer im Dateinamen, Aktualität, eigene Nutzungshäufigkeit, „bei mir freigegeben“.
 3. Optional ein Re-Ranker (Cross-Encoder) über die Top-30.
 4. **Rechte:** Filter im Index über die Vorfahren-IDs (siehe 9.3). Zusätzlich prüft Postgres die finalen Treffer noch einmal (Defense in Depth).
 
@@ -349,7 +420,7 @@ Job-Queue in Postgres (`FOR UPDATE SKIP LOCKED`), Retries mit Backoff, Dead-Lett
 ### 7.1 Provider-Abstraktion
 Beide Anbieter bieten **OpenAI-kompatible Endpunkte** (`/v1/embeddings`, `/v1/chat/completions` mit Bildern).
 Der Worker bekommt dafür einen Provider-Typ mit konfigurierbarer Basis-URL, API-Key und Modellnamen pro Aufgabe.
-Später kann ohne Code-Änderung auch ein lokaler Server angeschlossen werden (Ollama/llama.cpp auf einem Mac).
+Derselbe Mechanismus bindet den lokalen Embedding-Dienst `embed-local` auf dem NAS an (7.5).
 
 | Aufgabe | Scaleway (Paris, EU) | Cloudflare Workers AI |
 |---|---|---|
@@ -397,12 +468,44 @@ Kosten senken lässt sich so:
 **Budget-Limit** pro Monat im Admin-Bereich: Ist es erreicht, pausiert die KI-Pipeline. Die lexikalische Suche läuft weiter.
 
 ### 7.4 Datenschutz
-- **Pro Ordner/Ablage „KI-Analyse erlaubt“** (vererbt). Für ausgenommene Ordner (z.B. Gesundheit, Verträge) gibt es nur lokale
-  Extraktion, lokale OCR (Tesseract) und lexikalische Suche, keine Vektoren.
+- **Pro Ordner/Ablage eine KI-Regel** (vererbt): **„Cloud erlaubt“** oder **„Nur lokal“**.
+  - **Cloud erlaubt:** volle Funktion wie oben beschrieben.
+  - **Nur lokal** (z.B. Gesundheit, Verträge, Finanzen): Kein Byte verlässt das NAS. Extraktion per Tika, OCR per Tesseract,
+    **semantische Suche über das lokale Embedding-Modell** (7.5). Es gibt keine KI-Bildbeschreibungen, weil Vision-Modelle für
+    den J3455 zu groß sind. Fotos in diesen Ordnern bleiben über Name, Datum, Ort (EXIF) und erkannten Text auffindbar.
+  - Wechselt ein Ordner von „Cloud erlaubt“ auf „Nur lokal“, werden seine Cloud-Ergebnisse (Vektoren, Bildbeschreibungen) gelöscht und lokal neu erzeugt.
+  - Voreinstellung für neue Ablagen ist einstellbar. Sicherer Standard: „Nur lokal“, bis aktiv freigegeben.
 - Es werden nur minimierte Daten gesendet: Text-Chunks oder Bilder verkleinert auf ≤ 1024 px, **ohne EXIF/GPS**.
   Dateinamen und Pfade werden standardmäßig nicht mitgeschickt.
 - Bei geteilten Ablagen entscheidet der Besitzer bzw. Verwalter über die KI-Erlaubnis.
 - Vor dem Go-live: AVV mit dem Anbieter abschließen und die Bedingungen zu Speicherung und Training prüfen. Laut Anbieterangaben wird nicht gespeichert und nicht trainiert.
+
+### 7.5 Lokales Embedding-Modell auf dem NAS
+**Ja, das geht, mit Abstrichen bei der Geschwindigkeit.**
+
+- Ein eigener Container **`embed-local`** bietet einen OpenAI-kompatiblen Endpunkt `/v1/embeddings`. Für den Worker ist das einfach ein
+  weiterer Provider (7.1). Es braucht keine Sonderlogik, und das Modell ist austauschbar.
+- **Modellkandidaten** (mehrsprachig, gut für Deutsch):
+
+  | Modell | Größe | Dimensionen | Lizenz | Einschätzung auf dem J3455 |
+  |---|---|---|---|---|
+  | `multilingual-e5-small` | 118 Mio Parameter | 384 | MIT | **Standard-Empfehlung.** Schnell genug, solide Qualität |
+  | `embeddinggemma-300m` | 300 Mio Parameter | 768 (Matryoshka: 512/256/128) | Gemma-Lizenz | bessere Qualität, aber ~3–5× langsamer; nur wenn der Spike das zulässt |
+
+  Beide laufen int8-quantisiert. Zum Vergleich: Das Cloud-Modell `qwen3-embedding-8b` ist deutlich stärker. Lokal ist ein Kompromiss für die sensiblen Ordner.
+- **Laufzeit ohne AVX:** ONNX Runtime aus dem Quellcode ohne AVX gebaut **oder** llama.cpp mit GGUF-Modell
+  (`GGML_NATIVE=OFF`, AVX-Optionen aus). Welche Variante schneller und stabil ist, entscheidet ein Benchmark im M0-Spike direkt auf dem DS918+.
+- **Erwartete Geschwindigkeit** (Überschlag, wird gemessen):
+  - `multilingual-e5-small` mit 2 Kernen: ~0,5–2 Chunks/s (512 Tokens). Nachts dürfen alle 4 Kerne rechnen.
+  - Ein Query-Embedding dauert ~50–100 ms, ist also unproblematisch für die Suche.
+- **Damit das reicht:** Im lokalen Index werden pro Dokument nur die ersten ~3 Chunks und der OCR-Text embedded. Den vollständigen Text
+  deckt die lexikalische Suche ab. Rechenbeispiel: sensible Ordner mit 20k Dokumenten → ~60k Chunks → **Erst-Indexierung ca. 1 Tag**,
+  danach laufend in Echtzeit.
+- **Alles lokal statt Cloud** wäre technisch möglich (ein einziger Vektorraum, keine Cloud-Abhängigkeit für Text). Bei ~1 Mio Chunks
+  läge die Erst-Indexierung auf dem J3455 aber bei **etwa 1–3 Wochen**, und die Qualität wäre geringer. Daher die Empfehlung: Cloud für
+  normale Ordner, lokal für sensible.
+- **Ausbauoption:** Kommt später ein Apple-Silicon-Mac (z.B. Mac mini) ins Heimnetz, kann `embed-local` dort laufen, z.B. Ollama.
+  Das ist eine Konfigurationsänderung, und die Daten bleiben im eigenen Netz. Der Mac ist etwa 20–50× schneller, dann wären auch lokale Bildbeschreibungen möglich.
 
 ---
 
@@ -433,7 +536,7 @@ Kosten senken lässt sich so:
 - Rechte: Jede Person sieht nur Ereignisse zu Elementen, auf die sie Zugriff hat. Die Prüfung erfolgt beim Lesen über dieselbe Vorfahren-Logik.
 
 ### 8.4 Benachrichtigungen
-Glocke im Web (live per WebSocket), Push auf iOS und Mac (APNs, direkt vom Server mit `.p8`-Schlüssel), optional E-Mail (SMTP)
+Glocke im Web (live per SSE), Push auf iOS und Mac (APNs, direkt vom Server mit `.p8`-Schlüssel), optional E-Mail (SMTP)
 bei neuen Freigaben. Pro Person einstellbar.
 
 ---
@@ -468,7 +571,7 @@ bei neuen Freigaben. Pro Person einstellbar.
 ## 10. Web-UI
 
 **SvelteKit** (statischer Build, vom Server ausgeliefert), TypeScript. Der API-Client wird aus OpenAPI generiert (utoipa).
-Live-Updates kommen per WebSocket. PWA-fähig, Deutsch/Englisch, Dark Mode.
+Live-Updates kommen per Server-Sent Events. PWA-fähig, Deutsch/Englisch, Dark Mode.
 
 Bereiche wie bei Google Drive: **Startseite**, **Meine Ablage**, **Geteilte Ablagen**, **Für mich freigegeben**, **Zuletzt verwendet**,
 **Markiert**, **Papierkorb**, **Aktivität**, **Admin**.
@@ -497,7 +600,7 @@ Funktionen:
 | **Sync-Agent** | LaunchAgent (`SMAppService`) mit xlrx-core. Läuft auch ohne geöffnetes UI und kommuniziert per XPC mit der App. |
 | **FinderSync-Extension** | Nur im Spiegel-Modus: Status-Badges (synchron/läuft/Fehler) und Kontextmenü „Link kopieren“, „Teilen…“, „Im Browser öffnen“, „Versionen…“. |
 | **File-Provider-Extension** | Nur im FP-Modus: `NSFileProviderReplicatedExtension` mit xlrx-core. Badges per Decorations, Aktionen per Custom Actions. |
-| **xlrx-core** | Rust-Bibliothek als XCFramework (UniFFI): API-Client, Transfer, Chunking, Sync-Engine, lokale SQLite. |
+| **xlrx-core** | Rust-Bibliothek als XCFramework (UniFFI): Protokoll-Logik, Chunking, Sync-Engine, lokale SQLite. Den Netzwerk-Transport liefert die App über `URLSession` (HTTP/3, siehe 5.9). |
 
 ### 11.2 Zwei Modi, pro Sync-Ordner wählbar
 - **Spiegel-Modus (Standard):** echter Ordner, z.B. `~/xlrx/`, mit Selective Sync. Funktioniert mit jedem Tool (git, Lightroom, Skripte).
@@ -562,8 +665,11 @@ notifications(id, user_id, event_id, read_at)
 content_text(hash, lang, source[extract|ocr|vision], text)  -- komprimiert (TOAST/lz4)
 content_vision(hash, model, caption, tags, doc_type, detected_date, raw jsonb)
 content_embeddings(hash, chunk_no, model, vec halfvec(1024))
-search_vectors(node_id, chunk_no, model, ancestor_ids, vec halfvec(1024))
+search_vectors_cloud(node_id, chunk_no, model, ancestor_ids, vec halfvec(1024))
       -- HNSW auf binary_quantize(vec), Filter auf ancestor_ids
+search_vectors_local(node_id, chunk_no, model, ancestor_ids, vec halfvec(384))
+      -- lokales Modell (7.5), Dimension je nach Modell
+ai_policy(node_id, policy[cloud|local])                     -- KI-Regel pro Ordner, vererbt
 jobs(id, kind, key, priority, state, attempts, run_after, last_error, …)
 ai_usage(day, provider, model, tokens_in, tokens_out, cost)
 ```
@@ -583,9 +689,9 @@ Nodes     GET /nodes/{id} · /nodes/{id}/children · POST /nodes (Ordner) · PAT
           DELETE /nodes/{id} (→ Papierkorb) · POST /nodes/{id}/restore · GET /nodes/{id}/versions
 Inhalt    GET /content/{version} (Range) · GET /thumb/{hash}/{size} · GET /preview/{version}
 Upload    POST /uploads · PUT /uploads/{id}/chunks/{hash} · POST /uploads/{id}/commit · POST /uploads/batch
-Sync      GET /sync/changes?cursor&roots · GET /sync/snapshot?page · WS /sync/notify
+Sync      GET /sync/changes?cursor&roots · GET /sync/snapshot?page · GET /sync/notify (SSE)
 Suche     GET /search?q&filter… · GET /search/suggest?q
-Start     GET /home · GET /activity · GET /notifications
+Start     GET /home · GET /activity · GET /notifications · GET /events/stream (SSE für die Web-UI)
 Teilen    /shares · /links · öffentlich: /s/{token}
 Admin     /admin/users · /admin/groups · /admin/roots · /admin/ai · /admin/jobs · /admin/health
 Metriken  /metrics (Prometheus) · /healthz
@@ -595,15 +701,19 @@ Metriken  /metrics (Prometheus) · /healthz
 
 ## 15. Betrieb auf der Synology
 
-- **Container Manager → Projekt** mit `docker-compose.yml` (liegt unter `deploy/`). Images für amd64 werden per GitHub Actions gebaut und
-  in GHCR veröffentlicht.
-- Ein eigener DSM-Benutzer `xlrx` (PUID/PGID) mit Lese-/Schreibrechten auf die Drive-Freigabe. Der Worker mountet die Daten **read-only**.
-- **Boot-Aufgabe** (Aufgabenplaner, root): `sysctl -w fs.inotify.max_user_watches=1048576`.
-- **Erreichbarkeit von außen:** DSM-Reverse-Proxy mit Let's-Encrypt-Zertifikat und eigener Domain (WebSocket-Header aktivieren).
-  Alternativ Cloudflare Tunnel (Body-Limit 100 MB, deshalb bleiben Chunks klein) oder Tailscale.
-  QuickConnect funktioniert für eigene Container **nicht**.
+- **Container Manager → Projekt** mit `docker-compose.yml` (liegt unter `deploy/`). Dienste: `xlrx-server`, `xlrx-worker`, `postgres`,
+  `tika`, `embed-local`, optional `caddy`. Images werden per GitHub Actions für amd64 **mit x86-64-v2 als Basis** gebaut (kein AVX, siehe 3.1)
+  und in GHCR veröffentlicht.
+- Ein eigener DSM-Benutzer `xlrx` (PUID/PGID) mit Lese-/Schreibrechten auf `homes` und `xlrx-spaces`. Der Worker mountet die Daten **read-only**.
+  CPU-Limits in compose: Worker und `embed-local` zusammen max. 2 Kerne tagsüber.
+- **Boot-Aufgabe** (Aufgabenplaner, root):
+  `sysctl -w fs.inotify.max_user_watches=1048576 net.core.rmem_max=7500000 net.core.wmem_max=7500000`
+  (inotify für viele Verzeichnisse, UDP-Puffer für QUIC).
+- **Erreichbarkeit von außen:** eigene Domain, Portweiterleitung **TCP 443 + UDP 443** auf den vorgelagerten Reverse Proxy.
+  Der Proxy muss HTTP/3 können (Caddy empfohlen, siehe 5.9), SSE ungepuffert durchreichen und darf keine knappen Body-Limits haben.
+  Chunks sind ≤ 8 MB. Split-DNS für das LAN.
 - **Backup:**
-  - Hyper Backup über die Drive-Freigabe (normale Dateien + `.xlrx/versions`)
+  - Hyper Backup über `homes` und `xlrx-spaces` (normale Dateien + `.xlrx/versions`)
   - nächtlicher `pg_dump` in einen Backup-Ordner, der mitgesichert wird
   - Btrfs-Snapshots (Snapshot Replication) als zusätzliches Netz
   - Suchindex, Vektoren und Thumbnails werden **nicht** gesichert; sie werden neu aufgebaut. KI-Ergebnisse liegen in Postgres und gehen nicht verloren.
@@ -616,7 +726,9 @@ Metriken  /metrics (Prometheus) · /healthz
 
 - TLS überall, HSTS, strikte CSP, `SameSite`-Cookies, CSRF-Schutz.
 - Passwörter mit argon2id, Passkeys, TOTP. Login-Rate-Limiting und Sperren. Gerätetokens widerrufbar.
-- Postgres und Tika nur im internen Docker-Netz. Der Worker darf nur zum KI-Anbieter.
+- Postgres, Tika und `embed-local` nur im internen Docker-Netz. Der Worker darf nur zum KI-Anbieter. `embed-local` hat gar keinen Internetzugang.
+- Jobs aus „Nur lokal“-Ordnern werden vom Worker technisch nie an einen Cloud-Provider geroutet. Die Regel wird beim Versand
+  geprüft, nicht nur beim Einplanen. Ein Test stellt sicher, dass kein Request dieser Ordner das Haus verlässt.
 - Parser-Isolation im Worker (read-only, Ressourcenlimits, Timeouts pro Datei).
 - Nutzerinhalte von einer separaten Origin bzw. als Attachment mit CSP `sandbox` ausliefern.
 - Audit-Log für Admin-Aktionen, Freigaben und Link-Zugriffe.
@@ -644,8 +756,13 @@ Zuverlässigkeit entsteht durch Tests, nicht durch Hoffnung. Darum hat das Teste
    - 100k kleine Dateien, eine 50-GB-Datei
    - SMB-Änderungen während des Syncs, Ruhezustand mitten im Upload
 5. **Web:** Playwright-Tests für die Kernabläufe.
-6. **Last/Skalierung:** synthetischer Baum mit 3 Mio Dateien. Gemessen werden Listing, Sync, Suche und Erst-Indexierung gegen die Zielwerte.
-7. **Dogfooding:** mehrere Wochen produktiver Eigenbetrieb **bevor** Synology Drive abgelöst wird.
+6. **CPU-Kompatibilität:** Alle Server-Binaries und Images laufen in der CI einmal unter `qemu-x86_64 -cpu Denverton` (kein AVX).
+   Ein *Illegal Instruction* bricht den Build.
+7. **Transport:** Tests mit gesperrtem UDP (Fallback auf HTTP/2 ohne Abbruch), Netzwechsel während eines Uploads (QUIC-Migration),
+   SSE durch den Reverse Proxy (keine Pufferung, Reconnect mit Cursor).
+8. **Datenschutz-Regel:** Integrationstest mit einem Fake-Cloud-Provider. Aus „Nur lokal“-Ordnern darf dort kein einziger Request ankommen.
+9. **Last/Skalierung:** synthetischer Baum mit 3 Mio Dateien. Gemessen werden Listing, Sync, Suche und Erst-Indexierung gegen die Zielwerte.
+10. **Dogfooding:** mehrere Wochen produktiver Eigenbetrieb **bevor** Synology Drive abgelöst wird.
 
 ---
 
@@ -671,8 +788,11 @@ xlrx-drive/
 │  └─ iOS/                       App, FileProvider, ShareExtension
 ├─ deploy/
 │  ├─ docker-compose.yml
-│  ├─ Dockerfile.server · Dockerfile.worker
-│  └─ synology.md                Einrichtungsanleitung
+│  ├─ Dockerfile.server · Dockerfile.worker · Dockerfile.embed-local
+│  ├─ Caddyfile                  Beispiel für den vorgelagerten Proxy (HTTP/3)
+│  └─ synology.md                Einrichtungsanleitung (Freigaben, Rechte, Boot-Aufgabe, Router)
+├─ spikes/
+│  └─ ds918/                     Hardware-Messungen (Embedding, QUIC, Hashing, Reflink, ACL)
 └─ docs/
    ├─ PLAN.md                    (dieses Dokument)
    └─ adr/                       Architektur-Entscheidungen
@@ -687,12 +807,12 @@ Zwei parallele Stränge: **A – Server/Web/Suche** liefert früh Nutzen, währe
 
 | # | Meilenstein | Inhalt | Fertig, wenn … | Größe |
 |---|---|---|---|---|
-| **M0** | Fundament | Workspace, CI (Rust/Web/Apple), Docker-Images, compose, Postgres-Schema, Auth (Passwort + Passkey), Admin-Grundgerüst | `docker compose up` auf der Synology zeigt den Login | M |
+| **M0** | Fundament + DS918-Spike | Workspace, CI (Rust/Web/Apple, x86-64-v2 + QEMU-Check), Docker-Images, compose, Caddy-Beispiel, Postgres-Schema, Auth (Passwort + Passkey), Admin-Grundgerüst. **Spike auf dem DS918+:** lokale Embedding-Laufzeit ohne AVX (ONNX vs. llama.cpp, e5-small vs. embeddinggemma), QUIC- vs. HTTP/2-Durchsatz, BLAKE3-Geschwindigkeit, Reflinks im `homes`-Mount, ACL-Vererbung, Hilfsdateien von Synology Drive | `docker compose up` auf der Synology zeigt den Login über die eigene Domain per HTTP/3. Messwerte stehen in `spikes/ds918/` | M |
 | **M1** | Server-Kern + Web-Basis | Roots (bestehende Drive-Ordner einbinden), Watcher + Abgleich-Scan, Journal, Upload/Download (Chunks), Versionen (Reflink), Papierkorb, Web: Durchsuchen, Upload, Vorschau, Thumbnails | Web-UI zeigt die echten Daten aus Synology Drive, Änderungen per SMB erscheinen in Sekunden | L |
 | **B1** | Sync-Kern in Simulation | xlrx-chunk, xlrx-sync (sans-IO), xlrx-sim, Konfliktregeln, Invarianten | 1 Mio Seeds ohne Verletzung | L |
 | **M2** | Volltextsuche I | Tika-Extraktion, Tesseract-OCR, Tantivy (de/en), Filter/Syntax, Snippets, Rechte-Filter, Such-UI | Suche nach Inhalt in PDF/Office/Scans, p95 < 300 ms bei Bestandsgröße | M |
 | **M3** | Teilen, Aktivität, Startseite | Ablagen, Gruppen, Freigaben, Links, Aktivitätsstream, Vorschläge, Benachrichtigungen | Familie nutzt Web-UI für Teilen und findet Dinge über die Startseite | L |
-| **M4** | KI-Suche | Provider-Abstraktion (Scaleway/Cloudflare), Vision-Analyse, Embeddings, pgvector, hybride Rangfolge, Budget, KI-Ordnerregeln, Kostenschätzung | „Rechnung Heizung 2025“ und „Hund am Strand“ liefern sinnvolle Treffer, Kosten im Rahmen | M |
+| **M4** | KI-Suche | Provider-Abstraktion (Scaleway/Cloudflare/lokal), Vision-Analyse, Embeddings, **lokales Embedding-Modell für „Nur lokal“-Ordner**, zwei Vektor-Indizes, hybride Rangfolge, Budget, KI-Ordnerregeln, Kostenschätzung | „Rechnung Heizung 2025“ und „Hund am Strand“ liefern sinnvolle Treffer. Sensible Ordner sind semantisch durchsuchbar, ohne dass ein Byte das NAS verlässt. Kosten im Rahmen | M–L |
 | **M5** | Mac-App (Spiegel-Modus) | xlrx-client + FFI, SyncAgent, Menüleisten-App, Selective Sync, FinderSync, LAN-Direktverbindung | 4 Wochen Dogfooding ohne Datenverlust → **Synology-Drive-Client abschalten** | XL |
 | **M6** | iOS-App | Startseite, Suche, Durchsuchen, Vorschau, File Provider (Dateien-App), Share-Extension, Push | Alltagstauglich auf iPhone/iPad, über TestFlight verteilt | L |
 | **M7** | Mac File-Provider-Modus | FP-Extension, Offline-Pinning, Moduswechsel pro Ordner | Große Ablagen auf Abruf, stabil im Dogfooding | L |
@@ -713,7 +833,10 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
 | Eigenheiten der File-Provider-API | Spiegel-Modus ist der Standard, FP kommt erst in M7. Beide nutzen denselben Kern. |
 | Datenschutz bei Cloud-KI | Scaleway (EU), KI-Erlaubnis pro Ordner, Datenminimierung, AVV, lokale Fallbacks |
 | KI-Kosten laufen davon | Kostenschätzung vor Start, Batch-API, Dedup per Hash, Budget-Limit mit Auto-Pause |
-| NAS-Ressourcen (CPU/RAM) | schwere Arbeit in der Cloud, Worker mit Lastdrosselung, RAM-sparende Vektor-Quantisierung, SSD für Index/DB |
+| NAS-Ressourcen (J3455, 4 schwache Kerne) | schwere Arbeit in der Cloud, CPU-Limits für Worker/embed-local, Nachtfenster, RAM-sparende Vektor-Quantisierung, SSD-Cache |
+| J3455 ohne AVX → ML-Laufzeiten stürzen ab | x86-64-v2-Builds, QEMU-Check in der CI, Laufzeit-Auswahl per Spike in M0 |
+| Lokale Embeddings zu langsam | kleines Modell (e5-small), nur erste Chunks embedden, Nachtfenster. Später Auslagerung auf einen Mac im LAN möglich |
+| UDP 443 blockiert / QUIC auf dem J3455 zu CPU-hungrig | automatischer Fallback auf HTTP/2, eigener LAN-Endpunkt nur mit HTTP/2, Messung im Spike |
 | inotify-Limits / alter Kernel | Limit anheben, Abgleich-Scans als Sicherheitsnetz |
 | Externe Änderungen kollidieren mit Uploads | Intent-Log, Prüfung vor dem Ersetzen, Konfliktkopie statt Überschreiben |
 | Projektumfang | strikte Meilensteine, Nicht-Ziele für v1 (siehe 1), früher Nutzen durch Strang A |
@@ -722,11 +845,15 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
 
 ## 21. Offene Fragen
 
-1. **Welches Modell genau** (DS923+, DS920+, …)? Gibt es ein **SSD-Volume** oder M.2-Slots für DB und Index?
-2. **Wo liegen die Daten heute?** Synology-Drive-Ordner in `homes/<user>/Drive`, Team-Ordner, andere Freigaben? Die Antwort bestimmt das Root-Mapping.
-3. **Zugriff von außen:** eigene Domain + Portweiterleitung, Cloudflare Tunnel oder nur Tailscale?
-4. **Login:** Reichen eigene Konten (Passwort + Passkey), oder sollen DSM-Konten (LDAP/SSO) genutzt werden?
-5. **Apple Developer Account** vorhanden? Auf wen läuft er (Person/Firma)?
-6. **KI-Anbieter:** Scaleway als Standard okay? Gibt es Ordner, die **nie** in die Cloud dürfen?
-7. Sind **Windows** oder **Android** absehbar nötig? Das beeinflusst Prioritäten, nicht die Architektur.
-8. Wird **Bearbeiten von Office-Dokumenten im Browser** gewünscht (Collabora/OnlyOffice), oder reicht Vorschau + Bearbeiten lokal?
+Beantwortet (2026-10-02): DS918+ mit SSD-Cache · Daten in `homes/<user>/Drive` · eigene Domain mit Portweiterleitung und
+vorgelagertem Reverse Proxy · Apple Developer Account vorhanden · sensible Ordner bleiben lokal.
+
+Noch offen:
+1. **Welcher Reverse Proxy** ist vorgelagert (DSM-intern, Nginx Proxy Manager, Caddy, Traefik …), und läuft er auf dem NAS oder auf
+   einem anderen Gerät? Für HTTP/3 muss er QUIC können. Der DSM-interne kann das nicht.
+2. **Welche Ordner** sollen „Nur lokal“ sein? Die Regel wird beim Einrichten vorbelegt.
+3. **Login:** Reichen eigene Konten (Passwort + Passkey), oder sollen DSM-Konten (LDAP/SSO) genutzt werden?
+4. **KI-Anbieter:** Scaleway als Standard für die nicht sensiblen Ordner okay?
+5. Gibt es neben `homes/<user>/Drive` **Team-Ordner** in Synology Drive, die zu „Geteilten Ablagen“ werden sollen?
+6. Sind **Windows** oder **Android** absehbar nötig? Das beeinflusst Prioritäten, nicht die Architektur.
+7. Wird **Bearbeiten von Office-Dokumenten im Browser** gewünscht (Collabora/OnlyOffice), oder reicht Vorschau + Bearbeiten lokal?
