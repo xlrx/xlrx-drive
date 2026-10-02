@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use xlrx_proto::{Kind, Name, NodeId, Rev, Seq};
 
-use crate::ops::{LocalOp, LocalResult, Op, Origin, RemoteOp, RemoteResult};
+use crate::ops::{Expected, LocalOp, LocalResult, Op, Origin, RemoteOp, RemoteResult};
 use crate::synced::Synced;
 use crate::tree::Tree;
 use crate::types::{
@@ -31,7 +31,13 @@ const MAX_CHAIN: usize = 64;
 /// Präfix temporärer Ausweichnamen.
 pub const TEMP_PREFIX: &str = ".xlrx-tmp-";
 
-/// Heimatname eines temporären Ausweichnamens (Teil nach dem ersten „~“).
+/// Präfix der temporären Dateien, in die der Ausführende herunterlädt, bevor er sie an ihren Platz
+/// tauscht. Bleibt nach einem Absturz eine liegen, wird sie nie hochgeladen (der Ausführende räumt sie weg).
+pub const DOWNLOAD_TEMP_PREFIX: &str = ".xlrx-dl-";
+
+/// Heimatname eines temporären Ausweichnamens (Teil nach dem ersten „~“; der Gerätename im
+/// Präfix enthält nie „~“). Ist der Heimatname beim Ausweichen gekürzt worden, wird der gekürzte
+/// Name wiederhergestellt.
 fn temp_home(name: &Name) -> Option<Name> {
     let rest = name.as_str().strip_prefix(TEMP_PREFIX)?;
     let home = rest.split_once('~').map(|(_, h)| h).unwrap_or("");
@@ -129,6 +135,10 @@ pub struct Engine {
     orphans: BTreeSet<NodeId>,
     /// Die nächste Planung prüft alles (nach Start, vollständigem Scan oder Server-Stand).
     full: bool,
+    /// Der lokale Baum ist widersprüchlich geworden (Teil-Scan mit unbekannten Vorfahren, verspätetes
+    /// Ergebnis auf veraltetem Stand). Bis zum nächsten vollständigen Scan wird nichts geplant:
+    /// Ein unvollständiges Bild darf nie als „lokal gelöscht“ gelesen werden.
+    local_untrusted: bool,
 }
 
 /// So viele Planungen ohne Fortschritt (bei frischem Server- und lokalem Stand) müssen
@@ -158,6 +168,7 @@ impl Engine {
             waiting: BTreeSet::new(),
             orphans: BTreeSet::new(),
             full: true,
+            local_untrusted: false,
         }
     }
 
@@ -176,6 +187,16 @@ impl Engine {
 
     pub fn wants_scan(&self) -> bool {
         self.need_scan
+    }
+
+    /// Nur ein vollständiger Scan ([`Self::on_local_snapshot`]) hilft weiter.
+    pub fn wants_full_scan(&self) -> bool {
+        self.local_root.is_none() || self.local_untrusted
+    }
+
+    fn mark_untrusted(&mut self) {
+        self.local_untrusted = true;
+        self.need_scan = true;
     }
 
     pub fn wants_fetch(&self) -> bool {
@@ -281,6 +302,7 @@ impl Engine {
         self.local = t;
         self.local_root = Some(root);
         self.need_scan = false;
+        self.local_untrusted = false;
         self.full = true;
         self.orphans = self.st.synced.ids().into_iter().collect();
         let moving: BTreeSet<LocalId> = self
@@ -336,22 +358,16 @@ impl Engine {
             upserted.push(o.id);
             self.l_insert(o.id, o.entry);
         }
-        // Konsistenz: Ein gemeldetes Objekt, dessen Elternordner fehlt, existiert lokal nicht.
-        let dangling: Vec<LocalId> = upserted
+        // Konsistenz: Jedes gemeldete Objekt muss von der Wurzel aus erreichbar sein. Sonst fehlt eine
+        // Meldung (unbekannter Vorfahr, Zyklus mit noch nicht gemeldeter Verschiebung) – dann nichts
+        // entfernen (das sähe wie Löschen aus), sondern vollständig neu scannen.
+        let broken = upserted
             .into_iter()
-            .filter(|l| {
-                self.local
-                    .get(*l)
-                    .is_some_and(|e| e.parent != root && !self.local.contains(e.parent))
-            })
-            .collect();
-        for l in dangling {
-            for d in self.local.descendants(l) {
-                self.l_remove(d);
-            }
-            self.l_remove(l);
-        }
+            .any(|l| self.local.depth(l, root).is_none());
         self.need_scan = false;
+        if broken {
+            self.mark_untrusted();
+        }
         let moving: BTreeSet<LocalId> = self
             .inflight_local
             .values()
@@ -441,6 +457,17 @@ impl Engine {
         }
     }
 
+    /// Lokaler Elternordner bekannt? Ergebnisse können verspätet eintreffen, wenn ein Scan den
+    /// Ordner schon als gelöscht gemeldet hat. Dann wird nichts eingetragen; der nächste Scan zeigt,
+    /// was wirklich auf der Platte liegt (L bleibt lieber veraltet als unvollständig).
+    fn local_parent_known(&mut self, parent: LocalId) -> bool {
+        let known = Some(parent) == self.local_root || self.local.contains(parent);
+        if !known {
+            self.need_scan = true;
+        }
+        known
+    }
+
     fn apply_local_done(&mut self, op: LocalOp, new_id: LocalId, fp: Option<crate::Fingerprint>) {
         match op {
             LocalOp::CreateDir {
@@ -449,16 +476,22 @@ impl Engine {
                 node,
                 node_parent,
             } => {
-                self.l_insert(
-                    new_id,
-                    LocalEntry {
-                        parent,
-                        name: name.clone(),
-                        kind: Kind::Dir,
-                        fp: None,
-                        content: None,
-                    },
-                );
+                // Hat ein Scan das neue Objekt schon gesehen, ist sein Eintrag neuer als das Ergebnis.
+                if !self.local.contains(new_id) {
+                    if !self.local_parent_known(parent) {
+                        return;
+                    }
+                    self.l_insert(
+                        new_id,
+                        LocalEntry {
+                            parent,
+                            name: name.clone(),
+                            kind: Kind::Dir,
+                            fp: None,
+                            content: None,
+                        },
+                    );
+                }
                 let rev = self.st.remote.get(node).map_or(Rev(0), |r| r.rev);
                 self.link_if_free(
                     node,
@@ -481,16 +514,21 @@ impl Engine {
                 rev,
                 content,
             } => {
-                self.l_insert(
-                    new_id,
-                    LocalEntry {
-                        parent,
-                        name: name.clone(),
-                        kind: Kind::File,
-                        fp,
-                        content: Some(content),
-                    },
-                );
+                if !self.local.contains(new_id) {
+                    if !self.local_parent_known(parent) {
+                        return;
+                    }
+                    self.l_insert(
+                        new_id,
+                        LocalEntry {
+                            parent,
+                            name: name.clone(),
+                            kind: Kind::File,
+                            fp,
+                            content: Some(content),
+                        },
+                    );
+                }
                 self.link_if_free(
                     node,
                     SyncedEntry {
@@ -511,7 +549,9 @@ impl Engine {
                 content,
                 ..
             } => {
-                if let Some(e) = self.l_remove(local) {
+                if self.local.contains(new_id) {
+                    self.l_remove(local); // ein Scan hat das Ergebnis schon gesehen
+                } else if let Some(e) = self.l_remove(local) {
                     self.l_insert(
                         new_id,
                         LocalEntry {
@@ -520,6 +560,8 @@ impl Engine {
                             ..e
                         },
                     );
+                } else {
+                    self.need_scan = true;
                 }
                 if self.st.synced.get(node).is_some_and(|s| s.local == local) {
                     self.s_update(node, |s| {
@@ -532,18 +574,33 @@ impl Engine {
             }
             LocalOp::Move {
                 local,
+                from_parent,
+                from_name,
                 parent,
                 name,
                 synced_to,
-                ..
             } => {
                 if self.st.local_temps.get(&local) != Some(&(parent, name.clone())) {
                     self.st.local_temps.remove(&local);
                 }
-                self.l_update(local, |e| {
-                    e.parent = parent;
-                    e.name = name;
-                });
+                // L nur nachziehen, wenn es noch den Stand vor der Verschiebung zeigt. Zeigt es etwas
+                // anderes, hat ein Scan schon Neueres gesehen.
+                let before = self
+                    .local
+                    .get(local)
+                    .is_some_and(|e| e.parent == from_parent && e.name == from_name);
+                if before {
+                    let known = Some(parent) == self.local_root || self.local.contains(parent);
+                    if !known || parent == local || self.local.is_within(parent, local) {
+                        // Auf veraltetem Stand nicht abbildbar (anderes Ergebnis steht noch aus).
+                        self.mark_untrusted();
+                    } else {
+                        self.l_update(local, |e| {
+                            e.parent = parent;
+                            e.name = name;
+                        });
+                    }
+                }
                 if let Some((p, nm)) = synced_to
                     && let Some(n) = self.st.synced.node_of(local)
                 {
@@ -559,9 +616,13 @@ impl Engine {
                     self.s_remove(node);
                 }
             }
-            LocalOp::DeleteDir { local, node } => {
-                for d in self.local.descendants(local) {
-                    self.l_remove(d);
+            LocalOp::DeleteDir { local, node, .. } => {
+                if self.local.has_children(local) {
+                    // Der Ordner war beim Löschen leer, L kennt aber noch Kinder: L ist veraltet
+                    // (die Kinder wurden inzwischen verschoben). Erst der Scan sagt, wo sie sind;
+                    // als gelöscht dürfen sie keinesfalls gelten.
+                    self.mark_untrusted();
+                    return;
                 }
                 self.l_remove(local);
                 if self.st.synced.get(node).is_some_and(|s| s.local == local) {
@@ -640,11 +701,17 @@ impl Engine {
                 },
                 RemoteResult::Updated { rev, seq },
             ) => {
-                if self.st.synced.get(node).is_some_and(|s| s.local == source) {
+                // Server und lokale Quelle hatten danach denselben Inhalt. Wurde die lokale Datei
+                // inzwischen per „Atomic Save“ ersetzt (neue lokale ID), gilt das trotzdem; nur der
+                // Fingerprint gehört dann nicht zur aktuellen Datei.
+                if let Some(s) = self.st.synced.get(node) {
+                    let same_local = s.local == source;
                     self.s_update(node, |s| {
                         s.content = Some(content);
                         s.rev = rev;
-                        s.fp = Some(fp);
+                        if same_local {
+                            s.fp = Some(fp);
+                        }
                     });
                 }
                 self.mark_pending(node, seq);
@@ -684,7 +751,12 @@ impl Engine {
                 }
                 self.mark_pending(copy, seq);
             }
-            (RemoteOp::Move { node, parent, name }, RemoteResult::Moved { seq }) => {
+            (
+                RemoteOp::Move {
+                    node, parent, name, ..
+                },
+                RemoteResult::Moved { seq },
+            ) => {
                 self.s_update(node, |s| {
                     s.parent = parent;
                     s.name = name;
@@ -692,7 +764,7 @@ impl Engine {
                 self.mark_pending(node, seq);
             }
             (
-                RemoteOp::DeleteFile { node, .. } | RemoteOp::DeleteDir { node },
+                RemoteOp::DeleteFile { node, .. } | RemoteOp::DeleteDir { node, .. },
                 RemoteResult::Deleted { seq },
             ) => {
                 self.s_remove(node);
@@ -746,9 +818,16 @@ impl Engine {
     }
 
     /// Verknüpft nur, wenn weder Knoten noch lokale ID schon verknüpft sind.
+    ///
+    /// Gibt es die lokale ID nicht mehr (z.B. „Atomic Save“, während das Ergebnis unterwegs war),
+    /// wird sofort das Neu-Verknüpfen versucht. Sonst sähe der Knoten lokal gelöscht aus.
     fn link_if_free(&mut self, node: NodeId, e: SyncedEntry) {
         if !self.st.synced.contains(node) && self.st.synced.node_of(e.local).is_none() {
-            self.s_insert(node, e);
+            let absent = !self.local.contains(e.local);
+            if self.s_insert(node, e) && absent && self.local_root.is_some() {
+                self.orphans.insert(node);
+                self.rebind();
+            }
         }
     }
 
@@ -780,7 +859,7 @@ impl Engine {
         for op in self.inflight_local.values() {
             mark_local_busy(op, &self.st.synced, &mut cx);
         }
-        if self.local_root.is_none() || self.st.cursor.is_none() {
+        if self.local_root.is_none() || self.st.cursor.is_none() || self.local_untrusted {
             return cx.ops;
         }
         let resent = cx.ops.len();
@@ -913,7 +992,10 @@ impl Engine {
                 }
                 match self.st.synced.node_of(l) {
                     Some(n) => self.is_settled(Key::Node(n), cx),
-                    None => !self.local.contains(l),
+                    None => self
+                        .local
+                        .get(l)
+                        .is_none_or(|e| e.name.as_str().starts_with(DOWNLOAD_TEMP_PREFIX)),
                 }
             }
         }
@@ -963,7 +1045,7 @@ impl Engine {
             }
             LocalOp::Replace { local, node, .. }
             | LocalOp::DeleteFile { local, node, .. }
-            | LocalOp::DeleteDir { local, node } => {
+            | LocalOp::DeleteDir { local, node, .. } => {
                 self.dirty.extend([Key::Local(*local), Key::Node(*node)]);
             }
             LocalOp::Move {
@@ -1014,7 +1096,7 @@ impl Engine {
                     self.dirty.insert(Key::Node(p));
                 }
             }
-            RemoteOp::DeleteFile { node, .. } | RemoteOp::DeleteDir { node } => {
+            RemoteOp::DeleteFile { node, .. } | RemoteOp::DeleteDir { node, .. } => {
                 self.dirty.insert(Key::Node(*node));
                 if let Some(p) = self.st.remote.get(*node).map(|e| e.parent) {
                     self.dirty.insert(Key::Node(p));
@@ -1208,8 +1290,15 @@ impl Engine {
 
     /// Auf dem Server gelöscht, lokal vorhanden.
     fn plan_remote_gone(&mut self, n: NodeId, s: &SyncedEntry, le: &LocalEntry, cx: &mut Ctx) {
+        if self.local_differs(s, le) {
+            // Lokale Änderung gewinnt gegen das Löschen: Verknüpfung lösen, das Objekt wird neu hochgeladen.
+            // (Zuerst prüfen: Eine lokale Änderung darf nie einem neuen Server-Knoten zugeschlagen werden.)
+            self.s_remove(n);
+            return;
+        }
         // „Atomic Save“ auf dem Server: Am selben Ort liegt jetzt ein neuer Knoten gleicher Art.
-        // Dann ist das lokale Objekt dessen Vorgänger: neu verknüpfen statt löschen und neu laden.
+        // Dann ist das (unveränderte) lokale Objekt dessen Vorgänger: neu verknüpfen statt löschen
+        // und neu laden. Der neue Inhalt kommt danach als gewöhnliche Server-Änderung.
         if let Some(m) = self.eff_occupant(s.parent, &s.name, Some(n))
             && !self.st.synced.contains(m)
             && !self.st.pending.contains_key(&m)
@@ -1226,16 +1315,18 @@ impl Engine {
                     ..s.clone()
                 },
             );
-            return;
-        }
-        if self.local_differs(s, le) {
-            // Lokale Änderung gewinnt gegen das Löschen: Verknüpfung lösen, das Objekt wird neu hochgeladen.
-            self.s_remove(n);
+            if s.kind == Kind::Dir {
+                // Die vereinbarten Kinder gehören jetzt zum neuen Ordner. Sonst sähe es so aus, als
+                // hätte man sie lokal hineinverschoben, und auf dem Server gelöschte Kinder kämen zurück.
+                for c in self.st.synced.children(n) {
+                    self.s_update(c, |e| e.parent = m);
+                }
+            }
             return;
         }
         match s.kind {
             Kind::File => {
-                let Some(fp) = le.fp else {
+                let (Some(fp), Some(content)) = (le.fp, le.content) else {
                     self.need_scan = true;
                     return;
                 };
@@ -1243,7 +1334,9 @@ impl Engine {
                     cx,
                     LocalOp::DeleteFile {
                         local: s.local,
-                        expect: fp,
+                        parent: le.parent,
+                        name: le.name.clone(),
+                        expect: Expected { fp, content },
                         node: n,
                     },
                 );
@@ -1282,6 +1375,8 @@ impl Engine {
                         cx,
                         LocalOp::DeleteDir {
                             local: s.local,
+                            parent: le.parent,
+                            name: le.name.clone(),
                             node: n,
                         },
                     );
@@ -1303,6 +1398,8 @@ impl Engine {
                 RemoteOp::DeleteFile {
                     node: n,
                     base_rev: re.rev,
+                    parent: re.parent,
+                    name: re.name.clone(),
                 },
             ),
             Kind::Dir => {
@@ -1341,7 +1438,14 @@ impl Engine {
                     // Auf dem Server liegt darin etwas, das bleiben muss: Ordner lokal wiederherstellen.
                     self.s_remove(n);
                 } else {
-                    self.emit_remote(cx, RemoteOp::DeleteDir { node: n });
+                    self.emit_remote(
+                        cx,
+                        RemoteOp::DeleteDir {
+                            node: n,
+                            parent: re.parent,
+                            name: re.name.clone(),
+                        },
+                    );
                 }
             }
         }
@@ -1419,7 +1523,12 @@ impl Engine {
                 cx,
                 LocalOp::Replace {
                     local: s.local,
-                    expect: lfp,
+                    parent: le.parent,
+                    name: le.name.clone(),
+                    expect: Expected {
+                        fp: lfp,
+                        content: lc,
+                    },
                     node: n,
                     rev: re.rev,
                     content: rc,
@@ -1498,19 +1607,38 @@ impl Engine {
                 if cx.busy_l.contains(&o) || cx.busy_n.contains(&m) {
                     return;
                 }
-                let _ = n;
-                let o_deleted_remotely = self.eff_remote_loc(m).is_none();
+                // Groß-/Kleinschreibungsvariante auf dem Server (z.B. per SMB „b“ → „a“ neben „A“):
+                // o bleibt, wo es ist, lokal gibt es aber nur einen Namen für beide. Wie bei neuen
+                // Knoten weicht der Ankömmling auf dem Server auf einen Konfliktnamen aus.
+                if let Some(mt) = self.eff_remote_loc(m)
+                    && mt.0 == target.0
+                    && mt.1 != target.1
+                    && self.loc_of(o).as_ref() == Some(&mt)
+                {
+                    let name = self.conflict_name(target.0, Some(lp), &target.1);
+                    self.emit_remote(
+                        cx,
+                        RemoteOp::Move {
+                            node: n,
+                            from_parent: target.0,
+                            from_name: target.1.clone(),
+                            parent: target.0,
+                            name,
+                        },
+                    );
+                    return;
+                }
                 // Kann o selbst nicht weg, weil sein Ziel lokal in ihm liegt, muss es zuerst Platz machen.
                 let o_target_nested = self
                     .eff_remote_loc(m)
                     .and_then(|t| self.local_of_node(t.0))
                     .is_some_and(|tl| self.local.is_within(tl, o));
                 if self.local_cycle(o, l)
-                    || (o_deleted_remotely && self.local.is_within(l, o))
+                    || self.deleted_remotely_with_content(o)
                     || o_target_nested
                 {
-                    // Tausch-Zyklus, oder der Platzhalter ist ein gelöschter Ordner, der genau
-                    // dieses Objekt noch enthält: Platzhalter weicht aus.
+                    // Tausch-Zyklus, oder der Platzhalter ist ein gelöschter Ordner, dessen Inhalt
+                    // erst wegziehen muss (womöglich hierher): Platzhalter weicht aus.
                     self.yield_local_temp(o, cx);
                 } else {
                     cx.stuck.push(Breaker::TempLocal(o));
@@ -1545,6 +1673,8 @@ impl Engine {
                 cx,
                 RemoteOp::Move {
                     node: n,
+                    from_parent: r_loc.0,
+                    from_name: r_loc.1.clone(),
                     parent: p,
                     name,
                 },
@@ -1568,9 +1698,10 @@ impl Engine {
                 } else if m_blocked
                     || self.remote_cycle(m, n)
                     || (m_deleted_locally && self.eff_is_within(n, m))
+                    || self.deleted_locally_with_content(m)
                 {
-                    // Zyklus, oder der Platzhalter ist ein lokal gelöschter Ordner, der dieses
-                    // Objekt auf dem Server noch enthält: Platzhalter weicht auf dem Server aus.
+                    // Zyklus, oder der Platzhalter ist ein lokal gelöschter Ordner, dessen Inhalt
+                    // auf dem Server erst wegziehen muss: Platzhalter weicht auf dem Server aus.
                     self.yield_remote_temp(m, cx);
                 } else {
                     cx.stuck.push(Breaker::TempRemote(m));
@@ -1625,7 +1756,12 @@ impl Engine {
                     return;
                 }
                 let Some(target) = self.eff_remote_loc(m) else {
-                    return; // m wurde auf dem Server gelöscht; lokale Löschung folgt
+                    // m wurde auf dem Server gelöscht; die lokale Löschung folgt. Muss dafür erst
+                    // Inhalt wegziehen (womöglich in n), weicht der Ordner aus.
+                    if self.deleted_remotely_with_content(o) {
+                        self.yield_local_temp(o, cx);
+                    }
+                    return;
                 };
                 let o_loc = self.loc_of(o);
                 if Some(&target) != o_loc.as_ref() {
@@ -1656,6 +1792,8 @@ impl Engine {
                         cx,
                         RemoteOp::Move {
                             node: n,
+                            from_parent: re.parent,
+                            from_name: re.name.clone(),
                             parent: re.parent,
                             name,
                         },
@@ -1670,6 +1808,16 @@ impl Engine {
         let Some(le) = self.local.get(l).cloned() else {
             return;
         };
+        if le.name.as_str().starts_with(DOWNLOAD_TEMP_PREFIX) {
+            return; // halbfertiger Download des Ausführenden, nie hochladen
+        }
+        if temp_home(&le.name).is_some() {
+            // Ein (nicht mehr verknüpftes) Objekt auf einem Ausweichnamen: erst zurückbenennen,
+            // damit der temporäre Name nie auf den Server gelangt.
+            self.st.local_temps.remove(&l);
+            self.cleanup_temp_name(l, &le, cx);
+            return;
+        }
         let Some(p) = self.local_parent_node(le.parent) else {
             return; // Elternordner zuerst
         };
@@ -1692,9 +1840,12 @@ impl Engine {
                     let m_in_place = self.loc_of(sm.local).as_ref() == Some(&s_loc);
                     if m_moved_in || m_in_place || self.push_would_cycle(m) {
                         self.emit_conflict_create(cx, p, l, &le);
-                    } else if self.local.contains(sm.local) && self.loc_of(sm.local).is_none() {
+                    } else if (self.local.contains(sm.local) && self.loc_of(sm.local).is_none())
+                        || self.deleted_locally_with_content(m)
+                    {
                         // m liegt lokal in einem noch nicht hochgeladenen Ordner und blockiert den Namen,
-                        // den dieser Ordner (oder ein Vorfahr) braucht: m auf dem Server kurz ausweichen lassen.
+                        // den dieser Ordner (oder ein Vorfahr) braucht, oder m ist ein lokal gelöschter
+                        // Ordner, dessen Inhalt auf dem Server erst wegziehen muss: m weicht kurz aus.
                         self.yield_remote_temp(m, cx);
                     }
                     // sonst: m verlässt den Namen bald → warten
@@ -1851,10 +2002,31 @@ impl Engine {
             cx,
             RemoteOp::Move {
                 node: m,
+                from_parent: p,
+                from_name: home,
                 parent: p,
                 name,
             },
         );
+    }
+
+    /// Lokaler Ordner, dessen Knoten auf dem Server gelöscht ist, der aber noch Inhalt hat, der erst
+    /// wegziehen muss. Steht er dabei im Weg, kann er Teil eines Warte-Zyklus sein.
+    fn deleted_remotely_with_content(&self, o: LocalId) -> bool {
+        let Some(m) = self.st.synced.node_of(o) else {
+            return false;
+        };
+        self.eff_remote_loc(m).is_none()
+            && self.local.get(o).is_some_and(|e| e.kind == Kind::Dir)
+            && self.local.has_children(o)
+    }
+
+    /// Spiegelbild: Server-Ordner, der lokal gelöscht ist, aber auf dem Server noch Inhalt hat.
+    fn deleted_locally_with_content(&self, m: NodeId) -> bool {
+        let Some(sm) = self.st.synced.get(m) else {
+            return false;
+        };
+        sm.kind == Kind::Dir && !self.local.contains(sm.local) && !self.eff_children(m).is_empty()
     }
 
     /// Würde das Hochladen der lokalen Ortsänderung von `m` auf dem Server einen Zyklus erzeugen?
@@ -2107,7 +2279,11 @@ impl Engine {
     ) -> Name {
         loop {
             self.st.name_counter += 1;
-            let prefix = format!("{TEMP_PREFIX}{}-{}~", self.device(), self.st.name_counter);
+            let prefix = format!(
+                "{TEMP_PREFIX}{}-{}~",
+                self.temp_device(),
+                self.st.name_counter
+            );
             let mut raw = format!("{prefix}{}", home.as_str());
             let mut cut = raw.len().min(xlrx_proto::name::MAX_NAME_BYTES);
             while !raw.is_char_boundary(cut) {
@@ -2134,6 +2310,11 @@ impl Engine {
             .map(|c| if c == '/' || c == '\0' { '-' } else { c })
             .take(40)
             .collect()
+    }
+
+    /// Gerätename für temporäre Namen: ohne „~“, das dort Präfix und Heimatnamen trennt.
+    fn temp_device(&self) -> String {
+        self.device().replace('~', "-")
     }
 
     /// Lesbare Zusammenfassung des Zustands (für Fehlersuche im Simulator).
@@ -2198,7 +2379,9 @@ impl Engine {
                 return Err(format!("R: {n:?} nicht von der Wurzel erreichbar"));
             }
         }
-        if let Some(lr) = self.local_root {
+        if let Some(lr) = self.local_root
+            && !self.local_untrusted
+        {
             for (l, _) in self.local.iter() {
                 if self.local.depth(l, lr).is_none() {
                     return Err(format!("L: {l:?} nicht von der Wurzel erreichbar"));
@@ -2244,7 +2427,7 @@ fn mark_remote_busy(op: &RemoteOp, synced: &Synced, cx: &mut Ctx) {
         }
         RemoteOp::Move { node, .. }
         | RemoteOp::DeleteFile { node, .. }
-        | RemoteOp::DeleteDir { node } => {
+        | RemoteOp::DeleteDir { node, .. } => {
             cx.busy_n.insert(*node);
             if let Some(s) = synced.get(*node) {
                 cx.busy_l.insert(s.local);
@@ -2260,7 +2443,7 @@ fn mark_local_busy(op: &LocalOp, synced: &Synced, cx: &mut Ctx) {
         }
         LocalOp::Replace { local, node, .. }
         | LocalOp::DeleteFile { local, node, .. }
-        | LocalOp::DeleteDir { local, node } => {
+        | LocalOp::DeleteDir { local, node, .. } => {
             cx.busy_n.insert(*node);
             cx.busy_l.insert(*local);
         }

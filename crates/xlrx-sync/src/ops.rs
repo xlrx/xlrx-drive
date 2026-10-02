@@ -54,16 +54,29 @@ pub enum RemoteOp {
         source: LocalId,
         fp: Fingerprint,
     },
+    /// Verschieben/Umbenennen, aber nur, wenn der Knoten noch unter `from_parent`/`from_name` liegt.
+    /// Hat ihn inzwischen jemand anderes verschoben, gewinnt dessen Verschiebung (`Rejected(Moved)`).
     Move {
+        node: NodeId,
+        from_parent: NodeId,
+        from_name: Name,
+        parent: NodeId,
+        name: Name,
+    },
+    /// Löscht eine Datei, aber nur, wenn sie noch `base_rev` hat und unter `parent`/`name` liegt.
+    /// Inhalte, die der Client nicht kennt, und Verschiebungen, die er nicht gesehen hat, gehen so nie verloren.
+    DeleteFile {
+        node: NodeId,
+        base_rev: Rev,
+        parent: NodeId,
+        name: Name,
+    },
+    /// Löscht einen Ordner, aber nur, wenn er auf dem Server leer ist und unter `parent`/`name` liegt.
+    DeleteDir {
         node: NodeId,
         parent: NodeId,
         name: Name,
     },
-    /// Löscht eine Datei, aber nur, wenn sie noch `base_rev` hat. Inhalte, die der Client nicht kennt,
-    /// werden so nie gelöscht.
-    DeleteFile { node: NodeId, base_rev: Rev },
-    /// Löscht einen Ordner, aber nur, wenn er auf dem Server leer ist.
-    DeleteDir { node: NodeId },
 }
 
 /// Grund, aus dem der Server eine Operation abgelehnt hat. Der Zustand bleibt unverändert.
@@ -75,6 +88,8 @@ pub enum Reject {
     NotEmpty,
     RevMismatch,
     WouldCycle,
+    /// Der Knoten liegt nicht (mehr) am erwarteten Ort.
+    Moved,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -108,6 +123,16 @@ pub enum RemoteResult {
     Transient,
 }
 
+/// Erwarteter Zustand einer lokalen Datei vor einer Operation, die sie ersetzt oder löscht.
+///
+/// Der Ausführende prüft den Fingerprint und – wenn der Fingerprint im unsicheren Zeitfenster liegt
+/// (grobe Zeitstempel, gerade geschrieben) – zusätzlich den Inhalt durch erneutes Hashen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Expected {
+    pub fp: Fingerprint,
+    pub content: FileContent,
+}
+
 /// Operation im lokalen Dateisystem.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum LocalOp {
@@ -128,10 +153,15 @@ pub enum LocalOp {
         rev: Rev,
         content: FileContent,
     },
-    /// Inhalt einer bestehenden Datei ersetzen, aber nur, wenn sie noch den Fingerprint `expect` hat.
+    /// Inhalt einer bestehenden Datei ersetzen, aber nur, wenn sie noch unter `parent`/`name` liegt
+    /// und `expect` entspricht. Der Ausführende tauscht die fertige neue Datei atomar mit dem
+    /// Original und prüft das ausgetauschte Original danach erneut; hat es sich in der Zwischenzeit
+    /// geändert, wird zurückgetauscht (nichts geht verloren).
     Replace {
         local: LocalId,
-        expect: Fingerprint,
+        parent: LocalId,
+        name: Name,
+        expect: Expected,
         node: NodeId,
         rev: Rev,
         content: FileContent,
@@ -146,14 +176,23 @@ pub enum LocalOp {
         name: Name,
         synced_to: Option<(NodeId, Name)>,
     },
-    /// Datei löschen, aber nur, wenn sie noch den Fingerprint `expect` hat.
+    /// Datei löschen, aber nur, wenn sie noch unter `parent`/`name` liegt und `expect` entspricht.
+    /// Der Ausführende verschiebt sie dazu in den eigenen Papierkorb und prüft sie dort erneut;
+    /// hat sie sich geändert, kommt sie zurück.
     DeleteFile {
         local: LocalId,
-        expect: Fingerprint,
+        parent: LocalId,
+        name: Name,
+        expect: Expected,
         node: NodeId,
     },
-    /// Ordner löschen, aber nur, wenn er leer ist.
-    DeleteDir { local: LocalId, node: NodeId },
+    /// Ordner löschen, aber nur, wenn er leer ist und unter `parent`/`name` liegt.
+    DeleteDir {
+        local: LocalId,
+        parent: LocalId,
+        name: Name,
+        node: NodeId,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]

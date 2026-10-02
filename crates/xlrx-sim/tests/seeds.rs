@@ -78,3 +78,30 @@ fn lange_laeufe() {
         3_000_000,
     );
 }
+
+#[test]
+fn namensvarianten_auf_dem_server() {
+    // Zugriff per SMB/Shell auf dem NAS: „A“ und „a“ im selben Ordner, Mac ohne Unterscheidung.
+    check(
+        SimConfig {
+            case_insensitive_local: true,
+            p_server_exact_names: 400,
+            strict_rules: true,
+            ..SimConfig::default()
+        },
+        4_000_000,
+    );
+}
+
+#[test]
+fn grobe_zeitstempel_und_spaete_ergebnisse() {
+    check(
+        SimConfig {
+            mtime_granularity: 8,
+            p_defer_result: 300,
+            strict_rules: true,
+            ..SimConfig::default()
+        },
+        5_000_000,
+    );
+}

@@ -16,8 +16,8 @@ mod synced;
 mod tree;
 mod types;
 
-pub use engine::{Engine, State};
-pub use ops::{LocalOp, LocalResult, Op, Origin, Reject, RemoteOp, RemoteResult};
+pub use engine::{DOWNLOAD_TEMP_PREFIX, Engine, State, TEMP_PREFIX};
+pub use ops::{Expected, LocalOp, LocalResult, Op, Origin, Reject, RemoteOp, RemoteResult};
 pub use synced::Synced;
 pub use tree::{Tree, TreeEntry};
 pub use types::{

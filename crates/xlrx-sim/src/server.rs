@@ -25,6 +25,9 @@ pub struct SimServer {
     /// Kompaktes Journal: Knoten → Sequenz der letzten Änderung.
     journal: BTreeMap<NodeId, u64>,
     dedup: BTreeMap<(usize, OpId), RemoteResult>,
+    /// Namensprüfung exakt statt ohne Groß-/Kleinschreibung (wie bei Zugriff per SMB/Shell auf das
+    /// Dateisystem des NAS). Damit entstehen Varianten wie „A“ und „a“ im selben Ordner.
+    pub exact_names: bool,
 }
 
 impl SimServer {
@@ -36,6 +39,7 @@ impl SimServer {
             next_node: 2,
             journal: BTreeMap::new(),
             dedup: BTreeMap::new(),
+            exact_names: false,
         }
     }
 
@@ -71,15 +75,31 @@ impl SimServer {
             .collect()
     }
 
-    /// Der Server erzwingt eindeutige Namen ohne Rücksicht auf Groß-/Kleinschreibung.
+    /// Der Server erzwingt eindeutige Namen ohne Rücksicht auf Groß-/Kleinschreibung
+    /// (außer bei [`Self::exact_names`]).
     pub fn occupant(&self, p: NodeId, name: &Name, except: Option<NodeId>) -> Option<NodeId> {
         let k = name.fold_key();
+        let exact = self.exact_names;
         self.nodes
             .iter()
             .find(|(id, x)| {
-                x.alive && x.parent == p && Some(**id) != except && x.name.fold_key() == k
+                x.alive
+                    && x.parent == p
+                    && Some(**id) != except
+                    && if exact {
+                        x.name == *name
+                    } else {
+                        x.name.fold_key() == k
+                    }
             })
             .map(|(id, _)| *id)
+    }
+
+    /// Liegt der Knoten lebend genau unter `parent`/`name`?
+    fn located(&self, n: NodeId, parent: NodeId, name: &Name) -> bool {
+        self.nodes
+            .get(&n)
+            .is_some_and(|x| x.alive && x.parent == parent && x.name == *name)
     }
 
     fn within(&self, n: NodeId, anc: NodeId) -> bool {
@@ -225,6 +245,12 @@ impl SimServer {
 
     // --- API für Clients (idempotent) ---
 
+    /// Ergebnis einer schon ausgeführten Operation (Idempotenz). Der echte Client fragt das ab,
+    /// bevor er Inhalt hochlädt: Eine wiederholte Operation braucht die Quelldatei nicht mehr.
+    pub fn known_result(&self, client: usize, op_id: OpId) -> Option<RemoteResult> {
+        self.dedup.get(&(client, op_id)).cloned()
+    }
+
     pub fn apply(
         &mut self,
         client: usize,
@@ -272,23 +298,43 @@ impl SimServer {
                 }
                 _ => Err(Reject::NodeGone),
             },
-            RemoteOp::Move { node, parent, name } => self
-                .mv(*node, *parent, name)
-                .map(|seq| RemoteResult::Moved { seq }),
-            RemoteOp::DeleteFile { node, base_rev } => match self.nodes.get(node) {
+            RemoteOp::Move {
+                node,
+                from_parent,
+                from_name,
+                parent,
+                name,
+            } => {
+                if self.alive(*node) && !self.located(*node, *from_parent, from_name) {
+                    Err(Reject::Moved)
+                } else {
+                    self.mv(*node, *parent, name)
+                        .map(|seq| RemoteResult::Moved { seq })
+                }
+            }
+            RemoteOp::DeleteFile {
+                node,
+                base_rev,
+                parent,
+                name,
+            } => match self.nodes.get(node) {
                 Some(x) if x.alive && x.kind == Kind::File => {
-                    if x.rev == *base_rev {
+                    if x.rev != *base_rev {
+                        Err(Reject::RevMismatch)
+                    } else if !self.located(*node, *parent, name) {
+                        Err(Reject::Moved)
+                    } else {
                         self.delete_tree(*node);
                         Ok(RemoteResult::Deleted { seq: self.seq() })
-                    } else {
-                        Err(Reject::RevMismatch)
                     }
                 }
                 _ => Err(Reject::NodeGone),
             },
-            RemoteOp::DeleteDir { node } => {
+            RemoteOp::DeleteDir { node, parent, name } => {
                 if !self.is_dir(*node) || *node == self.root {
                     Err(Reject::NodeGone)
+                } else if !self.located(*node, *parent, name) {
+                    Err(Reject::Moved)
                 } else if !self.children(*node).is_empty() {
                     Err(Reject::NotEmpty)
                 } else {

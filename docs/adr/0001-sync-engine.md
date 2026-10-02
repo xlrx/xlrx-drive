@@ -35,20 +35,23 @@ R gegen S ergibt die Server-Änderung, L gegen S die lokale Änderung.
 | Beide Seiten gleich geändert | nur S nachziehen |
 | Inhalt beidseitig verschieden geändert | **Konfliktkopie**: lokaler Inhalt wird als neue Datei „Name (Konflikt Gerät N)“ hochgeladen, dann wird das Original heruntergeladen. Nichts wird überschrieben. |
 | Ort beidseitig verschieden geändert | Server gewinnt (lokal verschieben) |
-| Löschen gegen Änderung (Inhalt **oder** Ort) | **Änderung gewinnt**, auf beiden Seiten: Verknüpfung wird gelöst, das Objekt wird neu hoch- bzw. heruntergeladen |
+| Löschen gegen Änderung (Inhalt **oder** Ort) | **Änderung gewinnt**, auf beiden Seiten: Verknüpfung wird gelöst, das Objekt wird neu hoch- bzw. heruntergeladen. Wird zuerst geprüft, noch vor jeder Neu-Verknüpfung. |
 | Ordner löschen | nur wenn leer. Kinder, die gelöscht werden, werden abgewartet. Was bleiben muss (neu, geändert, hineinverschoben), holt den Ordner zurück. |
 | Gleicher Name, beide neu | gleiche Art und gleicher Inhalt → nur verknüpfen (z.B. Ersteinrichtung, Migration von Synology Drive). Sonst Konfliktkopie. |
 | Name auf einer Seite belegt | wer zuletzt kommt, weicht auf einen Konfliktnamen aus |
+| Groß-/Kleinschreibungsvariante auf dem Server (per SMB „a“ neben „A“), Client ohne Unterscheidung | der Ankömmling wird auf dem Server auf einen Konfliktnamen umbenannt |
+| Gelöschter Ordner mit noch wegziehendem Inhalt steht einem anderen Objekt im Weg | der Ordner weicht kurz auf einen temporären Namen aus und wird gelöscht, sobald er leer ist (sonst mögliche Warte-Zyklen) |
 | Verschiebung würde auf dem Server einen Zyklus erzeugen | Server gewinnt |
 | Tausch-Zyklen (a↔b, Datei wird zu gleichnamigem Ordner, …) | ein Beteiligter weicht kurz auf einen temporären Namen aus (`.xlrx-tmp-<Gerät>-<n>~<Heimatname>`) |
-| „Atomic Save“ (neue Datei über alte umbenannt), lokal oder auf dem Server | als Inhaltsänderung desselben Objekts erkannt, nicht als Löschen + Neu |
+| „Atomic Save“ (neue Datei über alte umbenannt), lokal oder auf dem Server | als Inhaltsänderung desselben Objekts erkannt, nicht als Löschen + Neu. Auf dem Server nur, wenn das lokale Objekt unverändert ist. Bei Ordnern gehen die vereinbarten Kinder auf den neuen Ordner über (gelöschter Inhalt kommt nicht zurück). |
 
 ### 4. Sicherheitsnetze gegen Datenverlust
 
 1. **Vorbedingungen an jeder Operation.**
-   - Lokales Ersetzen und Löschen nur bei unverändertem Fingerprint.
+   - Lokales Ersetzen und Löschen nur am erwarteten Ort, bei unverändertem Fingerprint **und** unverändertem Inhalt (`Expected`, siehe 4.1).
    - Hochladen nur, wenn die Quelldatei noch genau dem gehashten Stand entspricht.
    - Auf dem Server: Upload und Löschen nur mit passender Basis-Revision, Ordner löschen nur, wenn leer, Anlegen und Verschieben nur bei freiem Namen.
+   - Verschieben und Löschen auf dem Server nur, wenn der Knoten noch am erwarteten Ort liegt. Eine Verschiebung, die der Client noch nicht gesehen hat, wird so nie überschrieben oder mitgelöscht (`Reject::Moved`).
 2. **Upload mit veralteter Basis** → der Server überschreibt nicht, sondern legt eine Konfliktkopie an.
 3. **Idempotenz:** Server-Operationen stehen vor dem Senden in der persistierten Outbox und werden
    nach Abbruch oder Absturz mit derselben `OpId` wiederholt; der Server führt jede `OpId` nur einmal aus.
@@ -60,6 +63,34 @@ R gegen S ergibt die Server-Änderung, L gegen S die lokale Änderung.
    - Was es tut: Es löst den Wartezyklus mit einer garantiert datensicheren Aktion auf, also umbenennen oder behalten statt löschen.
    - Status: In den Simulationsläufen wird es derzeit nicht benötigt, es ist eine Rückfallebene.
 7. **Server-Versionen und Papierkorb** (siehe PLAN 4.2/4.3) bleiben als zusätzliches Netz.
+8. **Verspätete Ergebnisse** (Operationen laufen im Client nebenläufig): Ein Ergebnis überschreibt nie,
+   was ein späterer Scan schon gesehen hat, und wird nicht in einen unbekannten Ordner eingetragen.
+9. **Widersprüchlicher lokaler Stand** (Zyklus, fehlender Vorfahr): Nichts wird entfernt (das sähe wie
+   Löschen aus). Die Engine plant nichts mehr und verlangt einen vollständigen Scan (`wants_full_scan`).
+10. Halbfertige Downloads (`.xlrx-dl-…`) werden nie hochgeladen; temporäre Ausweichnamen gelangen nie als
+    neues Objekt auf den Server.
+
+### 4.1 Vertrag für den Ausführenden (Client)
+
+Die Engine kann nur Vorbedingungen formulieren; prüfen muss sie der Client, und zwar so, dass zwischen
+Prüfen und Handeln nichts verloren gehen kann (TOCTOU):
+
+- **Ersetzen** (`Replace`): neuen Inhalt vollständig in eine temporäre Datei im Zielordner schreiben und
+  per Hash prüfen. Dann atomar mit dem Original **tauschen** (`renamex_np(RENAME_SWAP)` auf APFS). Danach
+  das ausgetauschte Original erneut prüfen: Hat es sich zwischen Prüfung und Tausch geändert, zurücktauschen
+  (bzw. es als Konfliktkopie behalten). Nie per `rename` über ein ungeprüftes Original.
+- **Löschen** (`DeleteFile`): die Datei per `rename` in den eigenen Papierkorb des Sync-Ordners
+  verschieben, dort erneut prüfen, bei Abweichung zurückverschieben. Der Papierkorb wird erst nach Tagen
+  geleert.
+- **Inhalt prüfen:** Fingerprint (Größe, mtime, ctime) vergleichen. Liegt der Fingerprint im unsicheren
+  Zeitfenster des Hash-Caches (grobe Zeitstempel, gerade geschrieben), die Datei neu hashen und mit
+  `Expected::content` vergleichen. Sonst könnte eine Änderung gleicher Größe im selben Zeitstempel-Intervall
+  unbemerkt überschrieben werden.
+- **Idempotenz vor Inhalt:** Bei wiederholten Server-Operationen fragt der Client zuerst, ob der Server die
+  `OpId` schon kennt, und braucht dann die Quelldatei nicht mehr.
+
+Der Simulator bildet Prüfungen und Hash-Cache genau so nach (inklusive Neu-Hashen im unsicheren Fenster);
+der Tausch selbst ist dort atomar und wird mit dem echten Dateisystem-Adapter getestet.
 
 ### 5. Inkrementelle Planung
 
@@ -72,8 +103,10 @@ Neustart, einem vollständigen Scan oder einem vollständigen Server-Stand wird 
 
 Lokale Änderungen kommen einzeln über `on_local_changes`, im Client aus FSEvents und einem Rescan der
 betroffenen Ordner. **Vertrag dieser Schnittstelle:**
-- Verschobene Objekte werden mit ihrem neuen Ort gemeldet, zusammen mit allen Vorfahren, die die Engine nicht kennt.
+- Verschobene Objekte werden mit ihrem neuen Ort gemeldet, zusammen mit allen Vorfahren auf dem Pfad, die die Engine anders kennt.
 - Als gelöscht wird nur gemeldet, was es nicht mehr gibt.
+- Ergibt eine Meldung trotzdem einen widersprüchlichen Baum (z.B. weil eine ältere Verschiebung noch nicht
+  gemeldet ist), verlangt die Engine einen vollständigen Scan, statt zu raten (4, Punkt 9).
 
 Der Simulator wechselt zufällig zwischen vollständigen Scans, Änderungslisten und Teil-Rescans einzelner
 Ordner. Nach **jeder** Planung ohne Ergebnis prüft er, dass auch eine vollständige Planung nichts mehr fände
@@ -99,6 +132,9 @@ Er kommt nur beim ersten Start vor; danach arbeitet der Client mit gespeichertem
   - Sync-Schritte in zufälliger Reihenfolge (Operationen laufen auch außer der Reihe)
   - verlorene Anfragen und Antworten
   - Abstürze an beliebiger Stelle, auch zwischen Ausführung und Ergebnis
+  - verspätete Ergebnisse in beliebiger Reihenfolge, nach weiteren Scans und Planungen
+  - Server-Nutzer mit exakter Namensprüfung (SMB), also Varianten wie „A“ neben „a“ (`--exact-names`)
+  - grobe Zeitstempel, bei denen alle Inhalte gleich groß sind; dann sind Fingerprints mehrdeutig (`--coarse`)
 - **Prüfungen nach jedem Schritt:** Invarianten der Engine.
 - **Prüfungen am Ende einer Ruhephase:**
   - **Konvergenz:** Jeder Client hat exakt den Server-Stand.
@@ -118,8 +154,24 @@ verallgemeinert und erneut über alle Seeds geprüft. Gefunden und behoben wurde
 - **Atomic Save auf dem Server:** Ordner gelöscht und gleichnamig neu angelegt
 - **Hängengebliebene temporäre Namen:** nach Absturz, gleichzeitigem Löschen oder zurückgenommener Verschiebung
 
-**Datenverlust trat in keinem einzigen Lauf auf.** Alle gefundenen Fehler betrafen Konvergenz:
-Der Sync blieb stehen oder ließ Unterschiede übrig.
+Ein anschließender **adversarialer Review** (eigene Szenarien und Simulator-Varianten gezielt gegen die
+Regeln) fand Fehler, die der Simulator bis dahin nicht erzeugen konnte, darunter **zwei echte
+Datenverluste**:
+
+| Befund | Folge vorher | Behebung |
+|---|---|---|
+| Server löscht f und legt f neu an, lokal wird f umbenannt | lokale Datei wurde dem neuen Knoten zugeschlagen und mit dessen Inhalt überschrieben (**Datenverlust**) | lokale Änderung wird vor der Neu-Verknüpfung geprüft |
+| lokal gelöscht, gleichzeitig auf dem Server verschoben | das Löschen traf die verschobene Datei (**Datenverlust**, nur im Server-Papierkorb) | Ortsprüfung bei Löschen/Verschieben auf dem Server |
+| grobe Zeitstempel, Änderung gleicher Größe | Ersetzen/Löschen hätte die Änderung übersehen (im echten Client) | `Expected` mit Inhalt, Neu-Hashen im unsicheren Fenster |
+| Server ersetzt Ordner durch leeren gleichnamigen | gelöschter Inhalt kam zurück | Kinder gehen auf den neuen Ordner über |
+| überlange Namen mit „Endung“ | Endlosschleife bei der Konfliktnamen-Suche | `with_suffix` liefert immer gültige, verschiedene Namen |
+| SMB-Namensvariante bei Mac ohne Groß-/Kleinschreibung | Sync kam nie zur Ruhe | Ankömmling wird umbenannt |
+| verspätete Ergebnisse | widersprüchlicher lokaler Baum | 4, Punkte 8 und 9 |
+| Gerätename mit „~“, Upload nach Atomic Save, Anlegen nach Atomic Save | falscher Heimatname, unnötige Konfliktkopie, neuer statt alter Knoten | jeweils behoben |
+
+Jeder Befund ist als Regressionstest in `crates/xlrx-sim/tests/regressions.rs` festgehalten. Jeder dieser
+Tests wurde gegen die zurückgenommene Korrektur geprüft und schlägt dann fehl. Die neuen Fehlerarten sind
+als Simulator-Varianten dauerhaft in `tests/seeds.rs` und in der nächtlichen CI.
 
 ## Offene Punkte
 
@@ -127,4 +179,9 @@ Der Sync blieb stehen oder ließ Unterschiede übrig.
 - **Selective Sync:** ausgeschlossene Teilbäume dürfen nicht als „lokal gelöscht“ gelten.
 - **Ignorierte Dateien:** `.DS_Store` u.ä. in zu löschenden Ordnern.
 - **Massenlösch-Schutz:** Der Konfigurationswert existiert, die Bestätigungslogik fehlt noch.
-- **Groß-/Kleinschreibungs-Varianten** vom Server (über SMB) bei Clients ohne Unterscheidung: Die Regel existiert, sie wird im Simulator noch nicht erzeugt.
+- **Dateisystem-Adapter des Clients** (`xlrx-client`) mit Tausch-, Papierkorb- und Neu-Hash-Protokoll (4.1) und eigenen Tests gegen gleichzeitige Schreiber.
+- **Sehr lange Namen:** Ein temporärer Ausweichname kann den Heimatnamen nicht vollständig tragen. Bleibt
+  ein solches Objekt nach einem Absturz liegen, wird es unter dem gekürzten Namen wiederhergestellt.
+- **Orakel des Simulators:** Inhalte, die ein Nutzer irgendwo entfernt hat, gelten global als entfernbar.
+  Ein Verlust einer weiteren Kopie desselben Inhalts (z.B. Konfliktkopie auf einem anderen Gerät) würde
+  nicht erkannt.

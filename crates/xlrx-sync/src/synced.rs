@@ -1,18 +1,18 @@
-//! Der Synced-Baum S mit Rückwärtsindex lokale ID → Knoten.
+//! Der Synced-Baum S mit Rückwärtsindex lokale ID → Knoten und Index nach Elternknoten.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use xlrx_proto::NodeId;
 
 use crate::types::{LocalId, SyncedEntry};
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default)]
 pub struct Synced {
     entries: BTreeMap<NodeId, SyncedEntry>,
     by_local: BTreeMap<LocalId, NodeId>,
+    by_parent: BTreeMap<NodeId, BTreeSet<NodeId>>,
     /// Zählt jede Änderung (zum Erkennen, ob ein Planungsdurchlauf etwas bewirkt hat).
-    #[serde(skip)]
     mutations: u64,
 }
 
@@ -27,6 +27,14 @@ impl Synced {
 
     pub fn node_of(&self, l: LocalId) -> Option<NodeId> {
         self.by_local.get(&l).copied()
+    }
+
+    /// Knoten, deren vereinbarter Elternknoten `p` ist.
+    pub fn children(&self, p: NodeId) -> Vec<NodeId> {
+        self.by_parent
+            .get(&p)
+            .map(|s| s.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     pub fn ids(&self) -> Vec<NodeId> {
@@ -62,6 +70,7 @@ impl Synced {
         if e.local != LocalId::GONE {
             self.by_local.insert(e.local, n);
         }
+        self.by_parent.entry(e.parent).or_default().insert(n);
         self.entries.insert(n, e);
         self.mutations += 1;
         true
@@ -71,6 +80,12 @@ impl Synced {
         let e = self.entries.remove(&n)?;
         if self.by_local.get(&e.local) == Some(&n) {
             self.by_local.remove(&e.local);
+        }
+        if let Some(set) = self.by_parent.get_mut(&e.parent) {
+            set.remove(&n);
+            if set.is_empty() {
+                self.by_parent.remove(&e.parent);
+            }
         }
         self.mutations += 1;
         Some(e)
@@ -83,12 +98,10 @@ impl Synced {
         };
         let mut new = old.clone();
         f(&mut new);
-        if self.insert(n, new) {
-            true
-        } else {
-            self.entries.insert(n, old);
-            false
+        if new.local != LocalId::GONE && self.by_local.get(&new.local).is_some_and(|o| *o != n) {
+            return false;
         }
+        self.insert(n, new)
     }
 
     /// Gleiche Einträge (ohne Änderungszähler)?
@@ -96,11 +109,14 @@ impl Synced {
         self.entries == other.entries
     }
 
-    /// Prüft die Konsistenz des Rückwärtsindex.
+    /// Prüft die Konsistenz der Indizes.
     pub fn check(&self) -> Result<(), String> {
         for (n, e) in &self.entries {
             if e.local != LocalId::GONE && self.by_local.get(&e.local) != Some(n) {
                 return Err(format!("S: {n:?} → {:?} fehlt im Rückwärtsindex", e.local));
+            }
+            if !self.by_parent.get(&e.parent).is_some_and(|s| s.contains(n)) {
+                return Err(format!("S: {n:?} fehlt im Elternindex"));
             }
         }
         for (l, n) in &self.by_local {
@@ -109,6 +125,35 @@ impl Synced {
                 _ => return Err(format!("S: Rückwärtsindex {l:?} → {n:?} ist verwaist")),
             }
         }
+        for (p, kids) in &self.by_parent {
+            for n in kids {
+                if self.entries.get(n).is_none_or(|e| e.parent != *p) {
+                    return Err(format!("S: Elternindex {p:?} → {n:?} ist verwaist"));
+                }
+            }
+        }
         Ok(())
+    }
+}
+
+/// Persistiert werden nur die Einträge; die Indizes werden beim Laden neu aufgebaut.
+impl Serialize for Synced {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.entries.serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Synced {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let entries = BTreeMap::<NodeId, SyncedEntry>::deserialize(d)?;
+        let mut s = Synced::default();
+        for (n, e) in entries {
+            if !s.insert(n, e) {
+                return Err(serde::de::Error::custom(
+                    "lokale ID ist mehreren Knoten zugeordnet",
+                ));
+            }
+        }
+        Ok(s)
     }
 }

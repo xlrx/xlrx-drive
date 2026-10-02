@@ -3,6 +3,8 @@
 //! ```text
 //! cargo run --release -p xlrx-sim -- --from 0 --count 100000 --clients 3
 //! cargo run --release -p xlrx-sim -- --seed 4711 --trace     # einen Fehler genau ansehen
+//! cargo run --release -p xlrx-sim -- --ci --exact-names 300   # Server-Namensvarianten (SMB)
+//! cargo run --release -p xlrx-sim -- --coarse 8 --defer 300   # grobe Zeitstempel, späte Ergebnisse
 //! ```
 
 use xlrx_sim::{SimConfig, run};
@@ -27,6 +29,9 @@ fn main() {
             "--ci" => cfg.case_insensitive_local = true,
             "--trace" => trace = true,
             "--strict" => cfg.strict_rules = true,
+            "--defer" => cfg.p_defer_result = val() as u32,
+            "--exact-names" => cfg.p_server_exact_names = val() as u32,
+            "--coarse" => cfg.mtime_granularity = val().max(1) as i64,
             other => {
                 eprintln!("Unbekannte Option {other}");
                 std::process::exit(2);

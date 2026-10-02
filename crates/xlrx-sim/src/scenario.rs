@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use xlrx_proto::{ContentHash, FileContent, Kind, Name, NodeId, Seq};
-use xlrx_sync::{Config, Engine, LocalId, Op, RemoteOp, RemoteResult, State};
+use xlrx_sync::{Config, Engine, LocalId, LocalResult, Op, OpId, RemoteOp, RemoteResult, State};
 
 use crate::driver;
 use crate::fs::SimFs;
@@ -56,6 +56,13 @@ pub struct World {
 /// Inhalt eines Baums: Pfad → `None` (Ordner) bzw. `Some(tag)` (Datei).
 pub type Listing = BTreeMap<String, Option<u64>>;
 
+/// Ergebnis einer ausgeführten, aber noch nicht an die Engine gemeldeten Operation.
+#[derive(Debug)]
+pub enum Outcome {
+    Local(OpId, LocalResult),
+    Remote(OpId, RemoteResult),
+}
+
 fn split(path: &str) -> Vec<Name> {
     path.split('/')
         .filter(|p| !p.is_empty())
@@ -95,6 +102,18 @@ impl World {
     fn tick(&mut self) -> i64 {
         self.clock += 1;
         self.clock
+    }
+
+    /// Anderer Gerätename (nur vor dem ersten Sync sinnvoll).
+    pub fn set_device(&mut self, c: usize, device: &str) {
+        let cl = &mut self.clients[c];
+        let config = Config {
+            device: device.to_owned(),
+            ..cl.engine.state().config.clone()
+        };
+        cl.engine = Engine::new(config);
+        cl.persisted = cl.engine.state().clone();
+        cl.device = device.to_owned();
     }
 
     // ------------------------------------------------------------ Client-Dateisystem
@@ -227,36 +246,30 @@ impl World {
 
     // ------------------------------------------------------------ Sync
 
-    /// Ein Client: abrufen, scannen, planen, ausführen – bis nichts mehr zu tun ist.
-    pub fn sync_client(&mut self, c: usize) {
-        for _ in 0..500 {
-            let cursor = self.clients[c].engine.state().cursor.unwrap_or(Seq(0));
-            let (changes, new_cursor) = self.server.changes_since(cursor);
-            self.clients[c]
-                .engine
-                .on_remote_changes(changes, new_cursor);
-            let root = LocalId(self.clients[c].fs.root);
-            let snap = self.clients[c].fs.snapshot();
-            self.clients[c].engine.on_local_snapshot(root, snap);
-            let mut ops = self.clients[c].engine.plan();
-            if ops.is_empty() {
-                ops = self.clients[c].engine.plan();
-            }
-            self.clients[c].persisted = self.clients[c].engine.state().clone();
-            if ops.is_empty() {
-                return;
-            }
-            for op in ops {
-                self.exec(c, op);
-            }
-            if let Err(e) = self.clients[c].engine.check_invariants() {
-                panic!("Invariante verletzt: {e}");
-            }
-        }
-        panic!("Client {c} kommt nicht zur Ruhe");
+    /// Abrufen und vollständig scannen, ohne zu planen.
+    pub fn scan_client(&mut self, c: usize) {
+        let cursor = self.clients[c].engine.state().cursor.unwrap_or(Seq(0));
+        let (changes, new_cursor) = self.server.changes_since(cursor);
+        self.clients[c]
+            .engine
+            .on_remote_changes(changes, new_cursor);
+        let root = LocalId(self.clients[c].fs.root);
+        let now = self.tick();
+        let snap = self.clients[c].fs.scan(now);
+        self.clients[c].engine.on_local_snapshot(root, snap);
+        self.check(c);
     }
 
-    fn exec(&mut self, c: usize, op: Op) {
+    /// Abrufen, scannen und planen, ohne auszuführen (für Szenarien mit Ereignissen dazwischen).
+    pub fn plan_client(&mut self, c: usize) -> Vec<Op> {
+        self.scan_client(c);
+        let ops = self.clients[c].engine.plan();
+        self.clients[c].persisted = self.clients[c].engine.state().clone();
+        ops
+    }
+
+    /// Führt eine Operation aus, meldet das Ergebnis aber noch nicht (siehe [`Self::deliver`]).
+    pub fn execute(&mut self, c: usize, op: Op) -> Outcome {
         match op {
             Op::Local(id, lop) => {
                 if matches!(
@@ -266,22 +279,57 @@ impl World {
                     self.transfers.downloads += 1;
                 }
                 let clock = self.tick();
-                let res = driver::exec_local(&mut self.clients[c].fs, &lop, clock);
-                self.clients[c].engine.on_local_result(id, res);
+                Outcome::Local(id, driver::exec_local(&mut self.clients[c].fs, &lop, clock))
             }
             Op::Remote(id, rop) => {
                 if matches!(rop, RemoteOp::CreateFile { .. } | RemoteOp::Upload { .. }) {
                     self.transfers.uploads += 1;
                 }
-                let res = if driver::source_ok(&self.clients[c].fs, &rop) {
+                let known = self.server.known_result(c, id).is_some();
+                let res = if known || driver::source_ok(&self.clients[c].fs, &rop) {
                     let device = self.clients[c].device.clone();
                     self.server.apply(c, id, &rop, &device)
                 } else {
                     RemoteResult::SourceChanged
                 };
-                self.clients[c].engine.on_remote_result(id, res);
+                Outcome::Remote(id, res)
             }
         }
+    }
+
+    /// Meldet ein Ergebnis an die Engine (auch verspätet).
+    pub fn deliver(&mut self, c: usize, o: Outcome) {
+        match o {
+            Outcome::Local(id, r) => self.clients[c].engine.on_local_result(id, r),
+            Outcome::Remote(id, r) => self.clients[c].engine.on_remote_result(id, r),
+        }
+        self.clients[c].persisted = self.clients[c].engine.state().clone();
+        self.check(c);
+    }
+
+    fn check(&self, c: usize) {
+        if let Err(e) = self.clients[c].engine.check_invariants() {
+            panic!("Invariante verletzt bei Client {c}: {e}");
+        }
+    }
+
+    /// Ein Client: abrufen, scannen, planen, ausführen – bis nichts mehr zu tun ist.
+    pub fn sync_client(&mut self, c: usize) {
+        for _ in 0..500 {
+            let mut ops = self.plan_client(c);
+            if ops.is_empty() {
+                ops = self.clients[c].engine.plan();
+                self.clients[c].persisted = self.clients[c].engine.state().clone();
+            }
+            if ops.is_empty() {
+                return;
+            }
+            for op in ops {
+                let o = self.execute(c, op);
+                self.deliver(c, o);
+            }
+        }
+        panic!("Client {c} kommt nicht zur Ruhe");
     }
 
     /// Alle Clients reihum synchronisieren, bis sich nichts mehr ändert.
@@ -301,29 +349,9 @@ impl World {
     /// Plant und führt alle Operationen aus, stürzt aber ab, bevor ein Ergebnis verarbeitet wird.
     /// (Server und Dateisystem sind danach verändert, die Engine weiß davon nichts.)
     pub fn execute_then_crash(&mut self, c: usize) {
-        let cursor = self.clients[c].engine.state().cursor.unwrap_or(Seq(0));
-        let (changes, new_cursor) = self.server.changes_since(cursor);
-        self.clients[c]
-            .engine
-            .on_remote_changes(changes, new_cursor);
-        let root = LocalId(self.clients[c].fs.root);
-        let snap = self.clients[c].fs.snapshot();
-        self.clients[c].engine.on_local_snapshot(root, snap);
-        let ops = self.clients[c].engine.plan();
-        self.clients[c].persisted = self.clients[c].engine.state().clone();
+        let ops = self.plan_client(c);
         for op in ops {
-            match op {
-                Op::Local(_, lop) => {
-                    let clock = self.tick();
-                    let _ = driver::exec_local(&mut self.clients[c].fs, &lop, clock);
-                }
-                Op::Remote(id, rop) => {
-                    if driver::source_ok(&self.clients[c].fs, &rop) {
-                        let device = self.clients[c].device.clone();
-                        let _ = self.server.apply(c, id, &rop, &device);
-                    }
-                }
-            }
+            let _ = self.execute(c, op);
         }
         self.crash(c);
     }

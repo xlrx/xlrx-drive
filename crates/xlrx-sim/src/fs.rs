@@ -22,6 +22,11 @@ pub struct SimFs {
     pub root: u64,
     next_ino: u64,
     pub case_insensitive: bool,
+    /// Auflösung der Zeitstempel (1 = exakt). Grobe Zeitstempel (z.B. exFAT: 2 s) lassen zwei
+    /// Änderungen kurz hintereinander denselben Fingerprint haben.
+    pub granularity: i64,
+    /// Hash-Cache des Clients: Inode → (Fingerprint, Zeitpunkt des Hashens, Inhalt).
+    cache: BTreeMap<u64, (Fingerprint, i64, FileContent)>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -41,6 +46,8 @@ impl SimFs {
             root: first_ino,
             next_ino: first_ino + 1,
             case_insensitive,
+            granularity: 1,
+            cache: BTreeMap::new(),
         }
     }
 
@@ -92,11 +99,52 @@ impl SimFs {
     pub fn fingerprint(&self, ino: u64) -> Option<Fingerprint> {
         let i = self.inodes.get(&ino)?;
         let c = i.content?;
+        let g = self.granularity.max(1);
         Some(Fingerprint {
             size: c.size,
-            mtime_ns: i.mtime,
-            ctime_ns: i.ctime,
+            mtime_ns: i.mtime.div_euclid(g) * g,
+            ctime_ns: i.ctime.div_euclid(g) * g,
         })
+    }
+
+    /// Inhalt einer Datei, wie ihn der Client sieht: aus dem Hash-Cache, wenn der Fingerprint
+    /// unverändert ist und der Hash erst nach dem Zeitstempel-Intervall der letzten Änderung
+    /// entstand (sonst könnte eine spätere Änderung im selben Intervall unsichtbar sein);
+    /// andernfalls wird neu „gehasht“. So arbeiten Scanner und Ausführender im echten Client.
+    pub fn hashed_content(&mut self, ino: u64, now: i64) -> Option<FileContent> {
+        let fp = self.fingerprint(ino)?;
+        let g = self.granularity.max(1);
+        if let Some((cfp, at, c)) = self.cache.get(&ino)
+            && *cfp == fp
+            && *at >= fp.mtime_ns.max(fp.ctime_ns) + g
+        {
+            return Some(*c);
+        }
+        let c = self.inodes.get(&ino)?.content?;
+        self.cache.insert(ino, (fp, now, c));
+        Some(c)
+    }
+
+    /// Scan, wie ihn der Client liefert: Inhalte über den Hash-Cache.
+    pub fn scan(&mut self, now: i64) -> Vec<LocalObservation> {
+        let ids: Vec<u64> = self.inodes.keys().copied().collect();
+        self.cache.retain(|k, _| ids.binary_search(k).is_ok());
+        ids.into_iter()
+            .map(|id| {
+                let content = self.hashed_content(id, now);
+                let i = &self.inodes[&id];
+                LocalObservation {
+                    id: LocalId(id),
+                    entry: LocalEntry {
+                        parent: LocalId(i.parent),
+                        name: i.name.clone(),
+                        kind: i.kind,
+                        fp: self.fingerprint(id),
+                        content,
+                    },
+                }
+            })
+            .collect()
     }
 
     pub fn create(
@@ -209,7 +257,7 @@ impl SimFs {
         out
     }
 
-    /// Vollständiger Scan, wie ihn der Client-Scanner liefert (Inhalt bereits gehasht).
+    /// Tatsächlicher Stand (Inhalt immer exakt, ohne Hash-Cache).
     pub fn snapshot(&self) -> Vec<LocalObservation> {
         self.inodes
             .iter()

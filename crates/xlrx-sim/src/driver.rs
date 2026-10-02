@@ -1,10 +1,34 @@
 //! Ausführung geplanter Operationen gegen das simulierte Dateisystem – mit denselben Vorbedingungen,
 //! die der echte Client prüft.
+//!
+//! Zerstörende Operationen (`Replace`, `DeleteFile`) prüfen Ort, Fingerprint und – über den
+//! Hash-Cache, also neu gehasht, wenn der Fingerprint im unsicheren Zeitfenster liegt – den Inhalt.
+//! Im echten Client folgt danach der atomare Tausch bzw. das Verschieben in den eigenen Papierkorb
+//! mit erneuter Prüfung (siehe ADR 0001); im Simulator ist jede Operation atomar.
 
 use xlrx_proto::{Kind, Name};
-use xlrx_sync::{LocalId, LocalOp, LocalResult, RemoteOp};
+use xlrx_sync::{DOWNLOAD_TEMP_PREFIX, Expected, LocalId, LocalOp, LocalResult, RemoteOp};
 
 use crate::fs::SimFs;
+
+/// Liegt die Datei noch am erwarteten Ort und hat den erwarteten Stand?
+fn file_as_expected(
+    fs: &mut SimFs,
+    local: LocalId,
+    parent: LocalId,
+    name: &Name,
+    expect: &Expected,
+    clock: i64,
+) -> bool {
+    let Some(i) = fs.inodes.get(&local.0) else {
+        return false;
+    };
+    if i.parent != parent.0 || i.name != *name || i.kind != Kind::File {
+        return false;
+    }
+    fs.fingerprint(local.0) == Some(expect.fp)
+        && fs.hashed_content(local.0, clock) == Some(expect.content)
+}
 
 /// Führt eine lokale Operation aus. Ist eine Vorbedingung verletzt, bleibt alles unverändert.
 pub fn exec_local(fs: &mut SimFs, op: &LocalOp, clock: i64) -> LocalResult {
@@ -30,22 +54,21 @@ pub fn exec_local(fs: &mut SimFs, op: &LocalOp, clock: i64) -> LocalResult {
         },
         LocalOp::Replace {
             local,
+            parent,
+            name,
             expect,
             content,
             ..
         } => {
-            if fs.fingerprint(local.0) != Some(*expect) {
+            if !file_as_expected(fs, *local, *parent, name, expect, clock) {
                 return LocalResult::Precondition;
             }
-            let Some(orig) = fs.inodes.get(&local.0).cloned() else {
-                return LocalResult::Precondition;
-            };
             // Wie im echten Client: temporäre Datei schreiben und atomar über das Original legen.
-            let tmp = Name::new(&format!(".xlrx-dl-{clock}")).expect("gültiger Name");
-            let Ok(t) = fs.create(orig.parent, &tmp, Kind::File, Some(*content), clock) else {
+            let tmp = Name::new(&format!("{DOWNLOAD_TEMP_PREFIX}{clock}")).expect("gültiger Name");
+            let Ok(t) = fs.create(parent.0, &tmp, Kind::File, Some(*content), clock) else {
                 return LocalResult::Error;
             };
-            match fs.rename(t, orig.parent, &orig.name, true, clock) {
+            match fs.rename(t, parent.0, name, true, clock) {
                 Ok(_) => done(t, fs),
                 Err(_) => {
                     let _ = fs.unlink(t);
@@ -75,8 +98,14 @@ pub fn exec_local(fs: &mut SimFs, op: &LocalOp, clock: i64) -> LocalResult {
                 Err(_) => LocalResult::Precondition,
             }
         }
-        LocalOp::DeleteFile { local, expect, .. } => {
-            if fs.fingerprint(local.0) != Some(*expect) {
+        LocalOp::DeleteFile {
+            local,
+            parent,
+            name,
+            expect,
+            ..
+        } => {
+            if !file_as_expected(fs, *local, *parent, name, expect, clock) {
                 return LocalResult::Precondition;
             }
             match fs.unlink(local.0) {
@@ -87,17 +116,32 @@ pub fn exec_local(fs: &mut SimFs, op: &LocalOp, clock: i64) -> LocalResult {
                 Err(_) => LocalResult::Precondition,
             }
         }
-        LocalOp::DeleteDir { local, .. } => match fs.rmdir(local.0) {
-            Ok(()) => LocalResult::Done {
-                id: *local,
-                fp: None,
-            },
-            Err(_) => LocalResult::Precondition,
-        },
+        LocalOp::DeleteDir {
+            local,
+            parent,
+            name,
+            ..
+        } => {
+            if fs
+                .inodes
+                .get(&local.0)
+                .is_none_or(|i| i.parent != parent.0 || i.name != *name)
+            {
+                return LocalResult::Precondition;
+            }
+            match fs.rmdir(local.0) {
+                Ok(()) => LocalResult::Done {
+                    id: *local,
+                    fp: None,
+                },
+                Err(_) => LocalResult::Precondition,
+            }
+        }
     }
 }
 
 /// Inhalt wird aus der lokalen Datei hochgeladen: Diese muss noch genau dem gehashten Stand entsprechen.
+/// (Der echte Client hasht beim Hochladen mit und bricht bei Abweichung ab.)
 pub fn source_ok(fs: &SimFs, op: &RemoteOp) -> bool {
     match op {
         RemoteOp::CreateFile {

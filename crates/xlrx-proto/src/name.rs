@@ -68,21 +68,46 @@ impl Name {
 
     /// Erzeugt einen abgeleiteten Namen „Stamm (zusatz).endung“ und kürzt den Stamm bei Bedarf,
     /// sodass das Längenlimit eingehalten wird.
+    ///
+    /// Das Ergebnis ist immer gültig, und verschiedene Zusätze ergeben verschiedene Namen
+    /// (darauf verlassen sich die Schleifen, die einen freien Konfliktnamen suchen). Notfalls wird
+    /// die Endung zum Stamm gezählt und der Zusatz vorne gekürzt; sein Ende (der Zähler) bleibt.
     pub fn with_suffix(&self, suffix: &str) -> Name {
-        let (stem, ext) = self.split_extension();
-        let addition = format!(" ({suffix})");
-        let budget = MAX_NAME_BYTES.saturating_sub(addition.len() + ext.len());
+        let clean: String = suffix
+            .chars()
+            .map(|c| if c == '/' || c == '\0' { '-' } else { c })
+            .collect();
+        let mut addition = format!(" ({clean})");
+        if addition.len() >= MAX_NAME_BYTES {
+            let mut start = addition.len() - (MAX_NAME_BYTES - 1);
+            while !addition.is_char_boundary(start) {
+                start += 1;
+            }
+            addition = addition[start..].to_owned();
+        }
+        let (mut stem, mut ext) = self.split_extension();
+        if addition.len() + ext.len() >= MAX_NAME_BYTES {
+            // Überlange „Endung“ (z.B. „1. Kapitel …“): als Teil des Stamms behandeln.
+            stem = self.as_str();
+            ext = "";
+        }
+        let budget = MAX_NAME_BYTES - addition.len() - ext.len();
         let mut cut = stem.len().min(budget);
-        while !stem.is_char_boundary(cut) {
+        loop {
+            while !stem.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            // NFC kann die Länge beim Zusammensetzen ändern: im Zweifel weiter kürzen.
+            if let Ok(n) = Name::new(&format!("{}{addition}{ext}", &stem[..cut])) {
+                return n;
+            }
+            if cut == 0 {
+                break;
+            }
             cut -= 1;
         }
-        let mut stem = &stem[..cut];
-        if stem.is_empty() {
-            stem = "Datei";
-        }
-        // Kann nur fehlschlagen, wenn der Zusatz selbst unzulässige Zeichen enthält.
-        Name::new(&format!("{stem}{addition}{ext}"))
-            .unwrap_or_else(|_| Name(format!("{stem} (Konflikt){ext}")))
+        // Nur der Zusatz: ist gültig, weil er mit „ (“ bzw. einem Teil davon beginnt und passt.
+        Name::new(&addition).unwrap_or_else(|_| Name(format!("Datei {}", addition.len())))
     }
 }
 
@@ -159,13 +184,41 @@ mod tests {
         assert_eq!(n.as_str(), "\u{00C4}pfel");
     }
 
+    #[test]
+    fn suffix_on_overlong_extension_stays_valid_and_distinct() {
+        // Alles ab dem ersten Punkt wäre die „Endung“ und lässt keinen Platz für den Zusatz.
+        let n = Name::new(&format!("1. {}", "x".repeat(240))).unwrap();
+        let a = n.with_suffix("Konflikt Gerät0 1");
+        let b = n.with_suffix("Konflikt Gerät0 2");
+        assert!(Name::new(a.as_str()).is_ok());
+        assert!(a.as_str().len() <= MAX_NAME_BYTES);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn overlong_suffix_keeps_its_end() {
+        let n = Name::new("a.txt").unwrap();
+        let long = "ü".repeat(200);
+        let a = n.with_suffix(&format!("{long} 1"));
+        let b = n.with_suffix(&format!("{long} 2"));
+        assert!(a.as_str().len() <= MAX_NAME_BYTES);
+        assert_ne!(a, b);
+    }
+
     proptest! {
         #[test]
-        fn suffix_always_valid(stem in "[^/\\x00]{1,300}", suffix in "[a-zA-Z0-9 ]{1,40}") {
+        fn suffix_always_valid_and_distinct(
+            stem in "[^/\\x00]{1,300}",
+            suffix in "[a-zA-Z0-9 äöü~]{1,40}",
+            k in 1u32..1000,
+        ) {
             if let Ok(n) = Name::new(&stem) {
-                let s = n.with_suffix(&suffix);
-                prop_assert!(s.as_str().len() <= MAX_NAME_BYTES);
-                prop_assert!(Name::new(s.as_str()).is_ok());
+                let a = n.with_suffix(&format!("{suffix} {k}"));
+                let b = n.with_suffix(&format!("{suffix} {}", k + 1));
+                prop_assert!(a.as_str().len() <= MAX_NAME_BYTES);
+                prop_assert!(Name::new(a.as_str()).is_ok());
+                prop_assert_eq!(Name::new(a.as_str()).unwrap(), a.clone());
+                prop_assert_ne!(a, b);
             }
         }
     }

@@ -29,6 +29,15 @@ pub struct SimConfig {
     pub p_drop_response: u32,
     /// Absturz zwischen Ausführung einer Operation und Verarbeitung ihres Ergebnisses.
     pub p_crash_after_effect: u32,
+    /// Ergebnis trifft verspätet ein (nach weiteren Scans, Abrufen und Planungen), wie bei
+    /// nebenläufig ausgeführten Operationen im echten Client.
+    pub p_defer_result: u32,
+    /// Anteil der Server-Nutzeraktionen (Anlegen, Verschieben), die Namen exakt statt ohne
+    /// Groß-/Kleinschreibung prüfen (Zugriff per SMB/Shell). Erzeugt Varianten wie „A“ neben „a“.
+    pub p_server_exact_names: u32,
+    /// Auflösung der lokalen Zeitstempel (1 = exakt, größer = grob wie bei exFAT).
+    /// Dann haben auch alle Inhalte dieselbe Größe (ungünstigster Fall für Fingerprints).
+    pub mtime_granularity: i64,
     /// Streng: Muss das Sicherheitsnetz der Engine eingreifen, gilt der Lauf als Fehler
     /// (zeigt Lücken in den Regeln, auch wenn die Daten sicher sind).
     pub strict_rules: bool,
@@ -46,6 +55,9 @@ impl Default for SimConfig {
             p_drop_request: 60,
             p_drop_response: 60,
             p_crash_after_effect: 30,
+            p_defer_result: 100,
+            p_server_exact_names: 0,
+            mtime_granularity: 1,
             strict_rules: false,
         }
     }
@@ -82,6 +94,13 @@ struct Client {
     engine: Engine,
     persisted: State,
     queue: VecDeque<Op>,
+    /// Ausgeführte Operationen, deren Ergebnis noch nicht verarbeitet wurde.
+    results: VecDeque<Deferred>,
+}
+
+enum Deferred {
+    Local(xlrx_sync::OpId, LocalResult),
+    Remote(xlrx_sync::OpId, RemoteResult),
 }
 
 struct Sim {
@@ -139,13 +158,16 @@ impl Sim {
                 };
                 let engine = Engine::new(config);
                 let persisted = engine.state().clone();
+                let mut fs = SimFs::new(cfg.case_insensitive_local, 1_000_000 * (idx as u64 + 1));
+                fs.granularity = cfg.mtime_granularity.max(1);
                 Client {
                     idx,
                     device,
-                    fs: SimFs::new(cfg.case_insensitive_local, 1_000_000 * (idx as u64 + 1)),
+                    fs,
                     engine,
                     persisted,
                     queue: VecDeque::new(),
+                    results: VecDeque::new(),
                 }
             })
             .collect();
@@ -200,7 +222,13 @@ impl Sim {
         let t = self.next_tag;
         self.next_tag += 1;
         self.written.insert(t);
-        content(t)
+        let mut c = content(t);
+        if self.cfg.mtime_granularity > 1 {
+            // Ungünstigster Fall: Änderungen ohne Größenänderung, der Fingerprint unterscheidet
+            // sich dann nur noch über die (groben) Zeitstempel.
+            c.size = 64;
+        }
+        c
     }
 
     fn names(&self) -> &'static [&'static str] {
@@ -425,6 +453,7 @@ impl Sim {
         let dir = *self.rng.pick(&dirs).unwrap_or(&self.server.root);
         let name = self.random_name();
         let kind = self.rng.below(100);
+        self.server.exact_names = self.rng.chance(self.cfg.p_server_exact_names);
         let msg = if kind < 30 {
             let c = self.new_content();
             let r = self.server.create(dir, &name, Kind::File, Some(c));
@@ -480,6 +509,7 @@ impl Sim {
             }
             format!("S rm -rf {p:?}")
         };
+        self.server.exact_names = false;
         self.log(msg);
     }
 
@@ -490,6 +520,7 @@ impl Sim {
         let c = &mut self.clients[ci];
         c.engine = Engine::from_state(c.persisted.clone());
         c.queue.clear();
+        c.results.clear();
         self.log(format!("C{ci} ABSTURZ (Schritt {step})"));
     }
 
@@ -526,25 +557,24 @@ impl Sim {
     /// `partial`: Teil-Rescans erlaubt. In der Ruhephase nicht, denn dort soll jede Änderung
     /// gesehen werden (wie im Client, dem FSEvents jede Änderung meldet).
     fn scan_with(&mut self, ci: usize, partial: bool) -> Result<(), SimFailure> {
-        let mode = if !self.clients[ci].engine.has_local_tree() {
+        let mode = if self.clients[ci].engine.wants_full_scan() {
             0
         } else if partial {
             self.rng.below(10)
         } else {
             self.rng.below(8)
         };
+        let now = self.tick();
         let c = &mut self.clients[ci];
         let root = LocalId(c.fs.root);
+        let observed = c.fs.scan(now);
         if mode < 4 {
-            c.engine.on_local_snapshot(root, c.fs.snapshot());
+            c.engine.on_local_snapshot(root, observed);
             self.log(format!("C{ci} scannt (vollständig)"));
             return self.persist(ci);
         }
         let fs_now: BTreeMap<LocalId, LocalEntry> =
-            c.fs.snapshot()
-                .into_iter()
-                .map(|o| (o.id, o.entry))
-                .collect();
+            observed.into_iter().map(|o| (o.id, o.entry)).collect();
         let known = c.engine.local_tree();
         // Welche Objekte betrachtet dieser Scan?
         let scope: BTreeSet<LocalId> = if mode < 8 {
@@ -593,14 +623,14 @@ impl Sim {
                 Some(e) => {
                     if known.get(*id) != Some(e) {
                         upserts.insert(*id, e.clone());
-                        // Vorfahren mitmelden, die die Engine nicht (so) kennt.
+                        // Vorfahren mitmelden, die die Engine nicht (so) kennt. Der Client kennt
+                        // den vollständigen Pfad des neu gescannten Ordners, also alle Vorfahren.
                         let mut p = e.parent;
                         while p != root {
                             let Some(pe) = fs_now.get(&p) else { break };
-                            if known.get(p) == Some(pe) {
-                                break;
+                            if known.get(p) != Some(pe) {
+                                upserts.insert(p, pe.clone());
                             }
-                            upserts.insert(p, pe.clone());
                             p = pe.parent;
                         }
                     }
@@ -659,12 +689,36 @@ impl Sim {
 
     /// Ein zufälliger Schritt eines Clients. `faults`: Netzfehler und Abstürze erlaubt.
     fn client_step(&mut self, ci: usize, faults: bool) -> Result<(), SimFailure> {
-        match self.rng.below(10) {
+        match self.rng.below(11) {
             0 | 1 => self.fetch(ci),
             2 | 3 => self.scan(ci),
             4 | 5 => self.plan(ci).map(|_| ()),
+            6 => self.deliver_one(ci),
             _ => self.exec_one(ci, faults),
         }
+    }
+
+    /// Verarbeitet ein zufälliges verspätetes Ergebnis.
+    fn deliver_one(&mut self, ci: usize) -> Result<(), SimFailure> {
+        let len = self.clients[ci].results.len();
+        if len == 0 {
+            return Ok(());
+        }
+        let i = self.rng.below(len);
+        let Some(d) = self.clients[ci].results.remove(i) else {
+            return Ok(());
+        };
+        match d {
+            Deferred::Local(id, r) => {
+                self.log(format!("C{ci} verspätetes Ergebnis {id:?} {r:?}"));
+                self.clients[ci].engine.on_local_result(id, r);
+            }
+            Deferred::Remote(id, r) => {
+                self.log(format!("C{ci} verspätetes Ergebnis {id:?} {r:?}"));
+                self.clients[ci].engine.on_remote_result(id, r);
+            }
+        }
+        self.persist(ci)
     }
 
     fn exec_one(&mut self, ci: usize, faults: bool) -> Result<(), SimFailure> {
@@ -686,6 +740,10 @@ impl Sim {
                     self.crash(ci, 0);
                     return Ok(());
                 }
+                if faults && self.rng.chance(self.cfg.p_defer_result) {
+                    self.clients[ci].results.push_back(Deferred::Local(id, res));
+                    return Ok(());
+                }
                 self.clients[ci].engine.on_local_result(id, res);
                 self.persist(ci)
             }
@@ -697,6 +755,12 @@ impl Sim {
                 }
                 if faults && self.rng.chance(self.cfg.p_crash_after_effect) {
                     self.crash(ci, 0);
+                    return Ok(());
+                }
+                if faults && self.rng.chance(self.cfg.p_defer_result) {
+                    self.clients[ci]
+                        .results
+                        .push_back(Deferred::Remote(id, res));
                     return Ok(());
                 }
                 self.clients[ci].engine.on_remote_result(id, res);
@@ -717,11 +781,14 @@ impl Sim {
         op: &RemoteOp,
         faults: bool,
     ) -> RemoteResult {
-        if !crate::driver::source_ok(&self.clients[ci].fs, op) {
-            return RemoteResult::SourceChanged;
-        }
         if faults && self.rng.chance(self.cfg.p_drop_request) {
             return RemoteResult::Transient;
+        }
+        // Wie im echten Protokoll: Erst fragt der Client, ob der Server die Operation schon kennt;
+        // nur eine neue Operation braucht die (unveränderte) Quelldatei.
+        let known = self.server.known_result(self.clients[ci].idx, id);
+        if known.is_none() && !crate::driver::source_ok(&self.clients[ci].fs, op) {
+            return RemoteResult::SourceChanged;
         }
         let device = self.clients[ci].device.clone();
         let res = self.server.apply(self.clients[ci].idx, id, op, &device);
@@ -736,6 +803,11 @@ impl Sim {
     /// Keine Nutzeraktionen und Fehler mehr: so lange synchronisieren, bis sich nichts mehr tut.
     fn settle(&mut self) -> Result<(), SimFailure> {
         self.log("--- Ruhephase ---".into());
+        for ci in 0..self.clients.len() {
+            while !self.clients[ci].results.is_empty() {
+                self.deliver_one(ci)?;
+            }
+        }
         let mut quiet = 0;
         for round in 0..80 {
             let seq_before = self.server.seq();
