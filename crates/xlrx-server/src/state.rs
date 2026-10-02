@@ -37,10 +37,13 @@ impl Deref for AppState {
 impl AppState {
     pub fn new(db: PgPool, cfg: Config) -> Result<Self, String> {
         let passwords = Passwords::new(cfg.argon2, cfg.password_blocklist.as_deref())?;
+        // Nur die konfigurierten Adressen dürfen Passkeys verwenden – nicht jede Subdomain der
+        // Passkey-Domain (sonst könnte eine Lücke in einem anderen Dienst unter *.domain Anmeldungen
+        // bei xlrx auslösen).
         let mut builder = WebauthnBuilder::new(&cfg.rp_id, &cfg.public_url)
             .map_err(|e| format!("Passkey-Konfiguration: {e}"))?
             .rp_name("xlrx-drive")
-            .allow_subdomains(true);
+            .allow_subdomains(false);
         for o in &cfg.extra_origins {
             builder = builder.append_allowed_origin(o);
         }

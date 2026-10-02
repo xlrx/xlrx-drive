@@ -27,6 +27,9 @@ cd xlrx-drive/deploy
 cp .env.example .env && vi .env                    # Host, IDs, Netz, Caddy-IP
 ```
 
+**Passkey-Domain (`XLRX_RP_ID`):** vor dem ersten Passkey festlegen, später nicht mehr ändern (sonst werden alle
+Passkeys ungültig). Empfohlen ist die Hauptdomain (`example.de`).
+
 **Caddy-IP:** eine freie Adresse im Heimnetz **außerhalb** des DHCP-Bereichs des Routers.
 `LAN_PARENT` ist `ovs_eth0`, wenn Open vSwitch aktiv ist (z.B. durch Virtual Machine Manager), sonst `eth0` (`ip -br link` zeigt es).
 

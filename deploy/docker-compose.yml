@@ -59,6 +59,7 @@ services:
       XLRX_SECRET_KEY_FILE: /run/secrets/xlrx_secret_key
       XLRX_PUBLIC_URL: https://${XLRX_HOST}
       XLRX_EXTRA_ORIGINS: ${XLRX_EXTRA_ORIGINS:-}
+      XLRX_RP_ID: ${XLRX_RP_ID:-}
       XLRX_TRUST_PROXY: "1"
       XLRX_ARGON2_M_KIB: ${XLRX_ARGON2_M_KIB:-19456}
       XLRX_ARGON2_T: ${XLRX_ARGON2_T:-2}

@@ -630,3 +630,40 @@ async fn fremder_passkey_wird_abgelehnt() {
     assert_eq!(r.status, 400);
     env.finish().await;
 }
+
+#[tokio::test]
+async fn passkey_von_anderer_subdomain_wird_abgelehnt() {
+    let env = env_or_skip!();
+    let origin: Url = ORIGIN.parse().unwrap();
+    let (mut c, _, _) = setup_with_totp(&env, &env.invite("lena", false).await).await;
+    let mut key = authenticator();
+    let begin = c.post("/api/me/passkeys/begin", json!({"name": "A"})).await;
+    let options: CreationChallengeResponse =
+        serde_json::from_value(begin.ok()["options"].clone()).unwrap();
+    let cred = key.do_registration(origin, options).unwrap();
+    c.post(
+        "/api/me/passkeys/finish",
+        json!({"ceremony": begin.body["ceremony"], "credential": cred}),
+    )
+    .await;
+
+    // Eine andere (z.B. kompromittierte) Seite unter der Passkey-Domain darf nicht anmelden.
+    let evil: Url = "https://fotos.drive.example.test".parse().unwrap();
+    let mut p = env.client();
+    let begin = p
+        .post("/api/auth/passkey/begin", json!({"username": "lena"}))
+        .await;
+    let options: RequestChallengeResponse =
+        serde_json::from_value(begin.ok()["options"].clone()).unwrap();
+    let cred = key
+        .do_authentication(evil, options)
+        .expect("Authenticator signiert für die RP-ID");
+    let r = p
+        .post(
+            "/api/auth/passkey/finish",
+            json!({"ceremony": begin.body["ceremony"], "credential": cred}),
+        )
+        .await;
+    assert_eq!(r.status, 401, "{}", r.body);
+    env.finish().await;
+}

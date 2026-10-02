@@ -15,7 +15,8 @@ pub struct Config {
     pub public_url: Url,
     /// Weitere erlaubte Origins, z.B. der LAN-Endpunkt `https://drive-lan.example.de` (PLAN 5.9).
     pub extra_origins: Vec<Url>,
-    /// Relying-Party-ID für Passkeys (Domain). Standard: Host der öffentlichen Adresse.
+    /// Relying-Party-ID für Passkeys (Domain). Standard: Host der öffentlichen Adresse. Einmal festlegen:
+    /// Eine spätere Änderung macht alle registrierten Passkeys unbrauchbar.
     pub rp_id: String,
     /// Schlüssel für Geheimnisse in der DB (TOTP). Kommt aus einem Docker-Secret, nie aus der DB.
     pub secret_key: [u8; 32],
