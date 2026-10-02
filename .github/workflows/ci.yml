@@ -13,6 +13,16 @@ jobs:
   rust:
     name: Rust (fmt, clippy, Tests)
     runs-on: ubuntu-latest
+    services:
+      # Gleiche Hauptversion wie im Betrieb (PLAN 13.2).
+      postgres:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -22,10 +32,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Tests (inkl. 1000 Simulator-Seeds je Variante)
+      - name: Tests (inkl. 1000 Simulator-Seeds je Variante, Server gegen PostgreSQL 18)
         run: cargo test --workspace
         env:
           XLRX_SIM_SEEDS: "1000"
+          XLRX_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
 
   no-avx:
     name: Läuft ohne AVX (DS918+ / Celeron J3455)
@@ -37,10 +48,14 @@ jobs:
           toolchain: "1.97.0"
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y qemu-user
-      - run: cargo build --release -p xlrx-sim -p xlrx-chunk --examples --bins
+      - run: cargo build --release -p xlrx-sim -p xlrx-chunk -p xlrx-server --examples --bins
+        env:
+          RUSTFLAGS: "-C target-cpu=x86-64-v2"
       # Denverton = Atom C3000 (Goldmont), wie der J3455 ohne AVX. Ein "Illegal instruction" bricht den Build.
       - run: qemu-x86_64 -cpu Denverton target/release/xlrx-sim --count 20
       - run: qemu-x86_64 -cpu Denverton target/release/examples/hashdir crates
+      - run: qemu-x86_64 -cpu Denverton target/release/xlrx-server bench-argon2 4096 1 1
+      - run: qemu-x86_64 -cpu Denverton target/release/xlrx-server gen-secret
 
   simulation-nightly:
     name: Simulator-Langlauf
