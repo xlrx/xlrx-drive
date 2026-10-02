@@ -53,7 +53,7 @@ input[type='text'], input[type='password'], input[type='email'], input:not([type
 	border-radius: 8px;
 }
 input:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-button {
+button, a.button {
 	font: inherit;
 	padding: 0.6rem 1rem;
 	border-radius: 8px;
@@ -62,7 +62,8 @@ button {
 	color: var(--text);
 	cursor: pointer;
 }
-button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+a.button { display: inline-block; text-decoration: none; line-height: normal; }
+button.primary, a.button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 button.danger { color: var(--danger); }
 button:disabled { opacity: 0.6; cursor: default; }
 .row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
@@ -80,3 +81,4 @@ th { font-weight: 600; color: var(--muted); font-size: 0.85rem; }
 .badge { font-size: 0.75rem; padding: 0.1rem 0.45rem; border-radius: 99px; border: 1px solid var(--border); color: var(--muted); }
 .divider { display: flex; align-items: center; gap: 0.75rem; color: var(--muted); margin: 1.2rem 0; font-size: 0.85rem; }
 .divider::before, .divider::after { content: ''; flex: 1; border-top: 1px solid var(--border); }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

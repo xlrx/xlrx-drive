@@ -472,6 +472,21 @@ async fn durchsuchen_und_herunterladen() {
         .get_raw(&format!("/api/nodes/{pdf}/content?inline=true"), &[])
         .await;
     assert_eq!(p.header("content-type"), "application/pdf");
+    // The web app may frame previews, nobody else; downloads are never framed.
+    assert!(
+        p.header("content-security-policy")
+            .ends_with("frame-ancestors 'self'")
+    );
+    assert!(!p.header("content-security-policy").contains("sandbox"));
+    assert_eq!(p.header("x-frame-options"), "SAMEORIGIN");
+    assert!(v.header("content-security-policy").starts_with("sandbox"));
+    assert_eq!(d.header("x-frame-options"), "DENY");
+    let pdf_download = c.get_raw(&format!("/api/nodes/{pdf}/content"), &[]).await;
+    assert!(
+        pdf_download
+            .header("content-security-policy")
+            .starts_with("sandbox")
+    );
     assert_eq!(
         p.header("content-disposition"),
         "inline; filename=\"Bericht _final_ _.pdf\"; filename*=UTF-8''Bericht%20%22final%22%20%C3%A4.pdf"

@@ -14,6 +14,7 @@ async function logout() {
 	<header v-if="me && !isPublic">
 		<nav class="page row">
 			<NuxtLink class="brand" to="/">xlrx drive</NuxtLink>
+			<NuxtLink to="/files">Dateien</NuxtLink>
 			<span class="spacer"></span>
 			<NuxtLink to="/settings/security">Sicherheit</NuxtLink>
 			<NuxtLink v-if="me.is_admin" to="/admin">Verwaltung</NuxtLink>

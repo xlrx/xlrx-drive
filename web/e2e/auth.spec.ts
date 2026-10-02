@@ -1,5 +1,8 @@
-// Account setup, login with authenticator app and passkey, administration – in a real browser.
+// Account setup, login with authenticator app and passkey, administration, browsing files – in a
+// real browser.
 import { createHmac } from 'node:crypto';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
 
 const PASSWORD = 'Wolken über dem Garten 7';
@@ -46,7 +49,74 @@ async function virtualAuthenticator(page: Page) {
 	});
 }
 
-test('Einrichtung, Anmeldung und Verwaltung', async ({ page }) => {
+/** 8×8 pixels, blue. */
+const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGNQTX6NFTEMLQkADGRcwcht3uAAAAAASUVORK5CYII=';
+
+const PDF =
+	'%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n' +
+	'3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n';
+
+/** Browses "My Drive" of the signed-in admin: folders, preview, download, rescan. */
+async function browseFiles(page: Page, data: string) {
+	const drive = join(data, 'homes/admin/Drive');
+	await mkdir(join(drive, 'Projekte'), { recursive: true });
+	await mkdir(join(drive, 'Bilder'), { recursive: true });
+	await writeFile(join(drive, 'Projekte/Plan.txt'), 'Erste Zeile\nZweite Zeile: äöü\n');
+	await writeFile(join(drive, 'Projekte/seite.html'), '<script>alert("xss")</script>');
+	await writeFile(join(drive, 'Bilder/Punkt.png'), Buffer.from(PNG, 'base64'));
+	await writeFile(join(drive, 'Bericht.pdf'), PDF);
+	page.on('dialog', () => {
+		throw new Error('Benutzerinhalt hat ein Skript ausgeführt');
+	});
+	// Anything the browser refuses (CSP, framing) is a bug in the headers.
+	const refused: string[] = [];
+	page.on('console', (m) => {
+		if (/refused|content security policy/i.test(m.text())) refused.push(m.text());
+	});
+
+	// The first visit imports the existing folder; the page shows the content as it arrives.
+	await page.getByRole('link', { name: 'Dateien', exact: true }).click();
+	await expect(page.getByRole('heading', { name: 'Meine Ablage' })).toBeVisible();
+	await expect(page.getByRole('link', { name: 'Projekte', exact: true })).toBeVisible();
+
+	// Image preview: loads under the strict CSP of the app.
+	await page.getByRole('link', { name: 'Bilder', exact: true }).click();
+	await page.getByRole('link', { name: 'Punkt.png', exact: true }).click();
+	const img = page.getByRole('img', { name: 'Punkt.png' });
+	await expect(img).toBeVisible();
+	await expect.poll(() => img.evaluate((i: HTMLImageElement) => i.naturalWidth)).toBe(8);
+
+	// Back via the breadcrumbs; text preview and download.
+	await page.getByRole('navigation', { name: 'Pfad' }).getByRole('link', { name: 'Meine Ablage' }).click();
+	await page.getByRole('link', { name: 'Projekte', exact: true }).click();
+	await page.getByRole('link', { name: 'Plan.txt', exact: true }).click();
+	await expect(page.locator('pre')).toContainText('Zweite Zeile: äöü');
+	const download = page.waitForEvent('download');
+	await page.getByRole('link', { name: 'Herunterladen', exact: true }).click();
+	expect((await download).suggestedFilename()).toBe('Plan.txt');
+
+	// HTML is never shown, let alone run.
+	await page.getByRole('navigation', { name: 'Pfad' }).getByRole('link', { name: 'Projekte', exact: true }).click();
+	await page.getByRole('link', { name: 'seite.html', exact: true }).click();
+	await expect(page.getByText('Keine Vorschau für diesen Dateityp.')).toBeVisible();
+
+	// A file added on the NAS shows up after "Neu einlesen".
+	await page.getByRole('navigation', { name: 'Pfad' }).getByRole('link', { name: 'Projekte', exact: true }).click();
+	await writeFile(join(drive, 'Projekte/Neu.txt'), 'neu');
+	await page.getByRole('button', { name: 'Neu einlesen' }).click();
+	await expect(page.getByText('Eingelesen: 1 neu.')).toBeVisible();
+	await expect(page.getByRole('link', { name: 'Neu.txt', exact: true })).toBeVisible();
+
+	// PDF: shown in a frame of the app.
+	await page.getByRole('navigation', { name: 'Pfad' }).getByRole('link', { name: 'Meine Ablage' }).click();
+	await page.getByRole('link', { name: 'Bericht.pdf', exact: true }).click();
+	const frame = page.locator('iframe[title="Bericht.pdf"]');
+	await expect(frame).toBeVisible();
+	await page.waitForLoadState('networkidle');
+	expect(refused).toEqual([]);
+}
+
+test('Einrichtung, Anmeldung, Verwaltung und Dateien', async ({ page }) => {
 	const setupUrl = process.env.XLRX_SETUP_URL;
 	test.skip(!setupUrl, 'XLRX_SETUP_URL fehlt (e2e/run.sh verwenden)');
 	await virtualAuthenticator(page);
@@ -98,6 +168,9 @@ test('Einrichtung, Anmeldung und Verwaltung', async ({ page }) => {
 	await expect(page.getByText('Einrichtungslink für bert')).toBeVisible();
 	await expect(page.locator('input[readonly]')).toHaveValue(/\/setup#/);
 	await expect(page.getByRole('cell', { name: 'user_created' }).first()).toBeVisible();
+
+	const data = process.env.XLRX_E2E_DATA;
+	if (data) await browseFiles(page, data);
 });
 
 test('Falsches Passwort zeigt einheitliche Meldung', async ({ page }) => {

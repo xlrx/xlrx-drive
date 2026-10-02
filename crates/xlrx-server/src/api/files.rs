@@ -2,7 +2,9 @@
 
 use axum::Json;
 use axum::extract::{Path, Query, Request, State};
-use axum::http::header::{CONTENT_DISPOSITION, CONTENT_SECURITY_POLICY, CONTENT_TYPE, ETAG};
+use axum::http::header::{
+    CONTENT_DISPOSITION, CONTENT_SECURITY_POLICY, CONTENT_TYPE, ETAG, X_FRAME_OPTIONS,
+};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
@@ -252,13 +254,22 @@ pub async fn content(
             HeaderValue::from_static("application/octet-stream"),
         );
     }
-    // User content never runs scripts in our origin (PDF needs the browser's viewer).
-    let csp = if mime == "application/pdf" {
-        "default-src 'none'; object-src 'self'; style-src 'unsafe-inline'"
-    } else {
-        "sandbox; default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'"
+    // User content never runs scripts in our origin. Previews may be framed by the web app;
+    // PDF needs the browser's viewer and therefore no sandbox.
+    let csp = match (inline, mime == "application/pdf") {
+        (false, _) => "sandbox; default-src 'none'; frame-ancestors 'none'",
+        (true, true) => {
+            "default-src 'none'; object-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'self'"
+        }
+        (true, false) => {
+            "sandbox; default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'; \
+             frame-ancestors 'self'"
+        }
     };
     h.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_static(csp));
+    if inline {
+        h.insert(X_FRAME_OPTIONS, HeaderValue::from_static("SAMEORIGIN"));
+    }
     if let Some(hash) = &node.content_hash {
         let tag: String = hash.iter().take(16).map(|b| format!("{b:02x}")).collect();
         if let Ok(v) = HeaderValue::from_str(&format!("\"{tag}\"")) {

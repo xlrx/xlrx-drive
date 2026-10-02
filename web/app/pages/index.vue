@@ -7,8 +7,11 @@ const { me } = useSession();
 		<h1>Hallo {{ me?.display_name }}</h1>
 		<div class="card stack">
 			<p>
-				Die Anmeldung steht. Als Nächstes kommen hier die Startseite mit Vorschlägen und Aktivitäten, das
-				Durchsuchen der Ablagen und die Suche (Meilensteine M1–M3).
+				<NuxtLink to="/files">Meine Ablage öffnen</NuxtLink> – durchsuchen, ansehen und herunterladen.
+			</p>
+			<p class="muted">
+				Als Nächstes kommen Hochladen und Ändern, der Sync für Mac und iPhone, dann hier Vorschläge,
+				Aktivitäten und die Suche.
 			</p>
 			<p v-if="me && me.recovery_codes_left < 4" class="error">
 				Nur noch {{ me.recovery_codes_left }} Wiederherstellungscodes übrig.
