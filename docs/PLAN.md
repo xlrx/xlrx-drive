@@ -4,7 +4,7 @@
 > Volltextsuche, Teilen zwischen Benutzern, extrem effizienter und zuverlässiger Sync, Mac- und iOS-App.
 > Hosting: Docker (Container Manager) auf Synology, amd64.
 
-Stand: 2026-10-02 · Status: Entwurf v3 (+ Object Storage für Backup und Außenzugriff, Datenklassen, KI-Rechner im Heimnetz)
+Stand: 2026-10-02 · Status: Entwurf v4 (+ Caddy statt DSM-Proxy, herstellerunabhängiges S3, Bandbreite 50 → 400 Mbit/s)
 
 ---
 
@@ -45,11 +45,12 @@ Stand: 2026-10-02 · Status: Entwurf v3 (+ Object Storage für Backup und Außen
 | Suche | Text aus PDF/Office/Mails, **OCR**, **semantische Suche**, **Bildsuche nach Inhalt**. |
 | ML-Rechenleistung | **Cloud-APIs mit Open-Source-Modellen**: Scaleway Generative APIs und/oder Cloudflare Workers AI. **Sensible Ordner bleiben lokal** und werden mit einem kleinen Embedding-Modell auf dem NAS durchsuchbar (siehe 7.5). Bei Bedarf kommt mehr lokale Rechenleistung über einen Rechner im Heimnetz (7.6). |
 | Datenklassen | Jeder Ordner ist **„Cloud erlaubt“** oder **„Nur lokal“** (vererbt). „Nur lokal“ ist **rechtlich begründet**, z.B. bei Gesundheitsdaten oder Daten Dritter. Diese Daten werden nie in der Cloud verarbeitet, auch nicht auf einer eigenen Cloud-VM. Sie landen in keinem S3-Cache und gehen nur clientseitig verschlüsselt ins Backup (siehe 7.4, 15.1). |
-| Rolle der Cloud | **Das NAS bleibt die Zentrale.** Object Storage (S3) dient als **verschlüsseltes externes Backup** und als **Beschleuniger für den Zugriff von außen** (Freigabe-Links, Downloads unterwegs). Eine Speicher-Schnittstelle im Server hält einen späteren Umzug in die Cloud offen (4.6). |
+| Rolle der Cloud | **Das NAS bleibt die Zentrale.** Object Storage (S3) dient als **verschlüsseltes externes Backup** und als **Beschleuniger für den Zugriff von außen** (Freigabe-Links, Downloads unterwegs). Eine Speicher-Schnittstelle im Server hält einen späteren Umzug in die Cloud offen (4.6). **Herstellerunabhängig** über die S3-API, Start mit Hetzner. |
 | Nutzer | Familie/Team (bis ~20 Konten), Zugriff von unterwegs, **öffentliche Freigabe-Links**. |
 | Hardware | **DS918+**: Celeron J3455, 4 Kerne, **kein AVX**, DSM-Kernel 4.4, 16–20 GB RAM, **SSD-Lese-/Schreib-Cache**. Besonderheiten siehe 3.1. |
 | Bestandsdaten | `homes/<user>/Drive` (Synology Drive). Diese Ordner werden direkt als „Meine Ablage“ eingebunden. |
-| Zugriff von außen | Eigene Domain, Portweiterleitung, vorgelagerter Reverse Proxy mit Let's Encrypt. |
+| Zugriff von außen | Eigene Domain, Portweiterleitung. Der heutige DSM-Reverse-Proxy wird durch einen **Caddy-Container mit eigener IP** (macvlan) ersetzt, der HTTP/3 kann (siehe 5.9, 15). |
+| Heimanschluss | Upload heute **50 Mbit/s**, ab **Januar 2027 400 Mbit/s**. |
 | Transport | **Alles über HTTPS auf Port 443**, bevorzugt **HTTP/3 (QUIC)**, automatischer Fallback auf HTTP/2 über TCP (siehe 5.9). |
 | Apple | Apple Developer Account ist vorhanden. |
 | Datenmenge | 300k – 3 Mio Dateien, mehrere TB. |
@@ -78,6 +79,8 @@ Die Kombination „normale Dateien + Google-Drive-UX + eigene Suche“ gibt es f
 4. **Effizienz durch Inhalt-Adressierung.** BLAKE3-Hashes und Content-Defined Chunking (FastCDC) ermöglichen Delta-Uploads und Delta-Downloads sowie Dedup. Umbenennen oder Verschieben überträgt nie Inhalte.
 5. **Früh Nutzen stiften.** Server, Web-UI und Suche laufen zuerst neben dem bestehenden Synology Drive. Der eigene Sync-Client löst Synology Drive erst ab, wenn er bewiesen ist.
 6. **Datenschutz bei KI:** Es gehen nur abgeleitete, minimierte Daten an KI-Anbieter (Text-Chunks, verkleinerte Bilder ohne EXIF). Ordner sind abwählbar. Ein Budget-Limit ist eingebaut.
+7. **Herstellerunabhängig.** Nach außen gibt es nur offene Standards: die S3-API für Speicher (beliebiger Anbieter), OpenAI-kompatible APIs für KI,
+   Docker Compose, Postgres und normale Dateien. Ein Anbieterwechsel ist Konfiguration, keine Entwicklung.
 
 ---
 
@@ -86,7 +89,7 @@ Die Kombination „normale Dateien + Google-Drive-UX + eigene Suche“ gibt es f
 ```
                          Internet / LAN
                                │  TCP 443 (HTTP/2) + UDP 443 (HTTP/3/QUIC)
-           Vorgelagerter Reverse Proxy (TLS, Let's Encrypt, HTTP/3)
+   Caddy-Container, eigene IP per macvlan (TLS, Let's Encrypt, HTTP/3)
                                │
 ┌──────────────────────────────┼───────────────────────────────────────────┐
 │ Container Manager – Projekt "xlrx" (docker compose, amd64)                │
@@ -280,7 +283,7 @@ Das ist das Herzstück. Es ist bewusst nach dem Vorbild der Dropbox-„Nucleus�
    Der Server antwortet: „Inhalt existiert schon“ (Dedup, sofort fertig) oder „diese Chunks fehlen“.
    Der Server kennt vorhandene Chunks über einen **Chunk-Index** (Chunk-Hash → Datei + Offset).
 3. `PUT /api/uploads/{id}/chunks/{hash}` läuft parallel und wiederaufnehmbar, zstd-komprimiert, wenn es sich lohnt. Requests sind ≤ 8 MB,
-   damit kein Body-Limit des vorgelagerten Proxys greift.
+   damit kein Body-Limit eines Proxys greift.
 4. `POST /api/uploads/{id}/commit`: Der Server setzt aus vorhandenen Chunks (Hash wird beim Lesen verifiziert) und neuen Chunks zusammen
    und schreibt atomar (siehe 4.3).
    - `base_version` passt nicht zur aktuellen Version → **Konflikt**. Der Server legt die eingehende Version als
@@ -360,15 +363,16 @@ Sonderports und kein eigenes Protokoll. Durch jede Firewall, die Web-Surfen erla
   beherrscht iOS-Hintergrund-Transfers. Es respektiert System-VPN und Proxy-Einstellungen und ist energieeffizient.
   Der Rust-Kern enthält die Protokoll-Logik. Den eigentlichen Transport implementiert die Plattform über eine UniFFI-Schnittstelle.
   Spätere Clients (Windows/Linux/Android) nutzen eine Rust-Implementierung (`quinn`/`h3` bzw. `reqwest`).
-- **QUIC-Terminierung im vorgelagerten Reverse Proxy.** Empfehlung: **Caddy**. Es spricht HTTP/3 ab Werk, holt Let's-Encrypt-Zertifikate automatisch,
-  hat kein Body-Limit und streamt SSE ohne Puffern. Traefik und nginx ≥ 1.25 gehen ebenfalls. Der Reverse Proxy in DSM kann **kein** HTTP/3.
-  Vom Proxy zum `xlrx-server` reicht HTTP/1.1 oder h2c im internen Docker-Netz.
-- **Router:** Neben TCP 443 auch **UDP 443** an den Proxy weiterleiten.
+- **QUIC-Terminierung in einem Caddy-Container**, der den heutigen DSM-Reverse-Proxy ersetzt. Der DSM-Proxy kann **kein** HTTP/3.
+  Caddy spricht HTTP/3 ab Werk, holt Let's-Encrypt-Zertifikate automatisch, hat kein Body-Limit und streamt SSE ohne Puffern.
+  Vom Proxy zum `xlrx-server` reicht HTTP/1.1 oder h2c im internen Docker-Netz. Einrichtung mit eigener IP siehe 15.3.
+- **Router:** TCP 80/443 und **UDP 443** an die IP des Caddy-Containers weiterleiten.
 - **DS918+-Besonderheit:** QUIC läuft im Userspace. Ohne UDP-GSO (Kernel 4.4) braucht es auf dem J3455 deutlich mehr CPU als TCP.
-  Für den WAN-Zugang (typisch 40–100 Mbit/s Upload) reicht das. Im LAN kann QUIC dagegen Gigabit ausbremsen. Falls der M0-Spike das bestätigt,
+  Bei heute 50 Mbit/s Upload reicht das sicher. Bei 400 Mbit/s ab Januar 2027 kann die CPU zum Engpass werden; der Spike misst das.
+  Gegenmittel: Große Downloads von außen übernimmt der S3-Cache (15.2), und Caddy kann HTTP/3 notfalls abschalten. Im LAN kann QUIC Gigabit ausbremsen. Falls der M0-Spike das bestätigt,
   bekommen die Clients für das LAN einen eigenen Endpunkt nur mit HTTP/2, z.B. `drive-lan.<domain>` per Split-DNS mit gültigem Let's-Encrypt-Zertifikat (DNS-Challenge oder Wildcard).
   Die Clients schalten automatisch um, sobald er erreichbar ist. Die UDP-Puffer (`net.core.rmem_max`/`wmem_max`) werden per Boot-Aufgabe vergrößert.
-- **Split-DNS** (Router, Pi-hole oder DSM-DNS-Server): Im LAN zeigt die Domain auf die NAS-IP. So gelten dasselbe Zertifikat
+- **Split-DNS** (Router, Pi-hole oder DSM-DNS-Server): Im LAN zeigt die Domain auf die IP des Caddy-Containers. So gelten dasselbe Zertifikat
   und dieselbe URL überall, und der Client muss nichts umschalten.
 
 ---
@@ -756,22 +760,28 @@ Metriken  /metrics (Prometheus) · /healthz
 ## 15. Betrieb auf der Synology
 
 - **Container Manager → Projekt** mit `docker-compose.yml` (liegt unter `deploy/`). Dienste: `xlrx-server`, `xlrx-worker`, `postgres`,
-  `tika`, `embed-local`, optional `caddy`. Images werden per GitHub Actions für amd64 **mit x86-64-v2 als Basis** gebaut (kein AVX, siehe 3.1)
+  `tika`, `embed-local`, `caddy` (eigene IP, siehe 15.3). Images werden per GitHub Actions für amd64 **mit x86-64-v2 als Basis** gebaut (kein AVX, siehe 3.1)
   und in GHCR veröffentlicht.
 - Ein eigener DSM-Benutzer `xlrx` (PUID/PGID) mit Lese-/Schreibrechten auf `homes` und `xlrx-spaces`. Der Worker mountet die Daten **read-only**.
   CPU-Limits in compose: Worker und `embed-local` zusammen max. 2 Kerne tagsüber.
 - **Boot-Aufgabe** (Aufgabenplaner, root):
   `sysctl -w fs.inotify.max_user_watches=1048576 net.core.rmem_max=7500000 net.core.wmem_max=7500000`
   (inotify für viele Verzeichnisse, UDP-Puffer für QUIC).
-- **Erreichbarkeit von außen:** eigene Domain, Portweiterleitung **TCP 443 + UDP 443** auf den vorgelagerten Reverse Proxy.
-  Der Proxy muss HTTP/3 können (Caddy empfohlen, siehe 5.9), SSE ungepuffert durchreichen und darf keine knappen Body-Limits haben.
-  Chunks sind ≤ 8 MB. Split-DNS für das LAN.
+- **Erreichbarkeit von außen:** eigene Domain, Portweiterleitung **TCP 80/443 + UDP 443** auf den Caddy-Container (15.3). Split-DNS für das LAN.
 - **Monitoring:** `/healthz`, Prometheus-Metriken, strukturierte Logs, Admin-Dashboard (Job-Queue, Index-Status, Fehler).
 - **Updates:** neues Image ziehen, automatische Migration mit vorherigem Dump, Rollback-Anleitung.
-- **Object-Storage-Anbieter:** Empfehlung **Hetzner Object Storage** (Rechenzentren in Deutschland/Finnland).
-  - Basispaket ~6,50 €/Monat inkl. ~1 TB Speicher und ~1 TB Datenverkehr nach außen, danach ~6,50 €/TB Speicher und ~1 €/TB Verkehr.
-  - Scaleway kostet im Vergleich ~8 €/TB in einer Zone bzw. ~16 €/TB über mehrere Zonen, und Verkehr nach außen ~10 €/TB nach 75 GB.
-  - Die Verfügbarkeit bei Hetzner vor der Bestellung prüfen, 2026 gab es Engpässe.
+- **Object Storage, herstellerunabhängig:**
+  - xlrx nutzt nur den **Kern der S3-API**: PUT/GET mit Range, HEAD, DELETE, Multipart-Upload, ListObjectsV2 und signierte URLs (SigV4).
+    Endpunkt, Region, Bucket, Schlüssel und Adressierungsart (Path- oder Virtual-Host-Style) sind frei konfigurierbar.
+  - **Bewusst nicht genutzt:** Lifecycle-Regeln, Object Lock, Bucket-Benachrichtigungen, Versionierung und anbieterspezifische Speicherklassen.
+    Ablauf und Aufräumen erledigt xlrx selbst. Diese Funktionen unterscheiden sich zwischen Anbietern am stärksten.
+  - **Kompatibilitäts-Suite:** läuft in der CI gegen MinIO und nachts gegen die echten Anbieter (Hetzner, Scaleway). Jeder neue Anbieter muss sie bestehen.
+  - **Start mit Hetzner Object Storage** (Deutschland/Finnland). Basispaket ~6,50 €/Monat inkl. ~1 TB Speicher und ~1 TB Datenverkehr nach außen,
+    danach ~6,50 €/TB Speicher und ~1 €/TB Verkehr. Zum Vergleich Scaleway: ~8 €/TB in einer Zone bzw. ~16 €/TB über mehrere Zonen, Verkehr ~10 €/TB nach 75 GB.
+    Die Verfügbarkeit bei Hetzner vor der Bestellung prüfen, 2026 gab es Engpässe.
+  - **Anbieterwechsel:**
+    - Cache: neuen Bucket eintragen. Der Cache ist wegwerfbar und füllt sich neu.
+    - Backup: verschlüsselte Backup-Daten per `rclone` 1:1 kopieren und die Hyper-Backup-Aufgabe neu verknüpfen. Alternativ eine neue Aufgabe parallel aufbauen und die alte nach Ablauf der Aufbewahrung löschen.
   - Die KI-APIs bleiben bei Scaleway. Das sind zwei Anbieter mit jeweils eigenem AVV.
 
 ### 15.1 Backup (3-2-1)
@@ -783,21 +793,33 @@ Metriken  /metrics (Prometheus) · /healthz
 
 - **Verschlüsselung:** Hyper-Backup-Verschlüsselung ist Pflicht. Passwort und Schlüsseldatei liegen offline (Passwortmanager + Papier im Haus).
   Ohne sie gibt es keine Wiederherstellung. Der Anbieter sieht nur verschlüsselte Blöcke.
-- **„Nur lokal“-Ordner:** eigene Hyper-Backup-Aufgabe. Ob verschlüsselte Kopien außer Haus rechtlich zulässig sind, klärst du
-  einmal, z.B. mit der zuständigen Stelle. Nötig wären dafür ein AVV mit dem Speicheranbieter und ein Schlüssel nur bei dir.
-  Wenn nicht, sichert diese Aufgabe auf eine **USB-Platte oder eine zweite Synology an einem anderen Ort** statt nach S3.
+- **„Nur lokal“-Ordner:** Sie gehen **verschlüsselt nach S3** (geklärt: zulässig mit AVV beim Speicheranbieter und Schlüssel nur bei dir).
+  Dafür gibt es eine **eigene Aufgabe mit eigenem Schlüssel in einem eigenen Bucket**. Das ist sauber dokumentierbar
+  (AVV, Verzeichnis der Verarbeitungstätigkeiten) und getrennt aufbewahr- und löschbar.
   Der Admin-Bereich zeigt die Pfadliste aller „Nur lokal“-Ordner zum Abgleich mit den Hyper-Backup-Aufgaben.
 - **Nicht gesichert:** Suchindex, Vektoren, Thumbnails und `staging`. Sie werden neu aufgebaut. Extrahierte Texte und KI-Ergebnisse liegen in Postgres
   und sind über den Dump gesichert. Ein Neuaufbau kostet also kein zweites Mal API-Geld.
 - **Aufbewahrung:** Hyper Backup „Smart Recycle“, z.B. 30 tägliche, 12 wöchentliche, 12 monatliche Stände.
-- **Erst-Upload:** 3 TB brauchen bei 40–100 Mbit/s Upload etwa 3–7 Tage. Mit Bandbreitenlimit tagsüber und Vollgas nachts.
+- **Erst-Upload:**
+  - Bei **50 Mbit/s** brauchen 3 TB rein rechnerisch ~6 Tage Volllast. Mit Drosselung tagsüber (z.B. 20 Mbit/s) und Vollgas nachts
+    sind es **etwa 1,5–2 Wochen**.
+  - **Trotzdem jetzt starten** statt auf Januar zu warten, und zwar nach Priorität: zuerst „Nur lokal“-Ordner und Dokumente (klein,
+    unersetzlich), dann Fotos, dann der Rest. Lange vor Januar ist alles oben.
+  - Bei **400 Mbit/s** ab Januar würde derselbe Erst-Upload **unter einem Tag** dauern. Danach überträgt das Backup nur noch die Änderungen.
+- **Hyper Backup mit Hetzner** (S3-kompatibel, eigener Endpunkt) wird in M0 getestet. Falls es hakt, gibt es einen gleichwertigen
+  Fallback: **restic** im Container. Es ist ebenfalls verschlüsselt, dedupliziert und arbeitet herstellerunabhängig mit S3.
 - **Kosten** für 3 TB bei Hetzner: ~19 €/Monat. Glacier-Klassen sind billiger, passen aber nicht, weil Hyper Backup direkten Lesezugriff braucht.
 - **Wiederherstellung üben:** Vierteljährlich einen zufälligen Ordner und den `pg_dump` in eine Testumgebung zurückspielen. Der Admin-Bereich erinnert daran.
 - Das Backup ist eine **Sofortmaßnahme in M0**. Es braucht keine Entwicklung und schützt die Daten schon heute.
 
 ### 15.2 Außen-Beschleuniger (S3-Cache)
-**Problem:** Jeder Download von außen, über Freigabe-Links oder vom Handy unterwegs, läuft heute durch den Upload des Heimanschlusses
-(typisch 40–100 Mbit/s) und durch die schwache NAS-CPU.
+**Problem:** Jeder Download von außen, über Freigabe-Links oder vom Handy unterwegs, läuft durch den Upload des Heimanschlusses
+und durch die schwache NAS-CPU.
+- **Heute (50 Mbit/s ≈ 6 MB/s):** Ein 2-GB-Video über einen Link braucht ~6 Minuten, und mehrere gleichzeitige Downloads teilen sich das.
+  Der Cache bringt hier am meisten.
+- **Ab Januar (400 Mbit/s ≈ 50 MB/s):** Die Leitung reicht meist. Dann wird die NAS-CPU (TLS/QUIC) zum Engpass. Der Cache
+  entlastet sie und hilft bei vielen gleichzeitigen Downloads. M3b wird voraussichtlich erst nach Januar fertig, die Priorisierung
+  bleibt trotzdem sinnvoll.
 
 **Lösung:** Ausgewählte Inhalte aus **„Cloud erlaubt“-Ordnern** werden in einen privaten S3-Bucket gespiegelt und von dort direkt ausgeliefert.
 - **Was wird gespiegelt:**
@@ -819,6 +841,27 @@ Metriken  /metrics (Prometheus) · /healthz
 - **Kosten:** Ein Cache bis ~200 GB und bis 1 TB Abrufe pro Monat passen bei Hetzner ins Basispaket. Teilt er sich das Paket
   mit dem Backup, kommen nur einige Euro pro Monat dazu.
 - **Zugangsdaten getrennt:** eigener Bucket und eigener API-Schlüssel nur für den Cache. Hyper Backup hat einen anderen Schlüssel für den Backup-Bucket.
+
+### 15.3 Caddy statt DSM-Reverse-Proxy
+**Warum eine eigene IP:** Das nginx von DSM belegt auf dem NAS selbst die Ports 80 und 443 (Web Station, DSM-Reverse-Proxy). Es lässt sich
+nicht dauerhaft davon lösen, denn manuelle Änderungen überschreibt das nächste DSM-Update. Deshalb bekommt Caddy per **macvlan** eine
+**eigene IP im Heimnetz**, z.B. `192.168.1.20`, und lauscht dort ungestört auf TCP 80/443 und UDP 443.
+
+- **Netzwerk:** Der Caddy-Container hängt in zwei Netzen.
+  - Im macvlan-Netz (Parent-Interface `eth0`, bzw. `ovs_eth0`, wenn Open vSwitch aktiv ist) hat er seine eigene IP.
+  - Im internen Docker-Netz erreicht er `xlrx-server`.
+
+  Vom NAS selbst ist die macvlan-IP ohne Zusatz-Interface nicht erreichbar. Für xlrx spielt das keine Rolle.
+- **Zertifikate:** Caddy holt Let's-Encrypt-Zertifikate selbst über die HTTP- oder TLS-ALPN-Challenge. Für einen eigenen LAN-Endpunkt
+  (`drive-lan.<domain>`, 5.9) oder ein Wildcard-Zertifikat wird die DNS-Challenge genutzt. Dafür braucht Caddy das Plugin deines DNS-Anbieters.
+- **Umzug ohne Ausfall:**
+  1. Bestehende Regeln aus dem DSM-Reverse-Proxy (andere Dienste) in die `Caddyfile` übernehmen.
+  2. Caddy parallel starten und über die neue IP testen.
+  3. Portweiterleitung im Router auf die Caddy-IP umstellen und Split-DNS anpassen.
+
+  Der Rückweg ist jederzeit möglich: Portweiterleitung zurück auf die NAS-IP.
+- **Alternative ohne macvlan:** Caddy auf hohen Ports, z.B. 8443/TCP+UDP, und der Router übersetzt 443 → 8443. Das ist einfacher, im LAN aber
+  fummeliger, weil Split-DNS dann auf einen anderen Port zeigen müsste. Deshalb nur der Plan B.
 
 ---
 
@@ -864,8 +907,9 @@ Zuverlässigkeit entsteht durch Tests, nicht durch Hoffnung. Darum hat das Teste
    SSE durch den Reverse Proxy (keine Pufferung, Reconnect mit Cursor).
 8. **Datenschutz-Regel:** Integrationstest mit einem Fake-Cloud-Provider und einem Fake-S3. Aus „Nur lokal“-Ordnern darf dort kein
    einziger Request ankommen, weder KI noch Cache. Nach einem Klassenwechsel auf „Nur lokal“ müssen alle Cache-Objekte gelöscht sein.
-9. **Last/Skalierung:** synthetischer Baum mit 3 Mio Dateien. Gemessen werden Listing, Sync, Suche und Erst-Indexierung gegen die Zielwerte.
-10. **Dogfooding:** mehrere Wochen produktiver Eigenbetrieb **bevor** Synology Drive abgelöst wird.
+9. **S3-Kompatibilität:** Suite gegen MinIO in der CI und nachts gegen Hetzner und Scaleway. Geprüft werden Multipart, Range, signierte URLs, Löschen und Listen (15).
+10. **Last/Skalierung:** synthetischer Baum mit 3 Mio Dateien. Gemessen werden Listing, Sync, Suche und Erst-Indexierung gegen die Zielwerte.
+11. **Dogfooding:** mehrere Wochen produktiver Eigenbetrieb **bevor** Synology Drive abgelöst wird.
 
 ---
 
@@ -892,7 +936,7 @@ xlrx-drive/
 ├─ deploy/
 │  ├─ docker-compose.yml
 │  ├─ Dockerfile.server · Dockerfile.worker · Dockerfile.embed-local
-│  ├─ Caddyfile                  Beispiel für den vorgelagerten Proxy (HTTP/3)
+│  ├─ Caddyfile                  Caddy-Konfiguration (HTTP/3, xlrx + übernommene DSM-Regeln)
 │  └─ synology.md                Einrichtungsanleitung (Freigaben, Rechte, Boot-Aufgabe, Router)
 ├─ spikes/
 │  └─ ds918/                     Hardware-Messungen (Embedding, QUIC, Hashing, Reflink, ACL)
@@ -910,7 +954,7 @@ Zwei parallele Stränge: **A – Server/Web/Suche** liefert früh Nutzen, währe
 
 | # | Meilenstein | Inhalt | Fertig, wenn … | Größe |
 |---|---|---|---|---|
-| **M0** | Fundament + DS918-Spike | Workspace, CI (Rust/Web/Apple, x86-64-v2 + QEMU-Check), Docker-Images, compose, Caddy-Beispiel, Postgres-Schema, Auth (Passwort + Passkey), Admin-Grundgerüst. **Spike auf dem DS918+:** lokale Embedding-Laufzeit ohne AVX (ONNX vs. llama.cpp, e5-small vs. embeddinggemma), QUIC- vs. HTTP/2-Durchsatz, BLAKE3-Geschwindigkeit, Reflinks im `homes`-Mount, ACL-Vererbung, Hilfsdateien von Synology Drive. **Sofortmaßnahme ohne Code:** verschlüsseltes Hyper Backup → S3 + Snapshot-Plan (15.1) | `docker compose up` auf der Synology zeigt den Login über die eigene Domain per HTTP/3. Messwerte stehen in `spikes/ds918/`. Erstes Backup ist durchgelaufen, eine Test-Wiederherstellung hat geklappt | M |
+| **M0** | Fundament + DS918-Spike | Workspace, CI (Rust/Web/Apple, x86-64-v2 + QEMU-Check), Docker-Images, compose, Caddy-Beispiel, Postgres-Schema, Auth (Passwort + Passkey), Admin-Grundgerüst. **Spike auf dem DS918+:** lokale Embedding-Laufzeit ohne AVX (ONNX vs. llama.cpp, e5-small vs. embeddinggemma), QUIC- vs. HTTP/2-Durchsatz, BLAKE3-Geschwindigkeit, Reflinks im `homes`-Mount, ACL-Vererbung, Hilfsdateien von Synology Drive. **Caddy-Container mit eigener IP ersetzt den DSM-Reverse-Proxy** (15.3). **Sofortmaßnahme ohne Code:** verschlüsseltes Hyper Backup → Hetzner-S3, priorisiert, + Snapshot-Plan (15.1); Fallback restic | `docker compose up` auf der Synology zeigt den Login über die eigene Domain per HTTP/3. Messwerte stehen in `spikes/ds918/`. Erstes Backup ist durchgelaufen, eine Test-Wiederherstellung hat geklappt | M |
 | **M1** | Server-Kern + Web-Basis | Speicher-Schnittstelle `ContentStore` mit `PlainFsStore` (4.6), Roots (bestehende Drive-Ordner einbinden), Watcher + Abgleich-Scan, Journal, Upload/Download (Chunks), Versionen (Reflink), Papierkorb, Web: Durchsuchen, Upload, Vorschau, Thumbnails | Web-UI zeigt die echten Daten aus Synology Drive, Änderungen per SMB erscheinen in Sekunden | L |
 | **B1** | Sync-Kern in Simulation | xlrx-chunk, xlrx-sync (sans-IO), xlrx-sim, Konfliktregeln, Invarianten | 1 Mio Seeds ohne Verletzung | L |
 | **M2** | Volltextsuche I | Tika-Extraktion, Tesseract-OCR, Tantivy (de/en), Filter/Syntax, Snippets, Rechte-Filter, Such-UI | Suche nach Inhalt in PDF/Office/Scans, p95 < 300 ms bei Bestandsgröße | M |
@@ -945,27 +989,32 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
 | UDP 443 blockiert / QUIC auf dem J3455 zu CPU-hungrig | automatischer Fallback auf HTTP/2, eigener LAN-Endpunkt nur mit HTTP/2, Messung im Spike |
 | inotify-Limits / alter Kernel | Limit anheben, Abgleich-Scans als Sicherheitsnetz |
 | Externe Änderungen kollidieren mit Uploads | Intent-Log, Prüfung vor dem Ersetzen, Konfliktkopie statt Überschreiben |
+| Proxy-Umzug stört andere Dienste | Regeln vorher in die Caddyfile übernehmen, paralleler Test über eigene IP, Umschalten per Portweiterleitung, Rückweg jederzeit |
+| Bindung an einen Speicher-Anbieter | nur Kern-API von S3, Kompatibilitäts-Suite, Wechsel = Konfiguration bzw. `rclone`-Kopie (15) |
+| Erst-Backup dauert bei 50 Mbit/s lange | nach Priorität sichern (Unersetzliches zuerst), Drosselung tagsüber, ab Januar 400 Mbit/s |
 | Projektumfang | strikte Meilensteine, Nicht-Ziele für v1 (siehe 1), früher Nutzen durch Strang A |
 
 ---
 
 ## 21. Offene Fragen
 
-Beantwortet (2026-10-02): DS918+ mit SSD-Cache · Daten in `homes/<user>/Drive` · eigene Domain mit Portweiterleitung und
-vorgelagertem Reverse Proxy · Apple Developer Account vorhanden · sensible Ordner bleiben lokal, **aus rechtlichen Gründen**
-(also auch keine eigene Cloud-VM) · NAS bleibt Zentrale, S3 für Backup und Außen-Beschleuniger · Ziele der Cloud-Nutzung: schneller
-Zugriff von außen, externe Sicherheitskopie, mehr KI-Rechenleistung.
+Beantwortet (2026-10-02):
+- DS918+ mit SSD-Cache, Daten in `homes/<user>/Drive`
+- eigene Domain mit Portweiterleitung. Der DSM-Reverse-Proxy darf durch einen Container ersetzt werden → Caddy (15.3).
+- Apple Developer Account vorhanden
+- sensible Ordner bleiben **aus rechtlichen Gründen** lokal, also auch keine eigene Cloud-VM. Ihr verschlüsseltes Backup bei einem S3-Anbieter
+  (mit AVV, Schlüssel nur bei dir) ist zulässig.
+- NAS bleibt Zentrale, S3 für Backup und Außen-Beschleuniger, **herstellerunabhängig**, Start mit Hetzner
+- Ziele der Cloud-Nutzung: schneller Zugriff von außen, externe Sicherheitskopie, mehr KI-Rechenleistung
+- Upload 50 Mbit/s, ab Januar 2027 400 Mbit/s
 
 Noch offen:
-1. **Welcher Reverse Proxy** ist vorgelagert (DSM-intern, Nginx Proxy Manager, Caddy, Traefik …), und läuft er auf dem NAS oder auf
-   einem anderen Gerät? Für HTTP/3 muss er QUIC können. Der DSM-interne kann das nicht.
-2. **Welche Ordner** sollen „Nur lokal“ sein? Die Regel wird beim Einrichten vorbelegt.
-3. **Login:** Reichen eigene Konten (Passwort + Passkey), oder sollen DSM-Konten (LDAP/SSO) genutzt werden?
-4. **KI-Anbieter:** Scaleway als Standard für die nicht sensiblen Ordner okay?
-5. Gibt es neben `homes/<user>/Drive` **Team-Ordner** in Synology Drive, die zu „Geteilten Ablagen“ werden sollen?
-6. Sind **Windows** oder **Android** absehbar nötig? Das beeinflusst Prioritäten, nicht die Architektur.
-7. Wird **Bearbeiten von Office-Dokumenten im Browser** gewünscht (Collabora/OnlyOffice), oder reicht Vorschau + Bearbeiten lokal?
-8. **Backup der „Nur lokal“-Ordner:** Ist eine clientseitig verschlüsselte Kopie bei einem S3-Anbieter (mit AVV, Schlüssel nur bei dir)
-   zulässig, oder muss die Kopie außer Haus auf eigene Hardware (USB-Platte bzw. zweite Synology an einem anderen Ort)?
-9. **S3-Anbieter:** Hetzner Object Storage (Empfehlung: günstiger, viel Datenverkehr inklusive) oder Scaleway (ein Anbieter für KI und Speicher)?
-10. **Upload-Bandbreite** des Heimanschlusses? Davon hängen die Dauer des Erst-Backups und der Nutzen des Außen-Beschleunigers ab.
+1. **Welche Ordner** sollen „Nur lokal“ sein? Die Regel wird beim Einrichten vorbelegt.
+2. **Welche anderen Dienste** laufen heute über den DSM-Reverse-Proxy? Sie werden in die Caddyfile übernommen.
+3. **Router und DNS:** Welcher Router (für Portweiterleitung inkl. UDP und ggf. Split-DNS), und bei welchem Anbieter liegt das DNS der Domain
+   (für die DNS-Challenge)?
+4. **Login:** Reichen eigene Konten (Passwort + Passkey), oder sollen DSM-Konten (LDAP/SSO) genutzt werden?
+5. **KI-Anbieter:** Scaleway als Standard für die nicht sensiblen Ordner okay?
+6. Gibt es neben `homes/<user>/Drive` **Team-Ordner** in Synology Drive, die zu „Geteilten Ablagen“ werden sollen?
+7. Sind **Windows** oder **Android** absehbar nötig? Das beeinflusst Prioritäten, nicht die Architektur.
+8. Wird **Bearbeiten von Office-Dokumenten im Browser** gewünscht (Collabora/OnlyOffice), oder reicht Vorschau + Bearbeiten lokal?
