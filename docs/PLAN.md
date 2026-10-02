@@ -53,7 +53,7 @@ Stand: 2026-10-02 · Status: v5 – alle Grundsatzfragen geklärt, bereit für M
 | Heimanschluss | Upload heute **50 Mbit/s**, ab **Januar 2027 400 Mbit/s**. |
 | Transport | **Alles über HTTPS auf Port 443**, bevorzugt **HTTP/3 (QUIC)**, automatischer Fallback auf HTTP/2 über TCP (siehe 5.9). |
 | Apple | Apple Developer Account ist vorhanden. |
-| Anmeldung | **Eigene Konten. Passwort + TOTP-Einmalcode bei jeder Anmeldung (Pflicht)**, Wiederherstellungscodes, Step-up-OTP für sensible Aktionen, widerrufbare Gerätetokens (16.1). Kein LDAP/SSO. |
+| Anmeldung | **Eigene Konten. Jede Anmeldung mit zwei Faktoren: Passwort + TOTP-Einmalcode oder Passkey.** Wiederherstellungscodes, Step-up für sensible Aktionen, widerrufbare Gerätetokens (16.1). Kein LDAP/SSO. |
 | Plattformen v1 | Web, macOS, iOS. **Windows/Android vorerst nicht.** Der Rust-Kern hält sie für später offen. |
 | Office | **Nur Vorschau** (lokal per LibreOffice → PDF). **Keine Microsoft-Office-Web-Integration** (kein Office Online/Microsoft 365/WOPI zu Microsoft). Bearbeiten lokal in den Desktop-Apps über den Sync. |
 | Backup | Hyper Backup nach S3 ist **eingerichtet** (Stand 2026-10). |
@@ -63,7 +63,7 @@ Stand: 2026-10-02 · Status: v5 – alle Grundsatzfragen geklärt, bereit für M
 ### Annahmen & Nicht-Ziele
 
 - **Nicht in v1:** Bearbeiten im Browser (falls je, dann nur selbst gehostet, z.B. Collabora; **nie Microsoft**), Gesichtserkennung,
-  Ende-zu-Ende-Verschlüsselung, Kommentare an Dateien, Passkeys (später optional als zusätzlicher Faktor), LDAP/SSO.
+  Ende-zu-Ende-Verschlüsselung, Kommentare an Dateien, LDAP/SSO.
 - **Mindestversionen:** macOS 15, iOS 18 (Vorschlag, weil die File-Provider-APIs dort ausgereift sind).
 
 ### Warum Eigenbau und nicht Seafile/Nextcloud/oCIS?
@@ -712,6 +712,7 @@ Skizze der wichtigsten Tabellen:
 ```
 users(id, username, display_name, email, password_hash, totp_secret_enc, totp_last_step, is_admin, quota_bytes, …)
 groups(id, name) · group_members(group_id, user_id)
+passkeys(id, user_id, name, credential_id, public_key, sign_count, created_at, last_used)
 recovery_codes(user_id, code_hash, used_at) · sessions(id, user_id, created_at, last_seen, step_up_at)
 devices(id, user_id, name, platform, refresh_token_hash, token_family, last_otp_at, last_seen)
 roots(id, kind[user|space], host_path, owner_user_id | space_id, ai_allowed)
@@ -763,6 +764,7 @@ Geräte melden sich per Browser-Login mit PKCE an. Pro Gerät gibt es einen wide
 
 ```
 Auth      POST /auth/login (Passwort) → POST /auth/otp (TOTP oder Wiederherstellungscode) · POST /auth/otp/setup
+          POST /auth/passkey/options → POST /auth/passkey/verify · /me/passkeys (registrieren, umbenennen, löschen)
           POST /auth/step-up · /auth/device/* (Browser-Flow mit PKCE) · GET/DELETE /me/devices · GET /me/sessions
 Nodes     GET /nodes/{id} · /nodes/{id}/children · POST /nodes (Ordner) · PATCH /nodes/{id} (rename/move)
           DELETE /nodes/{id} (→ Papierkorb) · POST /nodes/{id}/restore · GET /nodes/{id}/versions
@@ -893,7 +895,7 @@ nicht dauerhaft davon lösen, denn manuelle Änderungen überschreibt das nächs
 ## 16. Sicherheit
 
 - TLS überall, HSTS, strikte CSP, `SameSite`-Cookies, CSRF-Schutz.
-- Anmeldung mit Passwort + TOTP-Pflicht, Details siehe 16.1.
+- Anmeldung immer mit zwei Faktoren: Passwort + TOTP oder Passkey, Details siehe 16.1.
 - Postgres, Tika und `embed-local` nur im internen Docker-Netz. Der Worker darf nur zum KI-Anbieter. `embed-local` hat gar keinen Internetzugang.
 - Jobs aus „Nur lokal“-Ordnern werden vom Worker technisch nie an einen Cloud-Provider geroutet. Die Regel wird beim Versand
   geprüft, nicht nur beim Einplanen. Ein Test stellt sicher, dass kein Request dieser Ordner das Haus verlässt.
@@ -906,31 +908,42 @@ nicht dauerhaft davon lösen, denn manuelle Änderungen überschreibt das nächs
 
 
 ### 16.1 Anmeldung & Konten
-Ziel: eigene Konten, die so sicher sind wie bei einem guten Cloud-Dienst, **mit Einmalcode bei jeder Anmeldung**.
+Ziel: eigene Konten, die so sicher sind wie bei einem guten Cloud-Dienst. Jede Anmeldung braucht **zwei Faktoren**, wahlweise auf zwei Wegen:
+
+| Weg | Ablauf | Eigenschaften |
+|---|---|---|
+| **Passwort + TOTP** | Passwort, dann 6-stelliger Code aus einer Authenticator-App | funktioniert überall, auch auf fremden Geräten |
+| **Passkey** | ein Klick, entsperrt per Face ID/Touch ID/PIN (z.B. iCloud-Schlüsselbund, YubiKey) | **phishing-resistent**, kein Passwort nötig; zählt als beide Faktoren, weil die Nutzerprüfung (`userVerification = required`) Pflicht ist |
 
 - **Konten:** Es gibt keine Selbstregistrierung. Ein Admin legt Konten an, die Person bekommt einen zeitlich begrenzten Einladungslink.
-- **Passwort + TOTP ist Pflicht** bei jeder Anmeldung im Browser:
-  - TOTP nach RFC 6238 (6 Ziffern, 30 s, ±1 Zeitschritt Toleranz), kompatibel mit jeder Authenticator-App (Aegis, 2FAS, 1Password, Apple Passwörter).
-  - Die Einrichtung per QR-Code wird beim ersten Login erzwungen. Ohne TOTP gibt es keinen Zugang.
+- **Einrichtung beim ersten Login erzwungen:** mindestens **ein** zweiter Weg, also TOTP oder ein Passkey. Empfohlen werden zwei,
+  z.B. Passkey + TOTP oder zwei Passkeys, damit ein verlorenes Gerät nicht aussperrt.
+- **TOTP:**
+  - RFC 6238 (6 Ziffern, 30 s, ±1 Zeitschritt Toleranz), kompatibel mit jeder Authenticator-App (Aegis, 2FAS, 1Password, Apple Passwörter).
   - **Replay-Schutz:** Der zuletzt benutzte Zeitschritt wird pro Konto gespeichert, derselbe Code gilt nur einmal.
-  - TOTP-Geheimnisse liegen **verschlüsselt** in Postgres. Der Schlüssel kommt aus einem Docker-Secret, nicht aus der DB und nicht aus dem Backup.
-- **Wiederherstellungscodes:** 10 Einmalcodes bei der Einrichtung, nur als Hash gespeichert. Ein Admin kann TOTP zurücksetzen.
-  Das wird protokolliert und der Person gemeldet.
+  - Die TOTP-Geheimnisse liegen **verschlüsselt** in Postgres. Der Schlüssel kommt aus einem Docker-Secret, nicht aus der DB und nicht aus dem Backup.
+- **Passkeys (WebAuthn):**
+  - Umgesetzt mit `webauthn-rs`. Mehrere Passkeys pro Konto mit Namen („iPhone“, „YubiKey“), Zähler-Prüfung gegen geklonte Schlüssel.
+  - Die Relying-Party-ID ist die Domain (`<domain>`). Dadurch funktionieren Passkeys auch auf Subdomains wie `drive-lan.<domain>`.
+  - Einen neuen Passkey hinzufügen oder einen entfernen ist eine Step-up-Aktion.
+- **Wiederherstellungscodes:** 10 Einmalcodes bei der Einrichtung, nur als Hash gespeichert. Ein Admin kann die zweiten Faktoren
+  zurücksetzen. Das wird protokolliert und der Person gemeldet.
 - **Passwörter:** argon2id, Parameter auf dem J3455 kalibriert (~250 ms pro Prüfung). Mindestens 12 Zeichen. Abgleich gegen eine **lokale**
-  Liste häufiger und geleakter Passwörter, ohne Anfrage nach außen.
+  Liste häufiger und geleakter Passwörter, ohne Anfrage nach außen. Wer nur Passkeys nutzt, braucht trotzdem ein Passwort für den Notfall mit TOTP bzw. Wiederherstellungscode.
 - **Schutz vor Durchprobieren:** Rate-Limit pro IP und pro Konto, exponentielles Backoff und temporäre Sperre mit Benachrichtigung.
   Unbekannte Konten bekommen dieselbe Antwort und Antwortzeit wie falsche Passwörter.
-- **Web-Sitzungen:** Cookie mit `HttpOnly`, `Secure` und `SameSite=Strict`. Leerlauf-Timeout ~8 h, maximale Laufzeit ~7 Tage, danach wieder Passwort + OTP.
-  **Step-up:** Sensible Aktionen verlangen erneut einen OTP:
-  - Passwort oder TOTP ändern
+- **Web-Sitzungen:** Cookie mit `HttpOnly`, `Secure` und `SameSite=Strict`. Leerlauf-Timeout ~8 h, maximale Laufzeit ~7 Tage, danach erneute Anmeldung.
+  **Step-up:** Sensible Aktionen verlangen erneut einen **OTP oder Passkey**:
+  - Passwort, TOTP oder Passkeys ändern
   - öffentlichen Link anlegen
   - Datenklasse ändern
   - Gerät hinzufügen
   - Admin-Aktionen
 - **Geräte (Mac/iOS):**
-  - Anmeldung über den Browser-Flow (Passwort + OTP, PKCE). Danach gibt es ein **gerätegebundenes, rotierendes Refresh-Token** im Schlüsselbund.
+  - Anmeldung über den Browser-Flow (`ASWebAuthenticationSession`, PKCE) mit Passwort + OTP **oder Passkey**. Auf dem Mac und iPhone ist das meist
+    ein Touch-ID- bzw. Face-ID-Klick. Danach gibt es ein **gerätegebundenes, rotierendes Refresh-Token** im Schlüsselbund.
     Wird ein altes Token erneut benutzt, widerruft das sofort die ganze Kette.
-  - Zugriffstokens sind kurzlebig (~15 min). Pro Gerät ist alle N Tage eine erneute OTP-Bestätigung nötig (konfigurierbar, z.B. 30).
+  - Zugriffstokens sind kurzlebig (~15 min). Pro Gerät ist alle N Tage eine erneute Bestätigung per OTP oder Passkey nötig (konfigurierbar, z.B. 30).
   - Geräteliste mit Widerruf, Benachrichtigung bei Anmeldung eines neuen Geräts.
 - **Freigabe-Links** brauchen kein Konto. Sie haben ein optionales Passwort und eigene Rate-Limits (9.2).
 
@@ -962,7 +975,7 @@ Zuverlässigkeit entsteht durch Tests, nicht durch Hoffnung. Darum hat das Teste
    SSE durch den Reverse Proxy (keine Pufferung, Reconnect mit Cursor).
 8. **Datenschutz-Regel:** Integrationstest mit einem Fake-Cloud-Provider und einem Fake-S3. Aus „Nur lokal“-Ordnern darf dort kein
    einziger Request ankommen, weder KI noch Cache. Nach einem Klassenwechsel auf „Nur lokal“ müssen alle Cache-Objekte gelöscht sein.
-9. **Anmeldung:** TOTP-Replay, Zeitfenster-Grenzen, Sperren und Backoff, Step-up, Token-Rotation und Widerruf der Kette bei Wiederverwendung,
+9. **Anmeldung:** TOTP-Replay, Zeitfenster-Grenzen, Passkey-Registrierung und -Anmeldung (inkl. Zähler-Prüfung und `userVerification`), Sperren und Backoff, Step-up, Token-Rotation und Widerruf der Kette bei Wiederverwendung,
    gleiche Antwortzeiten bei unbekannten Konten.
 10. **S3-Kompatibilität:** Suite gegen MinIO in der CI und nachts gegen Hetzner und Scaleway. Geprüft werden Multipart, Range, signierte URLs, Löschen und Listen (15).
 11. **Last/Skalierung:** synthetischer Baum mit 3 Mio Dateien. Gemessen werden Listing, Sync, Suche und Erst-Indexierung gegen die Zielwerte.
@@ -1011,7 +1024,7 @@ Zwei parallele Stränge: **A – Server/Web/Suche** liefert früh Nutzen, währe
 
 | # | Meilenstein | Inhalt | Fertig, wenn … | Größe |
 |---|---|---|---|---|
-| **M0** | Fundament + DS918-Spike | Workspace, CI (Rust/Web/Apple, x86-64-v2 + QEMU-Check), Docker-Images, compose, Caddy-Beispiel, Postgres-Schema, **Auth (Passwort + TOTP-Pflicht, Wiederherstellungscodes, Sitzungen, Step-up)**, Admin-Grundgerüst. **Spike auf dem DS918+:** lokale Embedding-Laufzeit ohne AVX (ONNX vs. llama.cpp, e5-small vs. embeddinggemma), QUIC- vs. HTTP/2-Durchsatz, BLAKE3-Geschwindigkeit, **Subvolume-übergreifende Reflinks im `/volume1`-Mount**, Rechte-Durchsetzung für Benutzer `xlrx`, ACL-Vererbung, Temp-Dateien vs. Synology Drive, Hilfsdateien von Synology Drive. `Caddyfile` + compose für den Caddy-Container mit eigener IP (15.3). Router und DNS stellst du selbst um. | `docker compose up` auf der Synology zeigt den Login über die eigene Domain per HTTP/3. Messwerte stehen in `spikes/ds918/`. Anmeldung nur mit Passwort + OTP möglich | M |
+| **M0** | Fundament + DS918-Spike | Workspace, CI (Rust/Web/Apple, x86-64-v2 + QEMU-Check), Docker-Images, compose, Caddy-Beispiel, Postgres-Schema, **Auth (Passwort + TOTP oder Passkey, Wiederherstellungscodes, Sitzungen, Step-up)**, Admin-Grundgerüst. **Spike auf dem DS918+:** lokale Embedding-Laufzeit ohne AVX (ONNX vs. llama.cpp, e5-small vs. embeddinggemma), QUIC- vs. HTTP/2-Durchsatz, BLAKE3-Geschwindigkeit, **Subvolume-übergreifende Reflinks im `/volume1`-Mount**, Rechte-Durchsetzung für Benutzer `xlrx`, ACL-Vererbung, Temp-Dateien vs. Synology Drive, Hilfsdateien von Synology Drive. `Caddyfile` + compose für den Caddy-Container mit eigener IP (15.3). Router und DNS stellst du selbst um. | `docker compose up` auf der Synology zeigt den Login über die eigene Domain per HTTP/3. Messwerte stehen in `spikes/ds918/`. Anmeldung nur mit Passwort + OTP oder Passkey möglich | M |
 | **M1** | Server-Kern + Web-Basis | Speicher-Schnittstelle `ContentStore` mit `PlainFsStore` (4.6), Roots (bestehende Drive-Ordner einbinden), Watcher + Abgleich-Scan, Journal, Upload/Download (Chunks), Versionen (Reflink), Papierkorb, Web: Durchsuchen, Upload, Vorschau, Thumbnails | Web-UI zeigt die echten Daten aus Synology Drive, Änderungen per SMB erscheinen in Sekunden | L |
 | **B1** | Sync-Kern in Simulation | xlrx-chunk, xlrx-sync (sans-IO), xlrx-sim, Konfliktregeln, Invarianten | 1 Mio Seeds ohne Verletzung | L |
 | **M2** | Volltextsuche I | Tika-Extraktion, Tesseract-OCR, Tantivy (de/en), Filter/Syntax, Snippets, Rechte-Filter, Such-UI | Suche nach Inhalt in PDF/Office/Scans, p95 < 300 ms bei Bestandsgröße | M |
@@ -1047,7 +1060,7 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
 | inotify-Limits / alter Kernel | Limit anheben, Abgleich-Scans als Sicherheitsnetz |
 | Externe Änderungen kollidieren mit Uploads | Intent-Log, Prüfung vor dem Ersetzen, Konfliktkopie statt Überschreiben |
 | Breiter Mount von `/volume1` | Container nie als root, DSM-Rechte nur auf die nötigen Freigaben, Nachweis im Spike, Worker nur read-only |
-| Kontoübernahme | Passwort + TOTP-Pflicht, Replay-Schutz, Rate-Limits, Step-up, rotierende Gerätetokens, Benachrichtigungen (16.1) |
+| Kontoübernahme | zwei Faktoren Pflicht (Passwort + TOTP oder Passkey), Replay-Schutz, Rate-Limits, Step-up, rotierende Gerätetokens, Benachrichtigungen (16.1) |
 | Proxy-Umzug stört andere Dienste | Regeln vorher in die Caddyfile übernehmen, paralleler Test über eigene IP, Umschalten per Portweiterleitung, Rückweg jederzeit |
 | Bindung an einen Speicher-Anbieter | nur Kern-API von S3, Kompatibilitäts-Suite, Wechsel = Konfiguration bzw. `rclone`-Kopie (15) |
 | Projektumfang | strikte Meilensteine, Nicht-Ziele für v1 (siehe 1), früher Nutzen durch Strang A |
@@ -1068,7 +1081,7 @@ Alle Grundsatzfragen sind geklärt (Stand 2026-10-02):
 | Sensible Ordner | rechtlich begründet „Nur lokal“, pro Ordner frei konfigurierbar; Backup verschlüsselt nach S3 zulässig |
 | Cloud-Rolle | NAS bleibt Zentrale; S3 herstellerunabhängig (Start Hetzner) für Backup und Außen-Beschleuniger |
 | KI | Scaleway Generative APIs für „Cloud erlaubt“ |
-| Anmeldung | eigene Konten, Passwort + TOTP-Pflicht |
+| Anmeldung | eigene Konten, Passwort + TOTP **oder** Passkey |
 | Plattformen | Web, macOS, iOS; Windows/Android vorerst nicht |
 | Office | nur Vorschau, keine Microsoft-Office-Web-Integration |
 | Backup | Hyper Backup → S3 eingerichtet |
