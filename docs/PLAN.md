@@ -4,7 +4,7 @@
 > Volltextsuche, Teilen zwischen Benutzern, extrem effizienter und zuverlässiger Sync, Mac- und iOS-App.
 > Hosting: Docker (Container Manager) auf Synology, amd64.
 
-Stand: 2026-10-02 · Status: Entwurf v4 (+ Caddy statt DSM-Proxy, herstellerunabhängiges S3, Bandbreite 50 → 400 Mbit/s)
+Stand: 2026-10-02 · Status: v5 – alle Grundsatzfragen geklärt, bereit für M0
 
 ---
 
@@ -43,24 +43,27 @@ Stand: 2026-10-02 · Status: Entwurf v4 (+ Caddy statt DSM-Proxy, herstellerunab
 | Speichermodell | **Normale Dateien** auf dem Volume. Parallel nutzbar per SMB, File Station, Hyper Backup, Synology Photos. |
 | Mac-Client | **Beides, umschaltbar pro Sync-Ordner:** Spiegel-Ordner mit Selective Sync (Standard) **und** File-Provider-Modus (Dateien auf Abruf). |
 | Suche | Text aus PDF/Office/Mails, **OCR**, **semantische Suche**, **Bildsuche nach Inhalt**. |
-| ML-Rechenleistung | **Cloud-APIs mit Open-Source-Modellen**: Scaleway Generative APIs und/oder Cloudflare Workers AI. **Sensible Ordner bleiben lokal** und werden mit einem kleinen Embedding-Modell auf dem NAS durchsuchbar (siehe 7.5). Bei Bedarf kommt mehr lokale Rechenleistung über einen Rechner im Heimnetz (7.6). |
-| Datenklassen | Jeder Ordner ist **„Cloud erlaubt“** oder **„Nur lokal“** (vererbt). „Nur lokal“ ist **rechtlich begründet**, z.B. bei Gesundheitsdaten oder Daten Dritter. Diese Daten werden nie in der Cloud verarbeitet, auch nicht auf einer eigenen Cloud-VM. Sie landen in keinem S3-Cache und gehen nur clientseitig verschlüsselt ins Backup (siehe 7.4, 15.1). |
+| ML-Rechenleistung | **Cloud-APIs mit Open-Source-Modellen**: **Scaleway Generative APIs** (bestätigt), Cloudflare Workers AI als Alternative. **Sensible Ordner bleiben lokal** und werden mit einem kleinen Embedding-Modell auf dem NAS durchsuchbar (siehe 7.5). Bei Bedarf kommt mehr lokale Rechenleistung über einen Rechner im Heimnetz (7.6). |
+| Datenklassen | Jeder Ordner ist **„Cloud erlaubt“** oder **„Nur lokal“** (vererbt, **frei konfigurierbar**, keine feste Vorbelegung). „Nur lokal“ ist **rechtlich begründet**, z.B. bei Gesundheitsdaten oder Daten Dritter. Diese Daten werden nie in der Cloud verarbeitet, auch nicht auf einer eigenen Cloud-VM. Sie landen in keinem S3-Cache und gehen nur clientseitig verschlüsselt ins Backup (siehe 7.4, 15.1). |
 | Rolle der Cloud | **Das NAS bleibt die Zentrale.** Object Storage (S3) dient als **verschlüsseltes externes Backup** und als **Beschleuniger für den Zugriff von außen** (Freigabe-Links, Downloads unterwegs). Eine Speicher-Schnittstelle im Server hält einen späteren Umzug in die Cloud offen (4.6). **Herstellerunabhängig** über die S3-API, Start mit Hetzner. |
 | Nutzer | Familie/Team (bis ~20 Konten), Zugriff von unterwegs, **öffentliche Freigabe-Links**. |
 | Hardware | **DS918+**: Celeron J3455, 4 Kerne, **kein AVX**, DSM-Kernel 4.4, 16–20 GB RAM, **SSD-Lese-/Schreib-Cache**. Besonderheiten siehe 3.1. |
-| Bestandsdaten | `homes/<user>/Drive` (Synology Drive). Diese Ordner werden direkt als „Meine Ablage“ eingebunden. |
+| Bestandsdaten | `homes/<user>/Drive` (Synology Drive) wird direkt als „Meine Ablage“ eingebunden, die **Synology-Drive-Team-Ordner als „Geteilte Ablagen“** (4.1). |
 | Zugriff von außen | Eigene Domain, Portweiterleitung. Der heutige DSM-Reverse-Proxy wird durch einen **Caddy-Container mit eigener IP** (macvlan) ersetzt, der HTTP/3 kann (siehe 5.9, 15). |
 | Heimanschluss | Upload heute **50 Mbit/s**, ab **Januar 2027 400 Mbit/s**. |
 | Transport | **Alles über HTTPS auf Port 443**, bevorzugt **HTTP/3 (QUIC)**, automatischer Fallback auf HTTP/2 über TCP (siehe 5.9). |
 | Apple | Apple Developer Account ist vorhanden. |
+| Anmeldung | **Eigene Konten. Passwort + TOTP-Einmalcode bei jeder Anmeldung (Pflicht)**, Wiederherstellungscodes, Step-up-OTP für sensible Aktionen, widerrufbare Gerätetokens (16.1). Kein LDAP/SSO. |
+| Plattformen v1 | Web, macOS, iOS. **Windows/Android vorerst nicht.** Der Rust-Kern hält sie für später offen. |
+| Office | **Nur Vorschau** (lokal per LibreOffice → PDF). **Keine Microsoft-Office-Web-Integration** (kein Office Online/Microsoft 365/WOPI zu Microsoft). Bearbeiten lokal in den Desktop-Apps über den Sync. |
+| Backup | Hyper Backup nach S3 ist **eingerichtet** (Stand 2026-10). |
 | Datenmenge | 300k – 3 Mio Dateien, mehrere TB. |
 | Tech-Stack | **Rust** (Server + gemeinsame Sync-Engine), **Swift/SwiftUI** (Mac/iOS, Engine via UniFFI), **SvelteKit/TypeScript** (Web). |
 
-### Annahmen (bitte korrigieren, falls falsch)
+### Annahmen & Nicht-Ziele
 
-- **Login:** eigene Konten mit Passwort (argon2id) + **Passkeys** + TOTP-2FA. OIDC (z.B. Authentik, Synology SSO Server) erst später, optional.
-- **Plattformen v1:** Web, macOS, iOS. Windows/Linux/Android später. Der Rust-Kern macht das vorbereitet möglich.
-- **Nicht in v1:** Office-Bearbeitung im Browser (später Collabora/OnlyOffice via WOPI), Gesichtserkennung, Ende-zu-Ende-Verschlüsselung, Kommentare an Dateien.
+- **Nicht in v1:** Bearbeiten im Browser (falls je, dann nur selbst gehostet, z.B. Collabora; **nie Microsoft**), Gesichtserkennung,
+  Ende-zu-Ende-Verschlüsselung, Kommentare an Dateien, Passkeys (später optional als zusätzlicher Faktor), LDAP/SSO.
 - **Mindestversionen:** macOS 15, iOS 18 (Vorschlag, weil die File-Provider-APIs dort ausgereift sind).
 
 ### Warum Eigenbau und nicht Seafile/Nextcloud/oCIS?
@@ -161,8 +164,9 @@ Ein **Hardware-Spike in M0** misst die echten Werte auf deinem Gerät, bevor Fea
 - Durchsatz des lokalen Embedding-Modells
 - QUIC- und HTTP/2-Durchsatz
 - Hash-Geschwindigkeit
-- Reflinks im `homes`-Mount
-- Vererbung der Synology-ACLs
+- Subvolume-übergreifende Reflinks im `/volume1`-Mount
+- Rechte-Durchsetzung für den Benutzer `xlrx` und Vererbung der Synology-ACLs
+- Verhalten von Synology Drive bei kurzlebigen Temp-Dateien
 
 ---
 
@@ -171,49 +175,62 @@ Ein **Hardware-Spike in M0** misst die echten Werte auf deinem Gerät, bevor Fea
 ### 4.1 Layout
 
 ```
-/volume1/homes/                       ← Synology-Freigabe "homes" (Btrfs), im Container: /mnt/homes
-  klaus/Drive/…                       ← "Meine Ablage" von klaus (bestehender Synology-Drive-Ordner)
-  anna/Drive/…
-  .xlrx/                              ← nur für den Container-Benutzer (Rechte 700)
-    versions/ab/cd/<blake3>           ← alte Versionen (Reflink-Kopien, inhaltsadressiert)
-    trash/<node-id>/…                 ← Papierkorb (Verschieben = rename, 30 Tage)
-    staging/<upload-id>               ← laufende Uploads
-
-/volume1/xlrx-spaces/                 ← neue Freigabe für "Geteilte Ablagen", im Container: /mnt/spaces
-  familie/…                           ← wie Google Shared Drives
-  buero/…
-  .xlrx/                              ← eigener Versions-/Papierkorb-Bereich für diesen Mount
+/volume1/                                 ← das ganze Volume, EIN Mount, im Container: /mnt/volume1
+  homes/klaus/Drive/…                     ← "Meine Ablage" (bestehender Synology-Drive-Ordner)
+  homes/anna/Drive/…
+  Familie/…                               ← bestehender Synology-Drive-Team-Ordner → "Geteilte Ablage"
+  Buero/…                                 ← dito
+  xlrx-state/                             ← eigene Freigabe: nur Benutzer xlrx, im Netzwerk verborgen
+    store/versions/ab/cd/<blake3>         ← alte Versionen (Reflink-Klone, inhaltsadressiert)
+    store/trash/<node-id>/…               ← Papierkorb (30 Tage)
+    store/staging/<upload-id>             ← Uploads im Aufbau
+    db/  index/  thumbs/                  ← Postgres, Tantivy, Vorschauen (abgeleitet, nicht gesichert)
+    dumps/                                ← nächtlicher pg_dump (→ Hyper Backup)
 ```
 
-- **Roots sind konfigurierbar:** Jede „Meine Ablage“ und jede geteilte Ablage zeigt auf einen Pfad im Container.
-  Die **bestehenden Ordner `homes/<user>/Drive` werden direkt eingebunden**. Migration bedeutet Einbinden statt Kopieren.
-- **Ein `.xlrx/` pro Mount:** Btrfs-Reflinks funktionieren nur innerhalb desselben Mounts; über Mount-Grenzen
-  hinweg lehnt der Kernel Clone-Operationen ab. Deshalb wird `homes` **als Ganzes** gemountet statt
-  jeder `Drive`-Ordner einzeln. `.xlrx` liegt auf oberster Ebene von `homes`. Normale Nutzer sehen per SMB nur ihre
-  eigene `home`-Freigabe, die übergeordnete `homes`-Freigabe sehen nur Admins.
-  Versionen und Papierkorb liegen bewusst **nicht** im `Drive`-Ordner. Sonst würde Synology Drive sie in der Parallelphase auf die Macs synchronisieren.
-- **Rechte:** Ein DSM-Benutzer `xlrx` bekommt Lese-/Schreibrechte auf `homes` und `xlrx-spaces`. Ob neue Dateien die
-  Synology-ACLs des Elternordners erben, sodass der jeweilige Nutzer sie per SMB weiter bearbeiten kann, wird im
-  M0-Spike geprüft. Falls nicht, setzt der Server die Rechte nach dem Schreiben explizit.
-- **Parallelphase mit Synology Drive:** Was xlrx in `Drive`-Ordner schreibt, synchronisiert Synology Drive weiter auf
+- **Warum das ganze Volume:** Jede Synology-Freigabe (`homes`, jeder Team-Ordner, `xlrx-state`) ist ein eigenes Btrfs-Subvolume.
+  Reflinks funktionieren zwischen Subvolumes desselben Dateisystems, aber **nur innerhalb desselben Mounts**.
+  Ein einziger Mount von `/volume1` erlaubt deshalb einen **zentralen** Bereich für Versionen und Papierkorb in `xlrx-state`.
+  In den Freigaben der Nutzer liegen damit keine versteckten xlrx-Ordner. Synology Drive, SMB und File Station sehen davon nichts.
+- **Roots sind konfigurierbar:**
+  - `homes/<user>/Drive` → „Meine Ablage“ der Person
+  - **bestehende Synology-Drive-Team-Ordner → „Geteilte Ablagen“**. Mitglieder und Rollen werden in xlrx gepflegt (eigene Konten, 9.1).
+  - neue geteilte Ablagen → neue Freigabe oder Unterordner einer bestehenden
+
+  Migration bedeutet Einbinden statt Kopieren.
+- **Rechte eng trotz breitem Mount:** Der Container läuft **nie als root**, sondern als DSM-Benutzer `xlrx`. Dieser hat DSM-Rechte nur auf `homes`,
+  die eingebundenen Team-Ordner und `xlrx-state`. Die Rechte werden direkt dem Benutzer gegeben, nicht nur über Gruppen.
+  Der Kernel setzt die Synology-ACLs auch im Container durch, alles andere auf dem Volume bleibt unzugänglich. Das wird im M0-Spike nachgewiesen.
+  Ebenso wird geprüft, ob neue Dateien die ACLs des Elternordners erben, damit Nutzer sie per SMB weiter bearbeiten können.
+  Falls nicht, setzt der Server die Rechte nach dem Schreiben explizit.
+- **Verschlüsselte Freigaben** (eCryptfs) sind eigene Mounts. Dort gibt es keine Reflinks, Versionen werden normal kopiert.
+- **Parallelphase mit Synology Drive:** Was xlrx in `Drive`- und Team-Ordner schreibt, synchronisiert Synology Drive weiter auf
   die Macs, und umgekehrt sieht xlrx Änderungen von Synology Drive als externe Änderungen (4.4). Einzige Regel:
   Auf einem Mac nie Synology-Drive-Client und xlrx-Client auf **denselben** lokalen Ordner loslassen.
 
 ### 4.2 Versionen ohne Platzkosten (Btrfs-Reflinks)
-Bevor eine Datei überschrieben wird, legt der Server einen **Reflink-Klon** der alten Version unter
-`.xlrx/versions/` an (`FICLONE`/`BTRFS_IOC_CLONE`). Das kostet keine Zeit und keinen Platz, solange sich die Blöcke nicht unterscheiden.
-Fallback auf ext4: normale Kopie. Aufbewahrung konfigurierbar, z.B. alle Versionen 30 Tage, danach täglich/wöchentlich, max. N.
+Bevor eine Datei überschrieben wird, legt der Server einen **Reflink-Klon** der alten Version unter `xlrx-state/store/versions/` an
+(`FICLONE`/`BTRFS_IOC_CLONE`, Subvolume-übergreifend im selben Mount). Das kostet keine Zeit und keinen Platz, solange sich die Blöcke nicht unterscheiden.
+Fallback ohne Reflink: normale Kopie. Aufbewahrung konfigurierbar, z.B. alle Versionen 30 Tage, danach täglich/wöchentlich, max. N.
 
 ### 4.3 Atomare Schreibvorgänge & Absturzsicherheit
+`rename` funktioniert nur innerhalb eines Subvolumes. Der Upload wird deshalb zentral aufgebaut und erst im letzten Schritt
+per Reflink in den Zielordner geholt.
+
 Commit eines Uploads:
 1. **Intent** in Postgres schreiben (`pending_ops`: was soll passieren, mit welcher Basis-Version).
-2. Datei in `staging/` zusammensetzen, `fsync`, BLAKE3 der ganzen Datei prüfen.
+2. Datei in `xlrx-state/store/staging/` zusammensetzen, `fsync`, BLAKE3 der ganzen Datei prüfen.
 3. Prüfen, ob die Zieldatei noch der erwarteten Version entspricht (inode/size/mtime/ctime + ggf. Hash).
-4. Alte Version per Reflink nach `versions/`, dann `rename(staging → ziel)`, `fsync` des Verzeichnisses.
-5. DB-Transaktion: Knoten, Version, Journal-Eintrag, Intent erledigt.
+4. Alte Version per Reflink nach `store/versions/`.
+5. Staging-Datei per Reflink in eine **kurzlebige Temp-Datei im Zielordner** klonen (`.xlrx-tmp-<id>`), dann `fsync`.
+   Das sind nur Metadaten und dauert auch bei großen Dateien Millisekunden.
+6. `rename(temp → ziel)`, `fsync` des Verzeichnisses.
+7. DB-Transaktion: Knoten, Version, Journal-Eintrag, Intent erledigt.
 
-Nach einem Absturz arbeitet der Server beim Start alle offenen Intents **idempotent** ab (vorwärts oder zurück).
-Die mtime des Clients wird übernommen (`utimensat`), damit SMB-Nutzer echte Änderungsdaten sehen.
+Löschen funktioniert analog: Reflink in `store/trash/`, dann `unlink`. Wiederherstellen geht den umgekehrten Weg.
+Nach einem Absturz arbeitet der Server beim Start alle offenen Intents **idempotent** ab (vorwärts oder zurück) und räumt
+verwaiste Temp-Dateien weg. Die mtime des Clients wird übernommen (`utimensat`), damit SMB-Nutzer echte Änderungsdaten sehen.
+Der M0-Spike prüft, dass Synology Drive die Temp-Dateien in der Parallelphase nicht mitsynchronisiert, weil sie nur Millisekunden existieren.
 
 ### 4.4 Externe Änderungen erkennen (SMB, File Station, Synology Drive, Fotos-App …)
 - **inotify** auf allen Verzeichnissen. Das Limit `fs.inotify.max_user_watches` muss per DSM-Aufgabenplaner beim Boot angehoben werden
@@ -227,7 +244,7 @@ Die mtime des Clients wird übernommen (`utimensat`), damit SMB-Nutzer echte Än
 - Externe Änderungen werden ins **Journal** übernommen wie jede andere Änderung. Die Zuordnung zum Benutzer
   geschieht nach bestem Wissen über die Datei-UID; sonst wird „extern“ angezeigt.
 - **Ignoriert:** `@eaDir`, `#recycle`, `#snapshot`, `.SynologyWorkingDirectory`, `@tmp`, `.DS_Store`, `._*`,
-  `Thumbs.db`, `~$*`-Lock-Dateien, `.xlrx` selbst. Die genauen Hilfsdateien von Synology Drive in `homes/<user>/Drive`
+  `Thumbs.db`, `~$*`-Lock-Dateien, eigene Temp-Dateien `.xlrx-tmp-*`. Die genauen Hilfsdateien von Synology Drive in `homes/<user>/Drive`
   werden im M0-Spike erfasst und ergänzt.
 - Hinweis: Der DSM-Kernel ist je nach Modell 4.4 oder 5.10. Darum setzt der Plan kein dateisystemweites fanotify voraus.
 
@@ -599,6 +616,8 @@ bei neuen Freigaben. Pro Person einstellbar.
 
 ### 9.1 Modell
 - **Meine Ablage** pro Person und **Geteilte Ablagen** (Team-Ordner mit Mitgliedern und Rollen, gehören keiner Einzelperson).
+  Die bestehenden **Synology-Drive-Team-Ordner** werden als Geteilte Ablagen eingebunden. Ihre Mitglieder legt ein Admin beim Einbinden in xlrx fest,
+  weil xlrx eigene Konten nutzt. Die DSM-Rechte für SMB bleiben unabhängig davon bestehen.
 - **Freigaben** auf Ordner oder Datei an Person oder Gruppe mit Rolle **Betrachter**, **Bearbeiter** oder **Verwalter** (darf weiter teilen).
   Optional mit Ablaufdatum. Rechte vererben sich nach unten.
 - **„Für mich freigegeben“** listet alles, was andere mit dir teilen. Ein Element kann per Verknüpfung in „Meine Ablage“ gelegt werden
@@ -636,7 +655,7 @@ Funktionen:
   damit Dedup und Delta auch im Browser funktionieren.
 - **Vorschau:**
   - Bilder inkl. HEIC/RAW (serverseitig konvertiert) und PDF (pdf.js)
-  - Office/Pages (LibreOffice → PDF im Worker)
+  - Office/Pages (LibreOffice → PDF im Worker, rein lokal; **keine Microsoft-Office-Web-Integration**)
   - Video/Audio (Range-Streaming)
   - Text/Markdown/Code (Highlighting)
 - Detailbereich: Infos, **Versionen** (ansehen/wiederherstellen), Aktivität, Freigaben.
@@ -691,9 +710,10 @@ Finder-Tags synchronisieren.
 Skizze der wichtigsten Tabellen:
 
 ```
-users(id, username, display_name, email, password_hash, is_admin, quota_bytes, …)
+users(id, username, display_name, email, password_hash, totp_secret_enc, totp_last_step, is_admin, quota_bytes, …)
 groups(id, name) · group_members(group_id, user_id)
-passkeys(id, user_id, credential, …) · devices(id, user_id, name, platform, refresh_token_hash, last_seen)
+recovery_codes(user_id, code_hash, used_at) · sessions(id, user_id, created_at, last_seen, step_up_at)
+devices(id, user_id, name, platform, refresh_token_hash, token_family, last_otp_at, last_seen)
 roots(id, kind[user|space], host_path, owner_user_id | space_id, ai_allowed)
 spaces(id, name) · space_members(space_id, principal_type, principal_id, role)
 
@@ -742,7 +762,8 @@ REST/JSON unter `/api`, OpenAPI-Spezifikation generiert. Auth per Session-Cookie
 Geräte melden sich per Browser-Login mit PKCE an. Pro Gerät gibt es einen widerrufbaren Refresh-Token.
 
 ```
-Auth      POST /auth/login · /auth/webauthn/* · /auth/totp · /auth/device/* · GET /me/devices
+Auth      POST /auth/login (Passwort) → POST /auth/otp (TOTP oder Wiederherstellungscode) · POST /auth/otp/setup
+          POST /auth/step-up · /auth/device/* (Browser-Flow mit PKCE) · GET/DELETE /me/devices · GET /me/sessions
 Nodes     GET /nodes/{id} · /nodes/{id}/children · POST /nodes (Ordner) · PATCH /nodes/{id} (rename/move)
           DELETE /nodes/{id} (→ Papierkorb) · POST /nodes/{id}/restore · GET /nodes/{id}/versions
 Inhalt    GET /content/{version} (Range; von außen ggf. 307 → signierte S3-URL, 15.2) · GET /thumb/{hash}/{size} · GET /preview/{version}
@@ -762,7 +783,8 @@ Metriken  /metrics (Prometheus) · /healthz
 - **Container Manager → Projekt** mit `docker-compose.yml` (liegt unter `deploy/`). Dienste: `xlrx-server`, `xlrx-worker`, `postgres`,
   `tika`, `embed-local`, `caddy` (eigene IP, siehe 15.3). Images werden per GitHub Actions für amd64 **mit x86-64-v2 als Basis** gebaut (kein AVX, siehe 3.1)
   und in GHCR veröffentlicht.
-- Ein eigener DSM-Benutzer `xlrx` (PUID/PGID) mit Lese-/Schreibrechten auf `homes` und `xlrx-spaces`. Der Worker mountet die Daten **read-only**.
+- Ein eigener DSM-Benutzer `xlrx` (PUID/PGID, nie root) mit Lese-/Schreibrechten nur auf `homes`, die eingebundenen Team-Ordner und `xlrx-state`.
+  `/volume1` wird als Ganzes gemountet (4.1). Der Worker mountet es **read-only**.
   CPU-Limits in compose: Worker und `embed-local` zusammen max. 2 Kerne tagsüber.
 - **Boot-Aufgabe** (Aufgabenplaner, root):
   `sysctl -w fs.inotify.max_user_watches=1048576 net.core.rmem_max=7500000 net.core.wmem_max=7500000`
@@ -787,9 +809,9 @@ Metriken  /metrics (Prometheus) · /healthz
 ### 15.1 Backup (3-2-1)
 | Ebene | Was | Schützt vor |
 |---|---|---|
-| Btrfs-Snapshots (Snapshot Replication), stündlich/täglich | `homes`, `xlrx-spaces` | Versehentliches Löschen, Ransomware über SMB (Snapshots sind schreibgeschützt, optional unveränderlich) |
+| Btrfs-Snapshots (Snapshot Replication), stündlich/täglich | `homes`, Team-Ordner | Versehentliches Löschen, Ransomware über SMB (Snapshots sind schreibgeschützt, optional unveränderlich) |
 | xlrx-Versionen + Papierkorb | jede Datei | Überschreiben, Sync-Fehler |
-| **Hyper Backup → S3**, nächtlich, **clientseitig verschlüsselt** | `homes`, `xlrx-spaces` inkl. `.xlrx/versions`, `pg_dump`-Ordner | Ausfall, Diebstahl, Brand des NAS |
+| **Hyper Backup → S3**, nächtlich, **clientseitig verschlüsselt** (eingerichtet) | `homes`, Team-Ordner; sobald xlrx läuft zusätzlich `xlrx-state/dumps` und `xlrx-state/store/versions` | Ausfall, Diebstahl, Brand des NAS |
 
 - **Verschlüsselung:** Hyper-Backup-Verschlüsselung ist Pflicht. Passwort und Schlüsseldatei liegen offline (Passwortmanager + Papier im Haus).
   Ohne sie gibt es keine Wiederherstellung. Der Anbieter sieht nur verschlüsselte Blöcke.
@@ -810,7 +832,8 @@ Metriken  /metrics (Prometheus) · /healthz
   Fallback: **restic** im Container. Es ist ebenfalls verschlüsselt, dedupliziert und arbeitet herstellerunabhängig mit S3.
 - **Kosten** für 3 TB bei Hetzner: ~19 €/Monat. Glacier-Klassen sind billiger, passen aber nicht, weil Hyper Backup direkten Lesezugriff braucht.
 - **Wiederherstellung üben:** Vierteljährlich einen zufälligen Ordner und den `pg_dump` in eine Testumgebung zurückspielen. Der Admin-Bereich erinnert daran.
-- Das Backup ist eine **Sofortmaßnahme in M0**. Es braucht keine Entwicklung und schützt die Daten schon heute.
+- **Status:** Das Backup ist eingerichtet. Offen bleiben eine erste Wiederherstellungsprobe (falls noch nicht gemacht) und die Ergänzung um
+  `xlrx-state/dumps` und `store/versions`, sobald xlrx produktiv läuft. `xlrx-state/db`, `index` und `thumbs` bleiben ausgenommen.
 
 ### 15.2 Außen-Beschleuniger (S3-Cache)
 **Problem:** Jeder Download von außen, über Freigabe-Links oder vom Handy unterwegs, läuft durch den Upload des Heimanschlusses
@@ -843,6 +866,8 @@ und durch die schwache NAS-CPU.
 - **Zugangsdaten getrennt:** eigener Bucket und eigener API-Schlüssel nur für den Cache. Hyper Backup hat einen anderen Schlüssel für den Backup-Bucket.
 
 ### 15.3 Caddy statt DSM-Reverse-Proxy
+Router, DNS und die Übernahme bestehender DSM-Proxy-Regeln erledigst du selbst. xlrx liefert dafür `Caddyfile`, compose-Konfiguration und diese Anleitung.
+
 **Warum eine eigene IP:** Das nginx von DSM belegt auf dem NAS selbst die Ports 80 und 443 (Web Station, DSM-Reverse-Proxy). Es lässt sich
 nicht dauerhaft davon lösen, denn manuelle Änderungen überschreibt das nächste DSM-Update. Deshalb bekommt Caddy per **macvlan** eine
 **eigene IP im Heimnetz**, z.B. `192.168.1.20`, und lauscht dort ungestört auf TCP 80/443 und UDP 443.
@@ -868,7 +893,7 @@ nicht dauerhaft davon lösen, denn manuelle Änderungen überschreibt das nächs
 ## 16. Sicherheit
 
 - TLS überall, HSTS, strikte CSP, `SameSite`-Cookies, CSRF-Schutz.
-- Passwörter mit argon2id, Passkeys, TOTP. Login-Rate-Limiting und Sperren. Gerätetokens widerrufbar.
+- Anmeldung mit Passwort + TOTP-Pflicht, Details siehe 16.1.
 - Postgres, Tika und `embed-local` nur im internen Docker-Netz. Der Worker darf nur zum KI-Anbieter. `embed-local` hat gar keinen Internetzugang.
 - Jobs aus „Nur lokal“-Ordnern werden vom Worker technisch nie an einen Cloud-Provider geroutet. Die Regel wird beim Versand
   geprüft, nicht nur beim Einplanen. Ein Test stellt sicher, dass kein Request dieser Ordner das Haus verlässt.
@@ -878,6 +903,36 @@ nicht dauerhaft davon lösen, denn manuelle Änderungen überschreibt das nächs
   Objektnamen sind Hashes, sie enthalten keine Datei- oder Pfadnamen.
 - Audit-Log für Admin-Aktionen, Freigaben und Link-Zugriffe.
 - `cargo audit`/`cargo deny` und `npm audit` in der CI. Security-Review vor dem Öffnen nach außen.
+
+
+### 16.1 Anmeldung & Konten
+Ziel: eigene Konten, die so sicher sind wie bei einem guten Cloud-Dienst, **mit Einmalcode bei jeder Anmeldung**.
+
+- **Konten:** Es gibt keine Selbstregistrierung. Ein Admin legt Konten an, die Person bekommt einen zeitlich begrenzten Einladungslink.
+- **Passwort + TOTP ist Pflicht** bei jeder Anmeldung im Browser:
+  - TOTP nach RFC 6238 (6 Ziffern, 30 s, ±1 Zeitschritt Toleranz), kompatibel mit jeder Authenticator-App (Aegis, 2FAS, 1Password, Apple Passwörter).
+  - Die Einrichtung per QR-Code wird beim ersten Login erzwungen. Ohne TOTP gibt es keinen Zugang.
+  - **Replay-Schutz:** Der zuletzt benutzte Zeitschritt wird pro Konto gespeichert, derselbe Code gilt nur einmal.
+  - TOTP-Geheimnisse liegen **verschlüsselt** in Postgres. Der Schlüssel kommt aus einem Docker-Secret, nicht aus der DB und nicht aus dem Backup.
+- **Wiederherstellungscodes:** 10 Einmalcodes bei der Einrichtung, nur als Hash gespeichert. Ein Admin kann TOTP zurücksetzen.
+  Das wird protokolliert und der Person gemeldet.
+- **Passwörter:** argon2id, Parameter auf dem J3455 kalibriert (~250 ms pro Prüfung). Mindestens 12 Zeichen. Abgleich gegen eine **lokale**
+  Liste häufiger und geleakter Passwörter, ohne Anfrage nach außen.
+- **Schutz vor Durchprobieren:** Rate-Limit pro IP und pro Konto, exponentielles Backoff und temporäre Sperre mit Benachrichtigung.
+  Unbekannte Konten bekommen dieselbe Antwort und Antwortzeit wie falsche Passwörter.
+- **Web-Sitzungen:** Cookie mit `HttpOnly`, `Secure` und `SameSite=Strict`. Leerlauf-Timeout ~8 h, maximale Laufzeit ~7 Tage, danach wieder Passwort + OTP.
+  **Step-up:** Sensible Aktionen verlangen erneut einen OTP:
+  - Passwort oder TOTP ändern
+  - öffentlichen Link anlegen
+  - Datenklasse ändern
+  - Gerät hinzufügen
+  - Admin-Aktionen
+- **Geräte (Mac/iOS):**
+  - Anmeldung über den Browser-Flow (Passwort + OTP, PKCE). Danach gibt es ein **gerätegebundenes, rotierendes Refresh-Token** im Schlüsselbund.
+    Wird ein altes Token erneut benutzt, widerruft das sofort die ganze Kette.
+  - Zugriffstokens sind kurzlebig (~15 min). Pro Gerät ist alle N Tage eine erneute OTP-Bestätigung nötig (konfigurierbar, z.B. 30).
+  - Geräteliste mit Widerruf, Benachrichtigung bei Anmeldung eines neuen Geräts.
+- **Freigabe-Links** brauchen kein Konto. Sie haben ein optionales Passwort und eigene Rate-Limits (9.2).
 
 ---
 
@@ -907,9 +962,11 @@ Zuverlässigkeit entsteht durch Tests, nicht durch Hoffnung. Darum hat das Teste
    SSE durch den Reverse Proxy (keine Pufferung, Reconnect mit Cursor).
 8. **Datenschutz-Regel:** Integrationstest mit einem Fake-Cloud-Provider und einem Fake-S3. Aus „Nur lokal“-Ordnern darf dort kein
    einziger Request ankommen, weder KI noch Cache. Nach einem Klassenwechsel auf „Nur lokal“ müssen alle Cache-Objekte gelöscht sein.
-9. **S3-Kompatibilität:** Suite gegen MinIO in der CI und nachts gegen Hetzner und Scaleway. Geprüft werden Multipart, Range, signierte URLs, Löschen und Listen (15).
-10. **Last/Skalierung:** synthetischer Baum mit 3 Mio Dateien. Gemessen werden Listing, Sync, Suche und Erst-Indexierung gegen die Zielwerte.
-11. **Dogfooding:** mehrere Wochen produktiver Eigenbetrieb **bevor** Synology Drive abgelöst wird.
+9. **Anmeldung:** TOTP-Replay, Zeitfenster-Grenzen, Sperren und Backoff, Step-up, Token-Rotation und Widerruf der Kette bei Wiederverwendung,
+   gleiche Antwortzeiten bei unbekannten Konten.
+10. **S3-Kompatibilität:** Suite gegen MinIO in der CI und nachts gegen Hetzner und Scaleway. Geprüft werden Multipart, Range, signierte URLs, Löschen und Listen (15).
+11. **Last/Skalierung:** synthetischer Baum mit 3 Mio Dateien. Gemessen werden Listing, Sync, Suche und Erst-Indexierung gegen die Zielwerte.
+12. **Dogfooding:** mehrere Wochen produktiver Eigenbetrieb **bevor** Synology Drive abgelöst wird.
 
 ---
 
@@ -954,11 +1011,11 @@ Zwei parallele Stränge: **A – Server/Web/Suche** liefert früh Nutzen, währe
 
 | # | Meilenstein | Inhalt | Fertig, wenn … | Größe |
 |---|---|---|---|---|
-| **M0** | Fundament + DS918-Spike | Workspace, CI (Rust/Web/Apple, x86-64-v2 + QEMU-Check), Docker-Images, compose, Caddy-Beispiel, Postgres-Schema, Auth (Passwort + Passkey), Admin-Grundgerüst. **Spike auf dem DS918+:** lokale Embedding-Laufzeit ohne AVX (ONNX vs. llama.cpp, e5-small vs. embeddinggemma), QUIC- vs. HTTP/2-Durchsatz, BLAKE3-Geschwindigkeit, Reflinks im `homes`-Mount, ACL-Vererbung, Hilfsdateien von Synology Drive. **Caddy-Container mit eigener IP ersetzt den DSM-Reverse-Proxy** (15.3). **Sofortmaßnahme ohne Code:** verschlüsseltes Hyper Backup → Hetzner-S3, priorisiert, + Snapshot-Plan (15.1); Fallback restic | `docker compose up` auf der Synology zeigt den Login über die eigene Domain per HTTP/3. Messwerte stehen in `spikes/ds918/`. Erstes Backup ist durchgelaufen, eine Test-Wiederherstellung hat geklappt | M |
+| **M0** | Fundament + DS918-Spike | Workspace, CI (Rust/Web/Apple, x86-64-v2 + QEMU-Check), Docker-Images, compose, Caddy-Beispiel, Postgres-Schema, **Auth (Passwort + TOTP-Pflicht, Wiederherstellungscodes, Sitzungen, Step-up)**, Admin-Grundgerüst. **Spike auf dem DS918+:** lokale Embedding-Laufzeit ohne AVX (ONNX vs. llama.cpp, e5-small vs. embeddinggemma), QUIC- vs. HTTP/2-Durchsatz, BLAKE3-Geschwindigkeit, **Subvolume-übergreifende Reflinks im `/volume1`-Mount**, Rechte-Durchsetzung für Benutzer `xlrx`, ACL-Vererbung, Temp-Dateien vs. Synology Drive, Hilfsdateien von Synology Drive. `Caddyfile` + compose für den Caddy-Container mit eigener IP (15.3). Router und DNS stellst du selbst um. | `docker compose up` auf der Synology zeigt den Login über die eigene Domain per HTTP/3. Messwerte stehen in `spikes/ds918/`. Anmeldung nur mit Passwort + OTP möglich | M |
 | **M1** | Server-Kern + Web-Basis | Speicher-Schnittstelle `ContentStore` mit `PlainFsStore` (4.6), Roots (bestehende Drive-Ordner einbinden), Watcher + Abgleich-Scan, Journal, Upload/Download (Chunks), Versionen (Reflink), Papierkorb, Web: Durchsuchen, Upload, Vorschau, Thumbnails | Web-UI zeigt die echten Daten aus Synology Drive, Änderungen per SMB erscheinen in Sekunden | L |
 | **B1** | Sync-Kern in Simulation | xlrx-chunk, xlrx-sync (sans-IO), xlrx-sim, Konfliktregeln, Invarianten | 1 Mio Seeds ohne Verletzung | L |
 | **M2** | Volltextsuche I | Tika-Extraktion, Tesseract-OCR, Tantivy (de/en), Filter/Syntax, Snippets, Rechte-Filter, Such-UI | Suche nach Inhalt in PDF/Office/Scans, p95 < 300 ms bei Bestandsgröße | M |
-| **M3** | Teilen, Aktivität, Startseite | Ablagen, Gruppen, **Datenklassen pro Ordner (7.4)**, Freigaben, Links, Aktivitätsstream, Vorschläge, Benachrichtigungen | Familie nutzt Web-UI für Teilen und findet Dinge über die Startseite | L |
+| **M3** | Teilen, Aktivität, Startseite | Ablagen (inkl. Einbinden der Synology-Drive-Team-Ordner), Gruppen, **Datenklassen pro Ordner (7.4)**, Freigaben, Links, Aktivitätsstream, Vorschläge, Benachrichtigungen | Familie nutzt Web-UI für Teilen und findet Dinge über die Startseite | L |
 | **M3b** | Außen-Beschleuniger | `S3CacheStore`, Spiegeln von Link-Dateien, Vorausladen für Personen unterwegs, 307 auf signierte URLs, Aufräumen, Datenklassen-Prüfung (15.2) | Ein Link auf ein 2-GB-Video lädt extern mit voller Geschwindigkeit, ohne den Heimanschluss zu belasten. „Nur lokal“-Inhalte nachweislich nie im Bucket | M |
 | **M4** | KI-Suche | Provider-Abstraktion (Scaleway/Cloudflare/lokal), Vision-Analyse, Embeddings, **lokales Embedding-Modell + CLIP für „Nur lokal“-Ordner**, drei Vektor-Indizes, hybride Rangfolge, Budget, Kostenschätzung | „Rechnung Heizung 2025“ und „Hund am Strand“ liefern sinnvolle Treffer. Sensible Ordner sind semantisch und nach Bildinhalt durchsuchbar, ohne dass ein Byte das Heimnetz verlässt. Kosten im Rahmen | M–L |
 | **M5** | Mac-App (Spiegel-Modus) | xlrx-client + FFI, SyncAgent, Menüleisten-App, Selective Sync, FinderSync, LAN-Direktverbindung | 4 Wochen Dogfooding ohne Datenverlust → **Synology-Drive-Client abschalten** | XL |
@@ -989,32 +1046,34 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
 | UDP 443 blockiert / QUIC auf dem J3455 zu CPU-hungrig | automatischer Fallback auf HTTP/2, eigener LAN-Endpunkt nur mit HTTP/2, Messung im Spike |
 | inotify-Limits / alter Kernel | Limit anheben, Abgleich-Scans als Sicherheitsnetz |
 | Externe Änderungen kollidieren mit Uploads | Intent-Log, Prüfung vor dem Ersetzen, Konfliktkopie statt Überschreiben |
+| Breiter Mount von `/volume1` | Container nie als root, DSM-Rechte nur auf die nötigen Freigaben, Nachweis im Spike, Worker nur read-only |
+| Kontoübernahme | Passwort + TOTP-Pflicht, Replay-Schutz, Rate-Limits, Step-up, rotierende Gerätetokens, Benachrichtigungen (16.1) |
 | Proxy-Umzug stört andere Dienste | Regeln vorher in die Caddyfile übernehmen, paralleler Test über eigene IP, Umschalten per Portweiterleitung, Rückweg jederzeit |
 | Bindung an einen Speicher-Anbieter | nur Kern-API von S3, Kompatibilitäts-Suite, Wechsel = Konfiguration bzw. `rclone`-Kopie (15) |
-| Erst-Backup dauert bei 50 Mbit/s lange | nach Priorität sichern (Unersetzliches zuerst), Drosselung tagsüber, ab Januar 400 Mbit/s |
 | Projektumfang | strikte Meilensteine, Nicht-Ziele für v1 (siehe 1), früher Nutzen durch Strang A |
 
 ---
 
 ## 21. Offene Fragen
 
-Beantwortet (2026-10-02):
-- DS918+ mit SSD-Cache, Daten in `homes/<user>/Drive`
-- eigene Domain mit Portweiterleitung. Der DSM-Reverse-Proxy darf durch einen Container ersetzt werden → Caddy (15.3).
-- Apple Developer Account vorhanden
-- sensible Ordner bleiben **aus rechtlichen Gründen** lokal, also auch keine eigene Cloud-VM. Ihr verschlüsseltes Backup bei einem S3-Anbieter
-  (mit AVV, Schlüssel nur bei dir) ist zulässig.
-- NAS bleibt Zentrale, S3 für Backup und Außen-Beschleuniger, **herstellerunabhängig**, Start mit Hetzner
-- Ziele der Cloud-Nutzung: schneller Zugriff von außen, externe Sicherheitskopie, mehr KI-Rechenleistung
-- Upload 50 Mbit/s, ab Januar 2027 400 Mbit/s
+Alle Grundsatzfragen sind geklärt (Stand 2026-10-02):
 
-Noch offen:
-1. **Welche Ordner** sollen „Nur lokal“ sein? Die Regel wird beim Einrichten vorbelegt.
-2. **Welche anderen Dienste** laufen heute über den DSM-Reverse-Proxy? Sie werden in die Caddyfile übernommen.
-3. **Router und DNS:** Welcher Router (für Portweiterleitung inkl. UDP und ggf. Split-DNS), und bei welchem Anbieter liegt das DNS der Domain
-   (für die DNS-Challenge)?
-4. **Login:** Reichen eigene Konten (Passwort + Passkey), oder sollen DSM-Konten (LDAP/SSO) genutzt werden?
-5. **KI-Anbieter:** Scaleway als Standard für die nicht sensiblen Ordner okay?
-6. Gibt es neben `homes/<user>/Drive` **Team-Ordner** in Synology Drive, die zu „Geteilten Ablagen“ werden sollen?
-7. Sind **Windows** oder **Android** absehbar nötig? Das beeinflusst Prioritäten, nicht die Architektur.
-8. Wird **Bearbeiten von Office-Dokumenten im Browser** gewünscht (Collabora/OnlyOffice), oder reicht Vorschau + Bearbeiten lokal?
+| Thema | Entscheidung |
+|---|---|
+| Hardware | DS918+ mit SSD-Cache, 16–20 GB RAM |
+| Bestandsdaten | `homes/<user>/Drive` → Meine Ablage; Synology-Drive-Team-Ordner → Geteilte Ablagen |
+| Zugriff | eigene Domain; Caddy-Container mit eigener IP ersetzt den DSM-Proxy |
+| Bandbreite | Upload 50 Mbit/s, ab Januar 2027 400 Mbit/s |
+| Apple | Developer Account vorhanden |
+| Sensible Ordner | rechtlich begründet „Nur lokal“, pro Ordner frei konfigurierbar; Backup verschlüsselt nach S3 zulässig |
+| Cloud-Rolle | NAS bleibt Zentrale; S3 herstellerunabhängig (Start Hetzner) für Backup und Außen-Beschleuniger |
+| KI | Scaleway Generative APIs für „Cloud erlaubt“ |
+| Anmeldung | eigene Konten, Passwort + TOTP-Pflicht |
+| Plattformen | Web, macOS, iOS; Windows/Android vorerst nicht |
+| Office | nur Vorschau, keine Microsoft-Office-Web-Integration |
+| Backup | Hyper Backup → S3 eingerichtet |
+
+**In eigener Verantwortung:** Portweiterleitung im Router (TCP 80/443, UDP 443 auf die Caddy-IP), DNS und Split-DNS, Übernahme
+bestehender DSM-Proxy-Regeln in die `Caddyfile`.
+
+Weitere Fragen klären sich in den Meilensteinen, vor allem durch die Messwerte des M0-Spikes.
