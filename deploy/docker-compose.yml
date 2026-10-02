@@ -63,10 +63,13 @@ services:
       XLRX_TRUST_PROXY: "1"
       XLRX_ARGON2_M_KIB: ${XLRX_ARGON2_M_KIB:-19456}
       XLRX_ARGON2_T: ${XLRX_ARGON2_T:-2}
+      # "My Drive" of account NAME: /volume1/homes/NAME/Drive (the Synology Drive folder).
+      XLRX_DATA_DIR: /mnt/volume1
     secrets: [database_url, xlrx_secret_key]
-    # From M1 on: the whole volume, so versions can be kept centrally via reflink (PLAN 4.1).
-    # volumes:
-    #   - /volume1:/mnt/volume1
+    # The whole volume: homes, team folders and xlrx-state on one file system, so versions can be
+    # kept via reflink (PLAN 4.1).
+    volumes:
+      - /volume1:/mnt/volume1
     networks: [internal, proxy]
 
   caddy:

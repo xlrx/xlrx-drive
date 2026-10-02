@@ -27,6 +27,9 @@ pub struct Inner {
     pub hashing: Semaphore,
     /// Content Security Policy for the web app (inline script hashes), if one is configured.
     pub web_csp: Option<String>,
+    /// One lock per root: scans and changes through the API never run at the same time on the
+    /// same directory tree.
+    root_locks: std::sync::Mutex<std::collections::HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Deref for AppState {
@@ -59,6 +62,7 @@ impl AppState {
             .transpose()?;
         Ok(Self(Arc::new(Inner {
             web_csp,
+            root_locks: Default::default(),
             db,
             secrets: SecretBox::new(&cfg.secret_key),
             cfg,
@@ -67,6 +71,12 @@ impl AppState {
             ceremonies: Ceremonies::default(),
             hashing: Semaphore::new(2),
         })))
+    }
+
+    /// The lock of a root (see [`Inner::root_locks`]).
+    pub fn root_lock(&self, root_id: i64) -> Arc<tokio::sync::Mutex<()>> {
+        let mut map = self.root_locks.lock().expect("mutex");
+        map.entry(root_id).or_default().clone()
     }
 
     /// Hash a password (blocking, with limited parallelism).

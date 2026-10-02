@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod files;
 pub mod me;
 pub mod setup;
 
@@ -63,6 +64,12 @@ pub fn router(state: AppState) -> Router {
         .route("/me/recovery-codes", post(me::recovery_regenerate))
         .route("/me/sessions", get(me::sessions))
         .route("/me/sessions/{id}", delete(me::session_revoke))
+        // Files
+        .route("/roots", get(files::list_roots))
+        .route("/roots/{id}/scan", post(files::scan_root))
+        .route("/nodes/{id}", get(files::get_node))
+        .route("/nodes/{id}/children", get(files::children))
+        .route("/nodes/{id}/content", get(files::content))
         // Administration
         .route(
             "/admin/users",
@@ -81,7 +88,8 @@ pub fn router(state: AppState) -> Router {
             CACHE_CONTROL,
             HeaderValue::from_static("no-store"),
         ))
-        .layer(SetResponseHeaderLayer::overriding(
+        // File content sets a stricter policy of its own (sandbox).
+        .layer(SetResponseHeaderLayer::if_not_present(
             CONTENT_SECURITY_POLICY,
             HeaderValue::from_static(web::MINIMAL_CSP),
         ));

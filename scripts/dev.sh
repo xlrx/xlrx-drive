@@ -17,6 +17,9 @@ export XLRX_BIND=127.0.0.1:8080
 export XLRX_SECRET_KEY=eGxyeC1sb2NhbC1kZXZlbG9wbWVudC1vbmx5LWtleSE=
 export XLRX_ARGON2_M_KIB=8192 XLRX_ARGON2_T=1
 export XLRX_WEB_DIR="$PWD/web/.output/public"
+# Stand-in for the NAS volume: "My Drive" of account NAME is local-data/homes/NAME/Drive.
+export XLRX_DATA_DIR="${XLRX_DATA_DIR:-$PWD/local-data}"
+mkdir -p "$XLRX_DATA_DIR"
 export RUST_LOG="${RUST_LOG:-info,sqlx=warn}"
 
 (cd web && pnpm install --silent && pnpm run build >/dev/null)
@@ -35,6 +38,6 @@ trap 'kill $server 2>/dev/null' EXIT
 if [ "${1:-}" = "--hot" ]; then
 	(cd web && pnpm dev --port 3000)
 else
-	echo "xlrx läuft auf http://localhost:8080 (Strg+C beendet)"
+	echo "xlrx läuft auf http://localhost:8080 (Strg+C beendet), Dateien in $XLRX_DATA_DIR"
 	wait $server
 fi

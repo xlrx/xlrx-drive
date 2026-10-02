@@ -150,6 +150,20 @@ async fn serve(state: AppState) -> Result<(), String> {
             }
         }
     });
+    // Reconciliation: once at startup (changes made while the server was not running), then
+    // periodically as a safety net. The watcher (PLAN 4.4) reports changes in between.
+    if state.cfg.data_dir.is_some() {
+        let st = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                xlrx_server::files::roots::scan_all(&st).await;
+            }
+        });
+    } else {
+        tracing::warn!("XLRX_DATA_DIR nicht gesetzt: keine Dateien, nur Konten");
+    }
     let app = xlrx_server::router(state);
     let listener = tokio::net::TcpListener::bind(bind)
         .await

@@ -1,6 +1,6 @@
 # xlrx-drive auf der Synology einrichten (DS918+, DSM 7.2)
 
-Stand M0: Anmeldung, Konten und Verwaltung laufen; Dateien, Sync und Suche folgen ab M1.
+Stand M1 (in Arbeit): Anmeldung, Konten und Verwaltung laufen; „Meine Ablage“ (der Synology-Drive-Ordner `homes/NAME/Drive`) lässt sich im Web durchsuchen und herunterladen. Sync und Suche folgen.
 Router, DNS und die Übernahme der DSM-Proxy-Regeln erledigst du selbst (PLAN 15.3) – hier steht, was dafür nötig ist.
 
 ## 1. Benutzer und Freigaben
@@ -9,7 +9,7 @@ Router, DNS und die Übernahme der DSM-Proxy-Regeln erledigst du selbst (PLAN 15
 2. **Freigaben** (Systemsteuerung → Freigegebener Ordner):
    - `xlrx-state` – im Netzwerk verbergen, Datenprüfsumme **an**. Versionen, Papierkorb, Dumps (ab M1).
    - `xlrx-db` – im Netzwerk verbergen, **Datenprüfsumme aus** (dann schreibt Btrfs dort ohne Copy-on-Write; Postgres prüft selbst mit Datenprüfsummen). Ob das wirklich NOCOW ergibt, misst der Spike (`spikes/ds918/run.sh`).
-3. **Rechte** direkt für den Benutzer `xlrx` (nicht nur über Gruppen): Lesen/Schreiben auf `xlrx-state`, `xlrx-db` und `docker`. Ab M1 zusätzlich `homes` und die eingebundenen Team-Ordner.
+3. **Rechte** direkt für den Benutzer `xlrx` (nicht nur über Gruppen): Lesen/Schreiben auf `xlrx-state`, `xlrx-db`, `docker` und `homes` (später auch auf die eingebundenen Team-Ordner). Die xlrx-Konten heißen wie die DSM-Konten: „Meine Ablage“ von `klaus` ist `/volume1/homes/klaus/Drive`.
 4. Per SSH die IDs ermitteln und Ordner anlegen:
 
    ```sh

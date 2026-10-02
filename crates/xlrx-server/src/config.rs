@@ -27,6 +27,14 @@ pub struct Config {
     pub argon2: ArgonParams,
     /// Additional list of forbidden passwords (one line per password).
     pub password_blocklist: Option<PathBuf>,
+    /// The NAS volume with the users' files (`/volume1`, mounted as one; PLAN 4.1). Without it, the
+    /// server only offers accounts and sign-in.
+    pub data_dir: Option<PathBuf>,
+    /// Versions, trash and staging (`xlrx-state`). Must be on the same file system as the data so
+    /// that files can be reflinked or moved. Default: `<data_dir>/xlrx-state`.
+    pub state_dir: Option<PathBuf>,
+    /// Location of a person's "My Drive" below `data_dir`; `{user}` is the user name.
+    pub home_pattern: String,
 }
 
 /// Parameters for argon2id. Calibrate on the DS918+ (J3455) so that one check takes ~250 ms
@@ -155,6 +163,11 @@ impl Config {
                 p: num("XLRX_ARGON2_P", d.p)?,
             },
             password_blocklist: var("XLRX_PASSWORD_BLOCKLIST").map(PathBuf::from),
+            data_dir: var("XLRX_DATA_DIR").map(PathBuf::from),
+            state_dir: var("XLRX_STATE_DIR")
+                .map(PathBuf::from)
+                .or_else(|| var("XLRX_DATA_DIR").map(|d| PathBuf::from(d).join("xlrx-state"))),
+            home_pattern: var("XLRX_HOME_PATTERN").unwrap_or_else(|| "homes/{user}/Drive".into()),
         })
     }
 

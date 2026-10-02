@@ -37,6 +37,11 @@ services:
       XLRX_SECRET_KEY: eGxyeC1sb2NhbC1kZXZlbG9wbWVudC1vbmx5LWtleSE=
       XLRX_ARGON2_M_KIB: "8192"
       XLRX_ARGON2_T: "1"
+      XLRX_DATA_DIR: /data
+    volumes:
+      # Stand-in for the NAS volume (same folder as scripts/dev.sh): "My Drive" of account NAME
+      # is local-data/homes/NAME/Drive. On Linux hosts the folder must be writable for uid 65534.
+      - ../local-data:/data
     ports:
       - "127.0.0.1:8080:8080"
 

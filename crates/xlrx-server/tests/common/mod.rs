@@ -92,6 +92,9 @@ pub fn config() -> Config {
             p: 1,
         },
         password_blocklist: None,
+        data_dir: None,
+        state_dir: None,
+        home_pattern: "homes/{user}/Drive".into(),
     }
 }
 
@@ -99,14 +102,36 @@ pub struct Env {
     pub db: TestDb,
     pub state: AppState,
     pub app: Router,
+    /// Data directory (only with [`Env::with_data`]); removed when dropped.
+    pub data: Option<tempfile::TempDir>,
 }
 
 impl Env {
     pub async fn new() -> Option<Self> {
+        Self::build(None).await
+    }
+
+    /// Like [`Env::new`], with a temporary data directory for roots and files.
+    pub async fn with_data() -> Option<Self> {
+        Self::build(Some(tempfile::tempdir().expect("Datenverzeichnis"))).await
+    }
+
+    async fn build(data: Option<tempfile::TempDir>) -> Option<Self> {
         let db = TestDb::new().await?;
-        let state = AppState::new(db.pool.clone(), config()).expect("Zustand");
+        let mut cfg = config();
+        cfg.data_dir = data.as_ref().map(|d| d.path().to_path_buf());
+        let state = AppState::new(db.pool.clone(), cfg).expect("Zustand");
         let app = xlrx_server::router(state.clone());
-        Some(Self { db, state, app })
+        Some(Self {
+            db,
+            state,
+            app,
+            data,
+        })
+    }
+
+    pub fn data_dir(&self) -> &std::path::Path {
+        self.data.as_ref().expect("Env::with_data").path()
     }
 
     pub fn client(&self) -> Client {
@@ -147,6 +172,22 @@ pub struct Client {
 pub struct Resp {
     pub status: StatusCode,
     pub body: Value,
+}
+
+/// A response with headers and the raw body (downloads).
+pub struct RawResp {
+    pub status: StatusCode,
+    pub headers: axum::http::HeaderMap,
+    pub bytes: Vec<u8>,
+}
+
+impl RawResp {
+    pub fn header(&self, name: &str) -> &str {
+        self.headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+    }
 }
 
 impl Resp {
@@ -205,6 +246,31 @@ impl Client {
 
     pub async fn get(&mut self, path: &str) -> Resp {
         self.send("GET", path, None).await
+    }
+
+    /// GET with extra headers, returning headers and the raw body.
+    pub async fn get_raw(&mut self, path: &str, headers: &[(&str, &str)]) -> RawResp {
+        let mut req = Request::builder().method("GET").uri(path);
+        if let Some(c) = &self.cookie {
+            req = req.header(header::COOKIE, format!("xlrx_session={c}"));
+        }
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        let res = self
+            .app
+            .clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = res.status();
+        let headers = res.headers().clone();
+        let bytes = res.into_body().collect().await.unwrap().to_bytes().to_vec();
+        RawResp {
+            status,
+            headers,
+            bytes,
+        }
     }
 }
 

@@ -12,8 +12,10 @@ argon2 = "0.6"
 axum = "0.8"
 base64 = "0.23"
 hmac = "0.13"
+mime_guess = "2"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 rand = "0.10"
+rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha1 = "0.11"
@@ -23,17 +25,20 @@ subtle = "2.6"
 thiserror.workspace = true
 time = { version = "0.3", features = ["serde", "formatting"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time"] }
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["trace", "fs", "set-header"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2.5"
 uuid = { version = "1", features = ["v4", "serde"] }
 webauthn-rs = "0.5"
+xlrx-chunk.workspace = true
 xlrx-proto.workspace = true
+xlrx-sync.workspace = true
 
 [dev-dependencies]
 http-body-util = "0.1"
-tower = { version = "0.5", features = ["util"] }
+tempfile.workspace = true
 webauthn-authenticator-rs = { version = "0.5", features = ["softpasskey"] }
 
 [lints]

@@ -2970,14 +2970,17 @@ dependencies = [
  "base64 0.23.1",
  "hmac",
  "http-body-util",
+ "mime_guess",
  "qrcode",
  "rand 0.10.3",
+ "rayon",
  "serde",
  "serde_json",
  "sha1",
  "sha2 0.11.0",
  "sqlx",
  "subtle",
+ "tempfile",
  "thiserror 2.0.21",
  "time",
  "tokio",
@@ -2989,7 +2992,9 @@ dependencies = [
  "uuid",
  "webauthn-authenticator-rs",
  "webauthn-rs",
+ "xlrx-chunk",
  "xlrx-proto",
+ "xlrx-sync",
 ]
 
 [[package]]
