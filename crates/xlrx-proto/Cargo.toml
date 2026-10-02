@@ -1,0 +1,19 @@
+[package]
+name = "xlrx-proto"
+description = "Gemeinsame Typen für Server und Clients von xlrx-drive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+unicode-normalization.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

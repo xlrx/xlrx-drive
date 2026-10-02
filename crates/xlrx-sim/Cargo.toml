@@ -1,0 +1,14 @@
+[package]
+name = "xlrx-sim"
+description = "Deterministischer Simulator für die Sync-Engine von xlrx-drive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+xlrx-proto.workspace = true
+xlrx-sync.workspace = true
+
+[lints]
+workspace = true

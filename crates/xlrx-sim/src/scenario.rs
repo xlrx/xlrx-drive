@@ -1,0 +1,367 @@
+//! Handgeschriebene Szenarien mit Pfaden statt Zufall – für lesbare Verhaltenstests.
+//!
+//! ```ignore
+//! let mut w = World::new(2, false);
+//! w.client_write(0, "/Bericht.txt", 1);
+//! w.sync();
+//! assert_eq!(w.server_file("/Bericht.txt"), Some(1));
+//! ```
+
+use std::collections::BTreeMap;
+
+use xlrx_proto::{ContentHash, FileContent, Kind, Name, NodeId, Seq};
+use xlrx_sync::{Config, Engine, LocalId, Op, RemoteOp, RemoteResult, State};
+
+use crate::driver;
+use crate::fs::SimFs;
+use crate::server::SimServer;
+
+/// Inhalt aus einer Nummer (Tag); `tag_of` ist die Umkehrung.
+pub fn content(tag: u64) -> FileContent {
+    let mut h = [0u8; 32];
+    h[..8].copy_from_slice(&tag.to_le_bytes());
+    FileContent {
+        hash: ContentHash(h),
+        size: tag % 997 + 1,
+    }
+}
+
+pub fn tag_of(c: &FileContent) -> u64 {
+    let mut b = [0u8; 8];
+    b.copy_from_slice(&c.hash.0[..8]);
+    u64::from_le_bytes(b)
+}
+
+/// Zählt Übertragungen, um Effizienz zu prüfen (z.B. Ersteinrichtung ohne Downloads).
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Transfers {
+    pub downloads: usize,
+    pub uploads: usize,
+}
+
+pub struct WorldClient {
+    pub fs: SimFs,
+    pub engine: Engine,
+    persisted: State,
+    device: String,
+}
+
+pub struct World {
+    pub server: SimServer,
+    pub clients: Vec<WorldClient>,
+    clock: i64,
+    pub transfers: Transfers,
+}
+
+/// Inhalt eines Baums: Pfad → `None` (Ordner) bzw. `Some(tag)` (Datei).
+pub type Listing = BTreeMap<String, Option<u64>>;
+
+fn split(path: &str) -> Vec<Name> {
+    path.split('/')
+        .filter(|p| !p.is_empty())
+        .map(|p| Name::new(p).expect("gültiger Name im Testpfad"))
+        .collect()
+}
+
+impl World {
+    pub fn new(clients: usize, case_insensitive: bool) -> Self {
+        let server = SimServer::new();
+        let clients = (0..clients)
+            .map(|i| {
+                let device = format!("Gerät{i}");
+                let engine = Engine::new(Config {
+                    remote_root: server.root,
+                    device: device.clone(),
+                    local_case_insensitive: case_insensitive,
+                    max_unconfirmed_deletes: usize::MAX,
+                });
+                let persisted = engine.state().clone();
+                WorldClient {
+                    fs: SimFs::new(case_insensitive, 1_000_000 * (i as u64 + 1)),
+                    engine,
+                    persisted,
+                    device,
+                }
+            })
+            .collect();
+        Self {
+            server,
+            clients,
+            clock: 1,
+            transfers: Transfers::default(),
+        }
+    }
+
+    fn tick(&mut self) -> i64 {
+        self.clock += 1;
+        self.clock
+    }
+
+    // ------------------------------------------------------------ Client-Dateisystem
+
+    fn client_dir(&mut self, c: usize, parts: &[Name], create: bool) -> Option<u64> {
+        let clock = self.tick();
+        let fs = &mut self.clients[c].fs;
+        let mut cur = fs.root;
+        for p in parts {
+            cur = match fs.lookup(cur, p) {
+                Some(x) => x,
+                None if create => fs.create(cur, p, Kind::Dir, None, clock).ok()?,
+                None => return None,
+            };
+        }
+        Some(cur)
+    }
+
+    fn client_lookup(&mut self, c: usize, path: &str) -> Option<u64> {
+        let parts = split(path);
+        let (last, dir) = parts.split_last()?;
+        let d = self.client_dir(c, dir, false)?;
+        self.clients[c].fs.lookup(d, last)
+    }
+
+    /// Schreibt eine Datei (legt sie samt Ordnern an oder ändert den Inhalt am Ort).
+    pub fn client_write(&mut self, c: usize, path: &str, tag: u64) {
+        let parts = split(path);
+        let (last, dir) = parts.split_last().expect("Pfad");
+        let d = self.client_dir(c, dir, true).expect("Ordner");
+        let clock = self.tick();
+        let fs = &mut self.clients[c].fs;
+        match fs.lookup(d, last) {
+            Some(f) => fs.write(f, content(tag), clock).expect("schreiben"),
+            None => {
+                fs.create(d, last, Kind::File, Some(content(tag)), clock)
+                    .expect("anlegen");
+            }
+        }
+    }
+
+    /// „Atomic Save“: neue Datei schreiben und über das Original umbenennen (neue Inode).
+    pub fn client_atomic_save(&mut self, c: usize, path: &str, tag: u64) {
+        let f = self.client_lookup(c, path).expect("Datei existiert");
+        let clock = self.tick();
+        let fs = &mut self.clients[c].fs;
+        let orig = fs.inodes[&f].clone();
+        let tmp = Name::new(".~tmp").expect("Name");
+        let t = fs
+            .create(orig.parent, &tmp, Kind::File, Some(content(tag)), clock)
+            .expect("tmp");
+        fs.rename(t, orig.parent, &orig.name, true, clock)
+            .expect("ersetzen");
+    }
+
+    pub fn client_mkdir(&mut self, c: usize, path: &str) {
+        self.client_dir(c, &split(path), true).expect("Ordner");
+    }
+
+    pub fn client_mv(&mut self, c: usize, from: &str, to: &str) {
+        let x = self.client_lookup(c, from).expect("Quelle existiert");
+        let parts = split(to);
+        let (last, dir) = parts.split_last().expect("Ziel");
+        let d = self.client_dir(c, dir, true).expect("Zielordner");
+        let clock = self.tick();
+        self.clients[c]
+            .fs
+            .rename(x, d, last, false, clock)
+            .expect("verschieben");
+    }
+
+    pub fn client_rm(&mut self, c: usize, path: &str) {
+        let x = self.client_lookup(c, path).expect("existiert");
+        self.clients[c].fs.rm_rf(x);
+    }
+
+    // ------------------------------------------------------------ Server (z.B. Web-UI)
+
+    fn server_dir(&mut self, parts: &[Name], create: bool) -> Option<NodeId> {
+        let mut cur = self.server.root;
+        for p in parts {
+            cur = match self.server.occupant(cur, p, None) {
+                Some(x) => x,
+                None if create => self.server.create(cur, p, Kind::Dir, None).ok()?.0,
+                None => return None,
+            };
+        }
+        Some(cur)
+    }
+
+    pub fn server_node(&mut self, path: &str) -> Option<NodeId> {
+        let parts = split(path);
+        let (last, dir) = parts.split_last()?;
+        let d = self.server_dir(dir, false)?;
+        self.server.occupant(d, last, None)
+    }
+
+    pub fn server_write(&mut self, path: &str, tag: u64) {
+        let parts = split(path);
+        let (last, dir) = parts.split_last().expect("Pfad");
+        let d = self.server_dir(dir, true).expect("Ordner");
+        match self.server.occupant(d, last, None) {
+            Some(n) => {
+                self.server.write(n, content(tag)).expect("schreiben");
+            }
+            None => {
+                self.server
+                    .create(d, last, Kind::File, Some(content(tag)))
+                    .expect("anlegen");
+            }
+        }
+    }
+
+    pub fn server_mkdir(&mut self, path: &str) {
+        self.server_dir(&split(path), true).expect("Ordner");
+    }
+
+    pub fn server_mv(&mut self, from: &str, to: &str) {
+        let n = self.server_node(from).expect("Quelle");
+        let parts = split(to);
+        let (last, dir) = parts.split_last().expect("Ziel");
+        let d = self.server_dir(dir, true).expect("Zielordner");
+        self.server.mv(n, d, last).expect("verschieben");
+    }
+
+    pub fn server_rm(&mut self, path: &str) {
+        let n = self.server_node(path).expect("existiert");
+        self.server.delete_tree(n);
+    }
+
+    // ------------------------------------------------------------ Sync
+
+    /// Ein Client: abrufen, scannen, planen, ausführen – bis nichts mehr zu tun ist.
+    pub fn sync_client(&mut self, c: usize) {
+        for _ in 0..500 {
+            let cursor = self.clients[c].engine.state().cursor.unwrap_or(Seq(0));
+            let (changes, new_cursor) = self.server.changes_since(cursor);
+            self.clients[c]
+                .engine
+                .on_remote_changes(changes, new_cursor);
+            let root = LocalId(self.clients[c].fs.root);
+            let snap = self.clients[c].fs.snapshot();
+            self.clients[c].engine.on_local_snapshot(root, snap);
+            let mut ops = self.clients[c].engine.plan();
+            if ops.is_empty() {
+                ops = self.clients[c].engine.plan();
+            }
+            self.clients[c].persisted = self.clients[c].engine.state().clone();
+            if ops.is_empty() {
+                return;
+            }
+            for op in ops {
+                self.exec(c, op);
+            }
+            if let Err(e) = self.clients[c].engine.check_invariants() {
+                panic!("Invariante verletzt: {e}");
+            }
+        }
+        panic!("Client {c} kommt nicht zur Ruhe");
+    }
+
+    fn exec(&mut self, c: usize, op: Op) {
+        match op {
+            Op::Local(id, lop) => {
+                if matches!(
+                    lop,
+                    xlrx_sync::LocalOp::Download { .. } | xlrx_sync::LocalOp::Replace { .. }
+                ) {
+                    self.transfers.downloads += 1;
+                }
+                let clock = self.tick();
+                let res = driver::exec_local(&mut self.clients[c].fs, &lop, clock);
+                self.clients[c].engine.on_local_result(id, res);
+            }
+            Op::Remote(id, rop) => {
+                if matches!(rop, RemoteOp::CreateFile { .. } | RemoteOp::Upload { .. }) {
+                    self.transfers.uploads += 1;
+                }
+                let res = if driver::source_ok(&self.clients[c].fs, &rop) {
+                    let device = self.clients[c].device.clone();
+                    self.server.apply(c, id, &rop, &device)
+                } else {
+                    RemoteResult::SourceChanged
+                };
+                self.clients[c].engine.on_remote_result(id, res);
+            }
+        }
+    }
+
+    /// Alle Clients reihum synchronisieren, bis sich nichts mehr ändert.
+    pub fn sync(&mut self) {
+        for _ in 0..20 {
+            let before = self.server.seq();
+            for c in 0..self.clients.len() {
+                self.sync_client(c);
+            }
+            if self.server.seq() == before {
+                return;
+            }
+        }
+        panic!("Sync kommt nicht zur Ruhe");
+    }
+
+    /// Plant und führt alle Operationen aus, stürzt aber ab, bevor ein Ergebnis verarbeitet wird.
+    /// (Server und Dateisystem sind danach verändert, die Engine weiß davon nichts.)
+    pub fn execute_then_crash(&mut self, c: usize) {
+        let cursor = self.clients[c].engine.state().cursor.unwrap_or(Seq(0));
+        let (changes, new_cursor) = self.server.changes_since(cursor);
+        self.clients[c]
+            .engine
+            .on_remote_changes(changes, new_cursor);
+        let root = LocalId(self.clients[c].fs.root);
+        let snap = self.clients[c].fs.snapshot();
+        self.clients[c].engine.on_local_snapshot(root, snap);
+        let ops = self.clients[c].engine.plan();
+        self.clients[c].persisted = self.clients[c].engine.state().clone();
+        for op in ops {
+            match op {
+                Op::Local(_, lop) => {
+                    let clock = self.tick();
+                    let _ = driver::exec_local(&mut self.clients[c].fs, &lop, clock);
+                }
+                Op::Remote(id, rop) => {
+                    if driver::source_ok(&self.clients[c].fs, &rop) {
+                        let device = self.clients[c].device.clone();
+                        let _ = self.server.apply(c, id, &rop, &device);
+                    }
+                }
+            }
+        }
+        self.crash(c);
+    }
+
+    /// Simuliert einen Absturz: Die Engine startet aus dem zuletzt persistierten Zustand.
+    pub fn crash(&mut self, c: usize) {
+        let cl = &mut self.clients[c];
+        cl.engine = Engine::from_state(cl.persisted.clone());
+    }
+
+    // ------------------------------------------------------------ Ansichten
+
+    pub fn server_listing(&self) -> Listing {
+        self.server
+            .listing()
+            .into_iter()
+            .map(|(p, (_, c))| (p, c.as_ref().map(tag_of)))
+            .collect()
+    }
+
+    pub fn client_listing(&self, c: usize) -> Listing {
+        self.clients[c]
+            .fs
+            .listing()
+            .into_iter()
+            .map(|(p, (_, c))| (p, c.as_ref().map(tag_of)))
+            .collect()
+    }
+
+    pub fn server_file(&self, path: &str) -> Option<u64> {
+        self.server_listing().get(path).copied().flatten()
+    }
+
+    /// Prüft, dass alle Clients exakt den Server-Stand haben.
+    pub fn assert_converged(&self) {
+        let s = self.server_listing();
+        for c in 0..self.clients.len() {
+            assert_eq!(self.client_listing(c), s, "Client {c} weicht vom Server ab");
+        }
+    }
+}

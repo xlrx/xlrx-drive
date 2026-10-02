@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 2 * * *" # nächtliche Langläufe des Simulators
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, Tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.0"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests (inkl. 1000 Simulator-Seeds je Variante)
+        run: cargo test --workspace
+        env:
+          XLRX_SIM_SEEDS: "1000"
+
+  no-avx:
+    name: Läuft ohne AVX (DS918+ / Celeron J3455)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y qemu-user
+      - run: cargo build --release -p xlrx-sim -p xlrx-chunk --examples --bins
+      # Denverton = Atom C3000 (Goldmont), wie der J3455 ohne AVX. Ein "Illegal instruction" bricht den Build.
+      - run: qemu-x86_64 -cpu Denverton target/release/xlrx-sim --count 20
+      - run: qemu-x86_64 -cpu Denverton target/release/examples/hashdir crates
+
+  simulation-nightly:
+    name: Simulator-Langlauf
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - "--count 200000"
+          - "--count 80000 --clients 3"
+          - "--count 150000 --ci"
+          - "--count 30000 --ci --clients 3 --steps 1000"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: Zufälliger Startwert (jede Nacht neue Szenarien)
+        run: echo "FROM=$(( (RANDOM << 15 | RANDOM) * 1000 ))" >> "$GITHUB_ENV"
+      - run: cargo run --release -p xlrx-sim -- --strict --from "$FROM" ${{ matrix.variant }}

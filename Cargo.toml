@@ -1,0 +1,53 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+xlrx-proto = { path = "crates/xlrx-proto" }
+xlrx-chunk = { path = "crates/xlrx-chunk" }
+xlrx-sync = { path = "crates/xlrx-sync" }
+
+blake3 = "1.8"
+# Exakt gepinnt: Chunk-Grenzen gehen in den Inhalts-Hash ein (Schema "xlrx-content-v1").
+# Ein Update darf die Schnittpunkte nicht still verändern; der Golden-Test in xlrx-chunk prüft das.
+fastcdc = "=5.0.0"
+rayon = "1.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+unicode-normalization = "0.1"
+
+# Nur für Tests/Benchmarks
+proptest = "1.11"
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+tempfile = "3.27"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[profile.dev]
+# Der Simulator läuft viele tausend Szenarien; etwas Optimierung lohnt sich auch im Test.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+
+[profile.bench]
+inherits = "release"
