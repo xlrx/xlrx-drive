@@ -41,6 +41,9 @@ pub struct Config {
     /// Watch roots for changes from outside (inotify). On by default; `XLRX_WATCH=0` turns it off
     /// (then only the hourly scan and "Neu einlesen" pick them up).
     pub watch: bool,
+    /// Devices (Mac, iPhone) need a second factor again after this many days
+    /// (`XLRX_DEVICE_CONFIRM_DAYS`, default 30).
+    pub device_confirm_days: u32,
 }
 
 /// Parameters for argon2id. Calibrate on the DS918+ (J3455) so that one check takes ~250 ms
@@ -176,6 +179,7 @@ impl Config {
             home_pattern: var("XLRX_HOME_PATTERN").unwrap_or_else(|| "homes/{user}/Drive".into()),
             force_copy: false,
             watch: var("XLRX_WATCH").is_none_or(|v| v != "0" && v != "false"),
+            device_confirm_days: num("XLRX_DEVICE_CONFIRM_DAYS", 30)?.max(1),
         })
     }
 

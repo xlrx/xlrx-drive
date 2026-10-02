@@ -59,7 +59,7 @@ pub async fn change_password(
     // End other sessions: anyone who knew the old password is locked out afterwards.
     sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND id <> $2")
         .bind(me.id)
-        .bind(me.session_id)
+        .bind(me.session()?)
         .execute(&st.db)
         .await?;
     audit::log(
@@ -325,7 +325,7 @@ pub async fn sessions(
     .fetch_all(&st.db)
     .await?;
     for s in &mut list {
-        s.current = s.id == me.session_id;
+        s.current = Some(s.id) == me.session_id;
     }
     Ok(Json(list))
 }

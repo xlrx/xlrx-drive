@@ -1011,6 +1011,12 @@ Ziel: eigene Konten, die so sicher sind wie bei einem guten Cloud-Dienst. Jede A
     Wird ein altes Token erneut benutzt, widerruft das sofort die ganze Kette.
   - Zugriffstokens sind kurzlebig (~15 min). Pro Gerät ist alle N Tage eine erneute Bestätigung per OTP oder Passkey nötig (konfigurierbar, z.B. 30).
   - Geräteliste mit Widerruf, Benachrichtigung bei Anmeldung eines neuen Geräts.
+  - **Umgesetzt (M1):** Die App öffnet `/device?challenge=…&redirect_uri=xlrx://auth&name=…&platform=…`. Nach Anmeldung (oder frischem
+    zweitem Faktor) und „Verbinden“ geht der Browser mit einem Einmalcode (2 min) zurück zur App; die App tauscht ihn mit dem PKCE-Verifier
+    gegen ein Tokenpaar (`POST /api/devices/token`). Jede Erneuerung ersetzt beide Tokens. Ausnahme für verlorene Antworten: Solange das neue
+    Paar nie benutzt wurde, gilt das vorige Refresh-Token noch einmal. Jede andere Wiederverwendung meldet das Gerät ab und landet im Audit-Log.
+    Gerätetokens gelten nur für Dateien und Sync, nie für das Konto selbst oder die Verwaltung. Zurücksetzen der Faktoren und Sperren des Kontos
+    melden alle Geräte ab. Frist für die erneute Bestätigung: `XLRX_DEVICE_CONFIRM_DAYS` (Standard 30). Benachrichtigungen folgen mit M3.
 - **Freigabe-Links** brauchen kein Konto. Sie haben ein optionales Passwort und eigene Rate-Limits (9.2).
 
 ---
@@ -1114,8 +1120,9 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
   - Abgleich-Scan (Identität über die Inode, Schutz vor wiederverwendeten Inodes und leeren/fehlenden Freigaben, „racy“-Zeitstempel) und Überwachung per inotify mit Teil-Abgleich: Änderungen von außen erscheinen in Sekunden.
   - Ändern über die API: Ordner, Hochladen, Ersetzen mit Versionen (inhaltsadressiert, Reflink), Umbenennen/Verschieben, Papierkorb – jeweils mit Absichtsprotokoll, sodass ein Absturz an jeder Stelle nichts verliert (in Tests für jede Stelle nachgestellt).
   - Änderungs-Feed im Format der Sync-Engine und Live-Ereignisse (SSE); Schreib-Operationen der Sync-Engine über das API (Vorbedingungen, idempotente Op-IDs).
+  - Anmeldung von Geräten (Mac/iPhone) über den Browser mit PKCE, rotierende Refresh-Tokens mit Erkennung von Wiederverwendung, Geräteliste mit Abmelden (16.1).
   - Web-App mit Durchsuchen, Vorschau, Hochladen, Versionen, Papierkorb und Live-Aktualisierung; Startseite mit Begrüßung und Berglandschaft nach Tageszeit aus dem App-Entwurf.
-- **Offen für M1:** Anmeldung von Geräten (Tokens für Mac/iOS), Uploads in Chunks mit Wiederaufnahme, Vorschaubilder.
+- **Offen für M1:** Uploads in Chunks mit Wiederaufnahme, Vorschaubilder.
 
 **Nächster Schritt:** Rest von M1, dann Inbetriebnahme auf dem DS918+ mit den Spike-Messungen.
 

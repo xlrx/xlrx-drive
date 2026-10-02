@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod devices;
 pub mod files;
 pub mod me;
 pub mod setup;
@@ -10,8 +11,8 @@ pub mod sync;
 use axum::Router;
 use axum::extract::{Request, State};
 use axum::http::header::{
-    CACHE_CONTROL, CONTENT_SECURITY_POLICY, ORIGIN, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS,
-    X_FRAME_OPTIONS,
+    AUTHORIZATION, CACHE_CONTROL, CONTENT_SECURITY_POLICY, ORIGIN, REFERRER_POLICY,
+    X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
 };
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -26,7 +27,8 @@ use crate::state::AppState;
 use crate::web;
 
 pub fn router(state: AppState) -> Router {
-    let api = Router::new()
+    // Browser only: sign-in, the account itself, administration. Device tokens are refused here.
+    let browser = Router::new()
         // Sign-in
         .route("/auth/login", post(auth::login))
         .route("/auth/totp", post(auth::totp))
@@ -51,7 +53,6 @@ pub fn router(state: AppState) -> Router {
         .route("/setup/passkey/begin", post(setup::passkey_begin))
         .route("/setup/passkey/finish", post(setup::passkey_finish))
         // Own account
-        .route("/me", get(me::get_me))
         .route("/me/password", post(me::change_password))
         .route("/me/totp", delete(me::totp_remove))
         .route("/me/totp/begin", post(me::totp_begin))
@@ -65,6 +66,27 @@ pub fn router(state: AppState) -> Router {
         .route("/me/recovery-codes", post(me::recovery_regenerate))
         .route("/me/sessions", get(me::sessions))
         .route("/me/sessions/{id}", delete(me::session_revoke))
+        .route("/me/devices", get(devices::list))
+        .route("/me/devices/{id}", delete(devices::revoke))
+        .route("/devices/authorize", post(devices::authorize))
+        // Administration
+        .route(
+            "/admin/users",
+            get(admin::list_users).post(admin::create_user),
+        )
+        .route("/admin/users/{id}/invite", post(admin::invite))
+        .route(
+            "/admin/users/{id}/reset-factors",
+            post(admin::reset_factors),
+        )
+        .route("/admin/users/{id}/disabled", post(admin::set_disabled))
+        .route("/admin/audit", get(admin::audit_log))
+        .layer(middleware::from_fn(browser_only));
+
+    // Browser and devices: files and sync.
+    let shared = Router::new()
+        .route("/me", get(me::get_me))
+        .route("/devices/logout", post(devices::logout))
         // Files
         .route("/roots", get(files::list_roots))
         .route("/roots/{id}/scan", post(files::scan_root))
@@ -95,21 +117,15 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/sync/content/{hash}",
             get(sync::content_available).put(sync::put_content),
-        )
-        // Administration
-        .route(
-            "/admin/users",
-            get(admin::list_users).post(admin::create_user),
-        )
-        .route("/admin/users/{id}/invite", post(admin::invite))
-        .route(
-            "/admin/users/{id}/reset-factors",
-            post(admin::reset_factors),
-        )
-        .route("/admin/users/{id}/disabled", post(admin::set_disabled))
-        .route("/admin/audit", get(admin::audit_log))
+        );
+
+    let api = browser
+        .merge(shared)
         .fallback(|| async { ApiError::NotFound })
         .layer(middleware::from_fn_with_state(state.clone(), check_origin))
+        // Called by apps (no browser, no cookie): proves itself with a PKCE verifier or a
+        // refresh token, so it needs no origin check.
+        .route("/devices/token", post(devices::token))
         .layer(SetResponseHeaderLayer::overriding(
             CACHE_CONTROL,
             HeaderValue::from_static("no-store"),
@@ -158,8 +174,12 @@ pub fn router(state: AppState) -> Router {
 }
 
 /// CSRF protection: state-changing requests only from our own origin (besides `SameSite=Strict`).
+/// Requests with a device token are judged by the token alone, never by a cookie, and a browser
+/// does not add such a header on its own – no forgery possible.
 async fn check_origin(State(st): State<AppState>, req: Request, next: Next) -> Response {
-    if matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
+    if matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS)
+        || req.headers().contains_key(AUTHORIZATION)
+    {
         return next.run(req).await;
     }
     let ok = req
@@ -171,6 +191,15 @@ async fn check_origin(State(st): State<AppState>, req: Request, next: Next) -> R
         next.run(req).await
     } else {
         ApiError::forbidden("Ungültige Herkunft der Anfrage.").into_response()
+    }
+}
+
+/// Device tokens are not accepted for sign-in, the account itself or administration.
+async fn browser_only(req: Request, next: Next) -> Response {
+    if req.headers().contains_key(AUTHORIZATION) {
+        ApiError::forbidden("Nur im Browser möglich.").into_response()
+    } else {
+        next.run(req).await
     }
 }
 

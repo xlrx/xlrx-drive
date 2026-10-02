@@ -29,7 +29,7 @@ pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
         .await
 }
 
-/// Periodically cleans up expired sessions, intermediate steps and lockouts.
+/// Periodically cleans up expired sessions, intermediate steps, lockouts and device tokens.
 pub async fn cleanup(db: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM sessions WHERE expires_at < now() OR last_seen_at < now() - interval '8 hours'")
         .execute(db)
@@ -46,5 +46,6 @@ pub async fn cleanup(db: &PgPool) -> Result<(), sqlx::Error> {
     )
     .execute(db)
     .await?;
+    auth::device::cleanup(db).await?;
     Ok(())
 }

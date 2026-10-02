@@ -8,9 +8,21 @@ type SessionInfo = {
 	current: boolean;
 };
 
+type DeviceInfo = {
+	id: number;
+	name: string;
+	platform: string;
+	created_at: string;
+	last_seen_at: string;
+	last_ip: string | null;
+	confirm_until: string;
+};
+const PLATFORMS: Record<string, string> = { macos: 'Mac', ios: 'iPhone/iPad' };
+
 const { me, load } = useSession();
 const g = useGuard();
 const sessions = ref<SessionInfo[]>([]);
+const devices = ref<DeviceInfo[]>([]);
 const newPasskey = ref('');
 const totpSetup = ref<null | { ceremony: string; qr_svg: string; secret: string }>(null);
 const totpCode = ref('');
@@ -22,6 +34,7 @@ const canPasskey = ref(false);
 async function refresh() {
 	await load();
 	sessions.value = await apiGet<SessionInfo[]>('/me/sessions');
+	devices.value = await apiGet<DeviceInfo[]>('/me/devices');
 }
 onMounted(() => {
 	canPasskey.value = passkeysSupported();
@@ -93,6 +106,13 @@ const changePassword = () =>
 const revoke = (id: number) =>
 	g.run(async () => {
 		await apiDelete(`/me/sessions/${id}`);
+		await refresh();
+	});
+
+const revokeDevice = (d: DeviceInfo) =>
+	g.run(async () => {
+		if (!confirm(`„${d.name}“ abmelden? Die App muss sich danach neu anmelden.`)) return;
+		await apiDelete(`/me/devices/${d.id}`);
 		await refresh();
 	});
 
@@ -180,6 +200,28 @@ function codesDone() {
 					/>
 					<button :disabled="g.busy.value">Ändern</button>
 				</form>
+			</div>
+
+			<div class="card" style="margin-top: 1.5rem">
+				<h2 style="margin-top: 0">Geräte</h2>
+				<p v-if="!devices.length" class="muted">
+					Noch keine Geräte. Die Mac- und iPhone-App melden sich über den Browser an.
+				</p>
+				<table v-else>
+					<thead>
+						<tr><th>Gerät</th><th>Zuletzt aktiv</th><th>Bestätigung bis</th><th></th></tr>
+					</thead>
+					<tbody>
+						<tr v-for="d in devices" :key="d.id">
+							<td>
+								{{ d.name }} <span class="badge">{{ PLATFORMS[d.platform] ?? d.platform }}</span>
+							</td>
+							<td>{{ formatDate(d.last_seen_at) }}<span v-if="d.last_ip" class="muted"> · {{ d.last_ip }}</span></td>
+							<td>{{ formatDate(d.confirm_until) }}</td>
+							<td><button class="danger" @click="revokeDevice(d)">Abmelden</button></td>
+						</tr>
+					</tbody>
+				</table>
 			</div>
 
 			<div class="card" style="margin-top: 1.5rem">

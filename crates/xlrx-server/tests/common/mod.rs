@@ -100,6 +100,7 @@ pub fn config() -> Config {
         force_copy: false,
         // Tests start watchers themselves where they test them.
         watch: false,
+        device_confirm_days: 30,
     }
 }
 
@@ -156,6 +157,17 @@ impl Env {
             app: self.app.clone(),
             cookie: None,
             origin: Some(ORIGIN.into()),
+            bearer: None,
+        }
+    }
+
+    /// Like an app: no cookie, no origin, only a device token once it has one.
+    pub fn device(&self) -> Client {
+        Client {
+            app: self.app.clone(),
+            cookie: None,
+            origin: None,
+            bearer: None,
         }
     }
 
@@ -184,6 +196,8 @@ pub struct Client {
     app: Router,
     pub cookie: Option<String>,
     pub origin: Option<String>,
+    /// Access token of a device (`Authorization: Bearer …`).
+    pub bearer: Option<String>,
 }
 
 pub struct Resp {
@@ -224,6 +238,16 @@ impl Resp {
 }
 
 impl Client {
+    /// The same client, additionally sending a device token.
+    pub fn clone_with_bearer(&self, token: &str) -> Client {
+        Client {
+            app: self.app.clone(),
+            cookie: self.cookie.clone(),
+            origin: self.origin.clone(),
+            bearer: Some(token.into()),
+        }
+    }
+
     pub async fn send(&mut self, method: &str, path: &str, body: Option<Value>) -> Resp {
         let mut req = Request::builder().method(method).uri(path);
         if let Some(c) = &self.cookie {
@@ -231,6 +255,9 @@ impl Client {
         }
         if let Some(o) = &self.origin {
             req = req.header(header::ORIGIN, o);
+        }
+        if let Some(t) = &self.bearer {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
         }
         let req = match body {
             Some(b) => req
@@ -276,6 +303,9 @@ impl Client {
         }
         if let Some(o) = &self.origin {
             req = req.header(header::ORIGIN, o);
+        }
+        if let Some(t) = &self.bearer {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
         }
         let res = self
             .app

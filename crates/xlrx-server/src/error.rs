@@ -9,6 +9,9 @@ use axum::response::{IntoResponse, Response};
 pub enum ApiError {
     BadRequest(String),
     Unauthorized(String),
+    /// Not signed in, with a reason a device can act on (`token_invalid`: refresh, `revoked` or
+    /// `reauth_required`: sign in again through the browser).
+    Unauthenticated(&'static str, String),
     Forbidden(String),
     NotFound,
     Conflict(String),
@@ -40,6 +43,13 @@ impl IntoResponse for ApiError {
             Self::Forbidden(m) => (StatusCode::FORBIDDEN, m),
             Self::NotFound => (StatusCode::NOT_FOUND, "Nicht gefunden".into()),
             Self::Conflict(m) => (StatusCode::CONFLICT, m),
+            Self::Unauthenticated(reason, m) => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({ "error": m, "reason": reason })),
+                )
+                    .into_response();
+            }
             Self::Rejected(reason, m) => {
                 return (
                     StatusCode::CONFLICT,

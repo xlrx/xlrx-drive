@@ -8,6 +8,7 @@ use serde_json::json;
 use time::OffsetDateTime;
 
 use crate::audit;
+use crate::auth::device;
 use crate::auth::session::{ClientInfo, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
@@ -181,6 +182,7 @@ pub async fn reset_user_factors(db: &sqlx::PgPool, user_id: i64) -> ApiResult<()
         .execute(&mut *tx)
         .await?;
     }
+    device::revoke_all(&mut tx, user_id, "factors_reset").await?;
     tx.commit().await?;
     Ok(())
 }
@@ -213,10 +215,13 @@ pub async fn set_disabled(
     .execute(&st.db)
     .await?;
     if req.disabled {
+        let mut tx = st.db.begin().await?;
         sqlx::query("DELETE FROM sessions WHERE user_id = $1")
             .bind(u.id)
-            .execute(&st.db)
+            .execute(&mut *tx)
             .await?;
+        device::revoke_all(&mut tx, u.id, "user_disabled").await?;
+        tx.commit().await?;
     }
     let action = if req.disabled {
         "user_disabled"

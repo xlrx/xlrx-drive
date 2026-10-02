@@ -1,10 +1,13 @@
 //! Web sessions: random token in the cookie (`HttpOnly`, `Secure`, `SameSite=Strict`), in the DB
 //! only as a hash. Idle timeout 8 h, maximum lifetime 7 days. Sensitive actions require a fresh
 //! second factor (step-up, 10 min).
+//!
+//! Devices (Mac, iPhone) send an access token instead (`Authorization: Bearer …`, see
+//! [`super::device`]); a request with one is judged by the token alone, never by a cookie.
 
 use axum::extract::FromRequestParts;
 use axum::http::HeaderValue;
-use axum::http::header::{COOKIE, USER_AGENT};
+use axum::http::header::{AUTHORIZATION, COOKIE, USER_AGENT};
 use axum::http::request::Parts;
 use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
@@ -19,7 +22,7 @@ pub const IDLE: Duration = Duration::hours(8);
 pub const MAX_AGE: Duration = Duration::days(7);
 pub const STEP_UP_VALID: Duration = Duration::minutes(10);
 
-/// Signed-in person (from the session cookie).
+/// Signed-in person (from the session cookie or a device's access token).
 #[derive(Clone, Debug)]
 pub struct CurrentUser {
     pub id: i64,
@@ -27,11 +30,21 @@ pub struct CurrentUser {
     pub username: String,
     pub display_name: String,
     pub is_admin: bool,
-    pub session_id: i64,
+    /// Signed in through the browser …
+    pub session_id: Option<i64>,
+    /// … or with a device (never both).
+    pub device_id: Option<i64>,
+    /// Only sessions confirm a second factor again; devices never count as stepped up.
     pub step_up_at: Option<OffsetDateTime>,
 }
 
 impl CurrentUser {
+    /// The browser session; actions on the account itself are not possible from a device.
+    pub fn session(&self) -> ApiResult<i64> {
+        self.session_id
+            .ok_or_else(|| ApiError::forbidden("Nur im Browser möglich."))
+    }
+
     pub fn step_up_valid(&self) -> bool {
         self.step_up_at
             .is_some_and(|t| OffsetDateTime::now_utc() - t < STEP_UP_VALID)
@@ -127,6 +140,18 @@ impl FromRequestParts<AppState> for CurrentUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        if let Some(auth) = parts.headers.get(AUTHORIZATION) {
+            let token = auth
+                .to_str()
+                .ok()
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .map(str::to_owned)
+                .ok_or_else(|| ApiError::unauthorized("Ungültige Anmeldung."))?;
+            let client = ClientInfo::from_request_parts(parts, state)
+                .await
+                .unwrap_or_else(|e| match e {});
+            return super::device::authenticate(state, token.trim(), &client).await;
+        }
         let token = token_from_headers(&parts.headers)
             .ok_or_else(|| ApiError::unauthorized("Nicht angemeldet."))?;
         let row: Option<SessionRow> = sqlx::query_as(
@@ -154,7 +179,8 @@ impl FromRequestParts<AppState> for CurrentUser {
             username: row.username,
             display_name: row.display_name,
             is_admin: row.is_admin,
-            session_id: row.session_id,
+            session_id: Some(row.session_id),
+            device_id: None,
             step_up_at: row.step_up_at,
         })
     }

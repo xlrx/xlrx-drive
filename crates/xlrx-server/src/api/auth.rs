@@ -457,7 +457,7 @@ pub async fn step_up_totp(
         .await?;
         return Err(ApiError::unauthorized("Der Code ist ungültig."));
     }
-    session::mark_step_up(&st.db, me.session_id).await?;
+    session::mark_step_up(&st.db, me.session()?).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -467,7 +467,7 @@ pub async fn step_up_passkey_begin(
 ) -> ApiResult<Json<PasskeyBeginResp>> {
     let user = users::by_id_required(&st.db, me.id).await?;
     Ok(Json(
-        start_auth(&st, &user, AuthPurpose::StepUp(me.session_id)).await?,
+        start_auth(&st, &user, AuthPurpose::StepUp(me.session()?)).await?,
     ))
 }
 
@@ -482,12 +482,12 @@ pub async fn step_up_passkey_finish(
         &req.ceremony,
         &req.credential,
         &client,
-        Some(me.session_id),
+        Some(me.session()?),
     )
     .await?;
     if user.id != me.id {
         return Err(ApiError::forbidden("Falsches Konto."));
     }
-    session::mark_step_up(&st.db, me.session_id).await?;
+    session::mark_step_up(&st.db, me.session()?).await?;
     Ok(StatusCode::NO_CONTENT)
 }

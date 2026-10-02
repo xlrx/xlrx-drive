@@ -24,9 +24,11 @@ async function attempt(fn: () => Promise<void>) {
 	}
 }
 
+const route = useRoute();
+
 async function done(me: Me) {
 	set(me);
-	await navigateTo('/');
+	await navigateTo(safeNext(route.query.next));
 }
 
 const submitPassword = () =>

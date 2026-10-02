@@ -1,6 +1,6 @@
 // Account setup, login with authenticator app and passkey, administration, browsing files – in a
 // real browser.
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -60,6 +60,53 @@ const PDF =
 /** The start page greets by time of day. */
 const GREETING = /^(Guten (Morgen|Tag|Abend), .+|Noch wach, .+\?)$/;
 
+/**
+ * Connects a device like the Mac app would: the sign-in page opens in the browser, the person
+ * signs in and allows the device, the app exchanges the code with its PKCE verifier.
+ */
+async function connectDevice(page: Page) {
+	const verifier = 'e2e-verifier-0123456789-abcdefghijklmnopqrstuvwxyz';
+	const challenge = createHash('sha256').update(verifier).digest('base64url');
+	const query = new URLSearchParams({ challenge, redirect_uri: 'xlrx://auth', state: 'e2e', name: 'Testmac', platform: 'macos' });
+
+	// Signed out: first the sign-in, then back to the device page.
+	await page.getByRole('button', { name: 'Abmelden' }).first().click();
+	await expect(page.getByRole('heading', { name: 'Anmelden' })).toBeVisible();
+	await page.goto(`/device?${query}`);
+	await expect(page).toHaveURL(/\/login\?next=/);
+	await page.getByLabel('Benutzername').fill('admin');
+	await page.getByRole('button', { name: 'Mit Passkey anmelden' }).click();
+	await expect(page.getByRole('heading', { name: 'Gerät verbinden' })).toBeVisible();
+	await expect(page.getByText('Testmac (Mac) möchte auf deine Dateien zugreifen.')).toBeVisible();
+	await page.getByRole('button', { name: 'Verbinden' }).click();
+	const back = page.getByRole('link', { name: 'Zurück zur App' });
+	await expect(back).toBeVisible();
+	const redirect = new URL((await back.getAttribute('href'))!);
+	expect(`${redirect.protocol}//${redirect.host}`).toBe('xlrx://auth');
+	expect(redirect.searchParams.get('state')).toBe('e2e');
+
+	// The app's side.
+	const res = await page.request.post('/api/devices/token', {
+		data: { grant_type: 'authorization_code', code: redirect.searchParams.get('code'), code_verifier: verifier, redirect_uri: 'xlrx://auth' }
+	});
+	expect(res.status()).toBe(200);
+	const tokens = await res.json();
+	const auth = { Authorization: `Bearer ${tokens.access_token}` };
+	expect((await page.request.get('/api/roots', { headers: auth })).status()).toBe(200);
+
+	// Listed under "Sicherheit", signed out from there. In a new tab: in this one the browser still
+	// asks which app should open `xlrx://` (there is none here) and takes no clicks.
+	const tab = await page.context().newPage();
+	await tab.goto('/settings/security');
+	const row = tab.getByRole('row', { name: /Testmac/ });
+	await expect(row).toBeVisible();
+	tab.once('dialog', (d) => d.accept());
+	await row.getByRole('button', { name: 'Abmelden' }).click();
+	await expect(tab.getByText('Noch keine Geräte.')).toBeVisible();
+	expect((await tab.request.get('/api/roots', { headers: auth })).status()).toBe(401);
+	await tab.close();
+}
+
 /** Browses "My Drive" of the signed-in admin: folders, preview, download, rescan. */
 async function browseFiles(page: Page, data: string) {
 	const drive = join(data, 'homes/admin/Drive');
@@ -69,9 +116,11 @@ async function browseFiles(page: Page, data: string) {
 	await writeFile(join(drive, 'Projekte/seite.html'), '<script>alert("xss")</script>');
 	await writeFile(join(drive, 'Bilder/Punkt.png'), Buffer.from(PNG, 'base64'));
 	await writeFile(join(drive, 'Bericht.pdf'), PDF);
-	page.on('dialog', () => {
+	// While user content is shown: no script of it may open a dialog.
+	const scriptRan = () => {
 		throw new Error('Benutzerinhalt hat ein Skript ausgeführt');
-	});
+	};
+	page.on('dialog', scriptRan);
 	// Anything the browser refuses (CSP, framing) is a bug in the headers.
 	const refused: string[] = [];
 	page.on('console', (m) => {
@@ -126,6 +175,7 @@ async function browseFiles(page: Page, data: string) {
 	expect((await pdf).status()).toBe(200);
 	await page.waitForTimeout(500);
 	expect(refused).toEqual([]);
+	page.off('dialog', scriptRan);
 }
 
 /** Changes through the web app: folder, upload with conflicts, versions, rename, move, trash. */
@@ -266,6 +316,7 @@ test('Einrichtung, Anmeldung, Verwaltung und Dateien', async ({ page }) => {
 		await browseFiles(page, data);
 		await changeFiles(page, data);
 	}
+	await connectDevice(page);
 });
 
 test('Falsches Passwort zeigt einheitliche Meldung', async ({ page }) => {
