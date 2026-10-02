@@ -116,10 +116,10 @@ Messwerte (`cargo run --release -p xlrx-sync --example scale -- 1000000`, 1 Mio 
 
 | Vorgang | vorher (alles prüfen) | inkrementell |
 |---|---|---|
-| Planung im Ruhezustand | 725 ms | **0,0004 ms** |
-| 1 geänderte Datei erkennen und Upload planen | ~1 s | **0,14 ms** |
-| Ersteinrichtung (identische Stände verknüpfen, ohne Übertragung) | ~3 s | ~10 s (einmalig) |
-| vollständiger Rescan + Planung (nur beim Start ohne gespeicherten Stand) | 4,5 s | 6,6 s |
+| Planung im Ruhezustand | 725 ms | **0,0002 ms** |
+| 1 geänderte Datei erkennen und Upload planen | ~1 s | **0,19 ms** |
+| Ersteinrichtung (identische Stände verknüpfen, ohne Übertragung) | ~3 s | ~9 s (einmalig) |
+| vollständiger Rescan + Planung (nur beim Start ohne gespeicherten Stand) | 4,5 s | 6,1 s |
 
 Der vollständige Fall ist gegenüber vorher langsamer, weil nun jede Änderung ihre Nachbarn markiert.
 Er kommt nur beim ersten Start vor; danach arbeitet der Client mit gespeichertem Stand und FSEvents.
@@ -168,6 +168,19 @@ Datenverluste**:
 | SMB-Namensvariante bei Mac ohne Groß-/Kleinschreibung | Sync kam nie zur Ruhe | Ankömmling wird umbenannt |
 | verspätete Ergebnisse | widersprüchlicher lokaler Baum | 4, Punkte 8 und 9 |
 | Gerätename mit „~“, Upload nach Atomic Save, Anlegen nach Atomic Save | falscher Heimatname, unnötige Konfliktkopie, neuer statt alter Knoten | jeweils behoben |
+
+Danach (Stand 2026-10-02) liefen **1.000.000 Seeds im strengen Modus ohne einen einzigen Befund**:
+keine Abweichung, kein Datenverlust, keine Invariantenverletzung, und das Sicherheitsnetz wurde nie gebraucht.
+
+| Variante | Läufe |
+|---|---|
+| 2 Clients, späte Ergebnisse | 400.000 |
+| 3 Clients, viele späte Ergebnisse | 150.000 |
+| Mac ohne Groß-/Kleinschreibung, SMB-Namensvarianten auf dem Server | 250.000 |
+| grobe Zeitstempel, gleich große Inhalte, viele späte Ergebnisse | 200.000 |
+| **Summe:** 124 Mio. Nutzeraktionen, 99 Mio. Sync-Operationen, 7,6 Mio. Abstürze, 256.000 Server-Konflikte | **1.000.000** |
+
+Damit ist das Abnahmekriterium von B1 („1 Mio Seeds ohne Verletzung“, PLAN 19) erfüllt.
 
 Jeder Befund ist als Regressionstest in `crates/xlrx-sim/tests/regressions.rs` festgehalten. Jeder dieser
 Tests wurde gegen die zurückgenommene Korrektur geprüft und schlägt dann fehl. Die neuen Fehlerarten sind
