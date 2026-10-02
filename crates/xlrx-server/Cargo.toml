@@ -13,6 +13,8 @@ axum = "0.8"
 base64 = "0.23"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 hmac = "0.13"
+# Thumbnails: common photo and image formats only, pure Rust (SIMD chosen at runtime, fine without AVX).
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
 mime_guess = "2"
 notify = { version = "8", default-features = false }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }

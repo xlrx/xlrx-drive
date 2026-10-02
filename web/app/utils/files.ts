@@ -102,6 +102,16 @@ export function opensInBrowser(mime: string | null): boolean {
 }
 
 /** Icon for a node (see FileIcon). */
+/** Types the server makes thumbnails of (same list as `thumbs::supported`). */
+const THUMB_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff']);
+
+/** Thumbnail address; with the revision, so the browser may keep it until the content changes. */
+export function thumbUrl(node: Pick<NodeInfo, 'id' | 'kind' | 'mime' | 'rev'>, size: 64 | 256 | 1024): string | null {
+	return node.kind === 'file' && node.mime && THUMB_TYPES.has(node.mime)
+		? `/api/nodes/${node.id}/thumbnail?s=${size}&v=${node.rev}`
+		: null;
+}
+
 export function iconKind(node: Pick<NodeInfo, 'kind' | 'mime'>): string {
 	if (node.kind === 'dir') return 'folder';
 	const p = previewKind(node.mime);

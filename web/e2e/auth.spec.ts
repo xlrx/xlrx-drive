@@ -168,6 +168,10 @@ async function browseFiles(page: Page, data: string) {
 
 	// Image preview: loads under the strict CSP of the app.
 	await page.getByRole('link', { name: 'Bilder', exact: true }).click();
+	// The list shows a thumbnail of the picture (loaded, not the icon).
+	const thumb = page.getByRole('link', { name: 'Punkt.png', exact: true }).locator('img.thumb');
+	await expect(thumb).toBeVisible();
+	await expect.poll(() => thumb.evaluate((i: HTMLImageElement) => i.complete && i.naturalWidth)).toBe(8);
 	await page.getByRole('link', { name: 'Punkt.png', exact: true }).click();
 	const img = page.getByRole('img', { name: 'Punkt.png' });
 	await expect(img).toBeVisible();

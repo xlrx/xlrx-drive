@@ -175,6 +175,9 @@ async fn serve(state: AppState) -> Result<(), String> {
                 if let Err(e) = xlrx_server::api::uploads::housekeeping(&st).await {
                     tracing::warn!(error = ?e, "Aufräumen der Uploads fehlgeschlagen");
                 }
+                if let Err(e) = xlrx_server::files::thumbs::cleanup(&st).await {
+                    tracing::warn!(error = ?e, "Aufräumen der Vorschaubilder fehlgeschlagen");
+                }
             }
         });
     } else {

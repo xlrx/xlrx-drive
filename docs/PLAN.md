@@ -1121,17 +1121,20 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
 - **B1 erledigt:** Chunker, Sync-Engine (inkrementell), Simulator; nach einem adversarialen Review 1 Mio. Seeds ohne Befund (ADR 0001).
 - **M0 im Code erledigt:** Server mit Konten und Anmeldung (Passwort + TOTP oder Passkey, Wiederherstellungscodes, Step-up, Verwaltung, Audit-Log), Web-App dazu, Docker-Image, compose mit Caddy (macvlan, HTTP/3), CI inkl. Browser-Test und Prüfung ohne AVX.
 - **Offen für M0:** Inbetriebnahme auf dem DS918+ (`deploy/synology.md`) und die Messungen aus `spikes/ds918/`.
-- **M1 weitgehend erledigt (lokal getestet, ohne NAS):**
+- **M1 erledigt (lokal getestet, ohne NAS):**
   - Ablagen („Meine Ablage“ = `homes/NAME/Drive`) mit Knoten und lückenlosem Journal.
   - Abgleich-Scan (Identität über die Inode, Schutz vor wiederverwendeten Inodes und leeren/fehlenden Freigaben, „racy“-Zeitstempel) und Überwachung per inotify mit Teil-Abgleich: Änderungen von außen erscheinen in Sekunden.
   - Ändern über die API: Ordner, Hochladen, Ersetzen mit Versionen (inhaltsadressiert, Reflink), Umbenennen/Verschieben, Papierkorb – jeweils mit Absichtsprotokoll, sodass ein Absturz an jeder Stelle nichts verliert (in Tests für jede Stelle nachgestellt).
   - Änderungs-Feed im Format der Sync-Engine und Live-Ereignisse (SSE); Schreib-Operationen der Sync-Engine über das API (Vorbedingungen, idempotente Op-IDs).
   - Anmeldung von Geräten (Mac/iPhone) über den Browser mit PKCE, rotierende Refresh-Tokens mit Erkennung von Wiederverwendung, Geräteliste mit Abmelden (16.1).
   - Uploads in Teilen (≤ 8 MiB), wiederaufnehmbar, jeder Teil geprüft und vor der Bestätigung auf der Platte (5.3).
+  - Vorschaubilder für Fotos und Bilder (JPEG, PNG, GIF, WebP, BMP, TIFF) beim ersten Abruf, aufrecht gedreht, abgelegt unter dem Hash genau der
+    gelesenen Bytes (nie unter dem Hash aus der Datenbank, damit nie ein fremdes Bild erscheint); höchstens zwei gleichzeitig, Schutz vor
+    „Dekompressionsbomben“. PDF-, HEIC- und Video-Vorschauen kommen mit dem Worker (M2).
   - Web-App mit Durchsuchen, Vorschau, Hochladen, Versionen, Papierkorb und Live-Aktualisierung; Startseite mit Begrüßung und Berglandschaft nach Tageszeit aus dem App-Entwurf.
-- **Offen für M1:** Vorschaubilder.
+- **M1 im Code fertig.** Offen bleibt der Nachweis auf dem NAS (echte Daten aus Synology Drive, Änderungen per SMB).
 
-**Nächster Schritt:** Rest von M1, dann Inbetriebnahme auf dem DS918+ mit den Spike-Messungen.
+**Nächster Schritt:** Inbetriebnahme auf dem DS918+ mit den Spike-Messungen (M0) und dem M1-Nachweis mit den echten Daten.
 
 ---
 

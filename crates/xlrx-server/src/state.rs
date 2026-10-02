@@ -28,6 +28,8 @@ pub struct Inner {
     pub ceremonies: Ceremonies,
     /// Limits concurrent password checks (argon2 needs CPU and RAM; protection against overload).
     pub hashing: Semaphore,
+    /// Limits concurrent thumbnail rendering (decoding photos is heavy for the NAS CPU).
+    pub thumbnails: Semaphore,
     /// Content Security Policy for the web app (inline script hashes), if one is configured.
     pub web_csp: Option<String>,
     /// One lock per root: scans and changes through the API never run at the same time on the
@@ -83,6 +85,7 @@ impl AppState {
             webauthn,
             ceremonies: Ceremonies::default(),
             hashing: Semaphore::new(2),
+            thumbnails: Semaphore::new(2),
         })))
     }
 

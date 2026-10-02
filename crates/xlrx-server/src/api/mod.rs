@@ -99,6 +99,7 @@ pub fn router(state: AppState) -> Router {
                 .delete(files::delete_node),
         )
         .route("/nodes/{id}/children", get(files::children))
+        .route("/nodes/{id}/thumbnail", get(files::thumbnail))
         .route(
             "/nodes/{id}/content",
             get(files::content).put(files::replace_content),
@@ -131,7 +132,8 @@ pub fn router(state: AppState) -> Router {
         // Called by apps (no browser, no cookie): proves itself with a PKCE verifier or a
         // refresh token, so it needs no origin check.
         .route("/devices/token", post(devices::token))
-        .layer(SetResponseHeaderLayer::overriding(
+        // Nothing is kept unless a response says otherwise (thumbnails of a known revision).
+        .layer(SetResponseHeaderLayer::if_not_present(
             CACHE_CONTROL,
             HeaderValue::from_static("no-store"),
         ))

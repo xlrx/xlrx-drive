@@ -139,6 +139,8 @@ const restoreVersion = (v: VersionInfo) =>
 
 // Uploads into the folder shown, or a new version of the file shown.
 const uploads = useUploads(() => load());
+/** Images whose thumbnail failed: the icon instead. */
+const noThumb = reactive(new Set<number>());
 const picker = ref<HTMLInputElement | null>(null);
 const versionPicker = ref<HTMLInputElement | null>(null);
 
@@ -240,7 +242,15 @@ async function newVersion(e: Event) {
 					<tr v-for="c in children" :key="c.id">
 						<td>
 							<NuxtLink :to="`/files/${c.id}`" class="name">
-								<FileIcon :kind="iconKind(c)" />
+								<img
+									v-if="thumbUrl(c, 64) && !noThumb.has(c.id)"
+									class="thumb"
+									:src="thumbUrl(c, 64)!"
+									alt=""
+									loading="lazy"
+									@error="noThumb.add(c.id)"
+								/>
+								<FileIcon v-else :kind="iconKind(c)" />
 								<span>{{ c.name }}</span>
 							</NuxtLink>
 						</td>
@@ -367,6 +377,7 @@ async function newVersion(e: Event) {
 .list tbody tr:hover { background: var(--bg); }
 .name { display: flex; align-items: center; gap: 0.6rem; color: var(--text); text-decoration: none; overflow-wrap: anywhere; }
 .name:hover span { text-decoration: underline; }
+.thumb { width: 28px; height: 28px; margin: -4px; object-fit: cover; border-radius: 4px; flex: none; background: var(--border); }
 .when { white-space: nowrap; width: 9rem; }
 .size { white-space: nowrap; width: 6rem; text-align: right; }
 .act { width: 5rem; text-align: right; white-space: nowrap; }

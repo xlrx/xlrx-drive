@@ -17,7 +17,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::files::content::{self as file_content, Target, VersionInfo};
 use crate::files::db::{self, NODE_COLS, NodeRow, RootRow};
 use crate::files::ops::{self, TrashItem};
-use crate::files::roots;
+use crate::files::{roots, thumbs};
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -386,6 +386,122 @@ pub struct UploadQuery {
     pub mtime_ms: Option<i64>,
     /// Announced length; a shorter or longer body is refused.
     pub size: Option<u64>,
+}
+
+#[derive(Deserialize)]
+pub struct ThumbQuery {
+    /// Longest side in pixels (one of [`thumbs::SIZES`]).
+    pub s: u32,
+    /// The revision the caller knows: if it is current, the browser may keep the answer.
+    pub v: Option<i64>,
+}
+
+/// Thumbnail of an image; 404 for anything that has none.
+pub async fn thumbnail(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    Path(id): Path<i64>,
+    Query(q): Query<ThumbQuery>,
+) -> ApiResult<Response> {
+    if !thumbs::SIZES.contains(&q.s) {
+        return Err(ApiError::bad("Ungültige Größe."));
+    }
+    let (node, root) = visible(&st, &me, id).await?;
+    let mime = mime_guess::from_path(&node.name).first_or_octet_stream();
+    if node.is_dir() || !thumbs::supported(mime.essence_str()) {
+        return Err(ApiError::NotFound);
+    }
+    let data_dir = st.cfg.data_dir.clone().ok_or(ApiError::NotFound)?;
+    let state_dir = st.cfg.state_dir.clone().ok_or(ApiError::NotFound)?;
+    let known: Option<[u8; 32]> = node.content_hash.as_deref().and_then(|h| h.try_into().ok());
+    let size = q.s;
+    let sd = state_dir.clone();
+    let found = blocking(move || match known {
+        Some(h) => thumbs::cached(&sd, &h, size),
+        None => thumbs::Cached::Missing,
+    })
+    .await?;
+    let made = match found {
+        thumbs::Cached::Image(path, mime) => Some((
+            blocking(move || std::fs::read(path))
+                .await?
+                .map_err(io_err)?,
+            mime,
+        )),
+        thumbs::Cached::Failed => None,
+        thumbs::Cached::Missing => {
+            let _permit = st
+                .thumbnails
+                .acquire()
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            let path = roots::dir(&data_dir, &root).join(db::rel_path(&st.db, node.id).await?);
+            blocking(move || make_thumbnail(&path, &state_dir, size))
+                .await?
+                .map_err(io_err)?
+        }
+    };
+    let (bytes, mime) = made.ok_or(ApiError::NotFound)?;
+    let cache = if q.v == Some(node.rev) {
+        "private, max-age=31536000, immutable"
+    } else {
+        "private, no-cache"
+    };
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, mime),
+            (axum::http::header::CACHE_CONTROL, cache),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> ApiResult<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))
+}
+
+fn io_err(e: std::io::Error) -> ApiError {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        ApiError::NotFound
+    } else {
+        ApiError::Internal(format!("Vorschaubild: {e}"))
+    }
+}
+
+/// Reads the file once, files the thumbnail under the hash of exactly those bytes.
+fn make_thumbnail(
+    path: &std::path::Path,
+    state_dir: &std::path::Path,
+    size: u32,
+) -> std::io::Result<Option<(Vec<u8>, &'static str)>> {
+    if std::fs::metadata(path)?.len() > thumbs::MAX_INPUT {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path)?;
+    let hash = xlrx_chunk::Chunker::new()
+        .digest_slice(&bytes)
+        .content
+        .hash
+        .0;
+    match thumbs::cached(state_dir, &hash, size) {
+        thumbs::Cached::Image(p, mime) => return Ok(Some((std::fs::read(p)?, mime))),
+        thumbs::Cached::Failed => return Ok(None),
+        thumbs::Cached::Missing => {}
+    }
+    match thumbs::render(&bytes, size) {
+        Ok((thumb, mime)) => {
+            thumbs::store(state_dir, &hash, size, Some((&thumb, mime)))?;
+            Ok(Some((thumb, mime)))
+        }
+        Err(e) => {
+            tracing::debug!(path = %path.display(), error = %e, "kein Vorschaubild möglich");
+            thumbs::store(state_dir, &hash, size, None)?;
+            Ok(None)
+        }
+    }
 }
 
 pub(crate) fn mtime(ms: Option<i64>) -> Option<OffsetDateTime> {
