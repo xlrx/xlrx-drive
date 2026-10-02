@@ -22,7 +22,7 @@ Stand: 2026-10-02 · Status: v5 – alle Grundsatzfragen geklärt, bereit für M
 10. [Web-UI](#10-web-ui)
 11. [Mac-App](#11-mac-app)
 12. [iOS-App](#12-ios-app)
-13. [Datenmodell (Postgres)](#13-datenmodell-postgres)
+13. [Datenbanken & Datenmodell](#13-datenbanken--datenmodell)
 14. [API-Überblick](#14-api-überblick)
 15. [Betrieb auf der Synology](#15-betrieb-auf-der-synology)
 16. [Sicherheit](#16-sicherheit)
@@ -105,7 +105,7 @@ Die Kombination „normale Dateien + Google-Drive-UX + eigene Suche“ gibt es f
 │   ├─ Startseite / Aktivität / Benachrichtigungen (SSE, APNs)              │
 │   └─ Auth, Freigaben, Links, Admin                                        │
 │          │                            │                                   │
-│  postgres 17 + pgvector         xlrx-worker  (Rust, gleiche Codebasis)    │
+│  postgres 18 + pgvector 0.8     xlrx-worker  (Rust, gleiche Codebasis)    │
 │   Metadaten, Journal, Rechte,    ├─ Thumbnails/Vorschau (libvips, ffmpeg, │
 │   Job-Queue, Texte, Vektoren     │   LibreOffice → PDF)                   │
 │                                  ├─ Text-Extraktion (→ tika), EXIF, Geo   │
@@ -167,6 +167,7 @@ Ein **Hardware-Spike in M0** misst die echten Werte auf deinem Gerät, bevor Fea
 - Subvolume-übergreifende Reflinks im `/volume1`-Mount
 - Rechte-Durchsetzung für den Benutzer `xlrx` und Vererbung der Synology-ACLs
 - Verhalten von Synology Drive bei kurzlebigen Temp-Dateien
+- Copy-on-Write für die DB-Freigabe abschalten (13.2)
 
 ---
 
@@ -184,8 +185,9 @@ Ein **Hardware-Spike in M0** misst die echten Werte auf deinem Gerät, bevor Fea
     store/versions/ab/cd/<blake3>         ← alte Versionen (Reflink-Klone, inhaltsadressiert)
     store/trash/<node-id>/…               ← Papierkorb (30 Tage)
     store/staging/<upload-id>             ← Uploads im Aufbau
-    db/  index/  thumbs/                  ← Postgres, Tantivy, Vorschauen (abgeleitet, nicht gesichert)
     dumps/                                ← nächtlicher pg_dump (→ Hyper Backup)
+  xlrx-db/                                ← eigene Freigabe für DB und abgeleitete Daten (13.2)
+    postgres/  index/  thumbs/            ← Postgres, Tantivy, Vorschauen (nicht im Backup, nur die Dumps)
 ```
 
 - **Warum das ganze Volume:** Jede Synology-Freigabe (`homes`, jeder Team-Ordner, `xlrx-state`) ist ein eigenes Btrfs-Subvolume.
@@ -199,7 +201,7 @@ Ein **Hardware-Spike in M0** misst die echten Werte auf deinem Gerät, bevor Fea
 
   Migration bedeutet Einbinden statt Kopieren.
 - **Rechte eng trotz breitem Mount:** Der Container läuft **nie als root**, sondern als DSM-Benutzer `xlrx`. Dieser hat DSM-Rechte nur auf `homes`,
-  die eingebundenen Team-Ordner und `xlrx-state`. Die Rechte werden direkt dem Benutzer gegeben, nicht nur über Gruppen.
+  die eingebundenen Team-Ordner, `xlrx-state` und `xlrx-db`. Die Rechte werden direkt dem Benutzer gegeben, nicht nur über Gruppen.
   Der Kernel setzt die Synology-ACLs auch im Container durch, alles andere auf dem Volume bleibt unzugänglich. Das wird im M0-Spike nachgewiesen.
   Ebenso wird geprüft, ob neue Dateien die ACLs des Elternordners erben, damit Nutzer sie per SMB weiter bearbeiten können.
   Falls nicht, setzt der Server die Rechte nach dem Schreiben explizit.
@@ -705,9 +707,68 @@ Finder-Tags synchronisieren.
 
 ---
 
-## 13. Datenmodell (Postgres)
+## 13. Datenbanken & Datenmodell
 
-Skizze der wichtigsten Tabellen:
+### 13.1 Welche Datenbank wofür
+| Einsatz | Wahl | Warum |
+|---|---|---|
+| **Server: Metadaten, Journal, Rechte, Jobs, Aktivität, Vektoren** | **PostgreSQL 18 + pgvector 0.8** (ein Container) | Siehe unten. Eine einzige Datenbank für alles Transaktionale. |
+| **Volltextsuche** | **Tantivy** (Rust-Bibliothek im Server, keine eigene DB) | BM25, deutsche/englische Stemmer, Fuzzy, Snippets. Abgeleitet: jederzeit aus den Texten in Postgres neu aufbaubar. |
+| **Clients (Mac/iOS): Sync-Zustand** | **SQLite** im Rust-Kern (WAL-Modus) | Drei Bäume, Hash-Cache, Chunk-Listen. Lokal, eine Datei, absturzsicher, ohne Server-Prozess. |
+
+**Warum PostgreSQL:**
+- **Transaktionen für den Zuverlässigkeits-Kern:** Journal, Intent-Log (4.3) und Knoten werden gemeinsam atomar geändert.
+- **Mehrere gleichzeitige Schreiber:** Server, Worker und Watcher schreiben parallel. Bei SQLite gäbe es nur einen Schreiber pro Datenbank, über Container-Grenzen hinweg.
+- **Job-Queue ohne Zusatzdienst:** `FOR UPDATE SKIP LOCKED` für Jobs und `LISTEN/NOTIFY` für Live-Updates (SSE). Redis oder RabbitMQ sind nicht nötig.
+- **Rechte-Filter:** Arrays mit GIN-Index für `ancestor_ids` (9.3).
+- **Vektoren im selben System:** Rechte-Filter und Vektorsuche laufen in einer Abfrage. HNSW über binär quantisierte Vektoren, gefilterte iterative Suche (pgvector ≥ 0.8). Eine separate Vektor-DB mit doppelt gepflegten Rechten entfällt.
+- **Partitionierung** für die großen Ereignistabellen (`access_events` pro Monat).
+- **Ausgereift:** Ein `pg_dump` ist ein vollständiges, portables Backup. Major-Upgrades laufen über `pg_upgrade`.
+
+**Bewusst nicht gewählt:**
+
+| Alternative | Grund |
+|---|---|
+| SQLite auf dem Server | Leichter, aber nur ein Schreiber, kein `SKIP LOCKED`/`NOTIFY`, Vektorsuche (`sqlite-vec`) weniger ausgereift. Bei 3 Mio Dateien und parallelen Jobs unnötig riskant. |
+| OpenSearch/Elasticsearch | JVM mit 2–4 GB RAM, zusätzliche Datenhaltung mit eigenen Rechten. Auf dem DS918+ zu schwer. |
+| Meilisearch | Schnell, aber schwache deutsche Wortstämme und RAM-hungrige Indexierung. Tantivy passt besser in den Rust-Server. |
+| Qdrant (eigene Vektor-DB) | Gut, aber zusätzlicher Dienst, Rechte doppelt pflegen. pgvector reicht für 3–4 Mio Vektoren. |
+| ParadeDB (`pg_search`, BM25 in Postgres) | Elegant, weil dann auch die Volltextsuche in Postgres läuft. Aber jüngere Erweiterung und AGPL. Option für später, die Suche ist austauschbar gekapselt. |
+| MariaDB/MySQL, MongoDB | keine Vorteile für dieses Datenmodell |
+
+### 13.2 Betrieb auf dem DS918+
+- **Version:** **PostgreSQL 18** (aktuelle stabile Hauptversion). PostgreSQL 19 ist gerade im Release-Candidate-Stadium, GA wird für Oktober 2026 erwartet.
+  Der Wechsel auf 19 erfolgt später per `pg_upgrade`, sobald ein pgvector-Image dafür existiert und 19.1/19.2 erschienen ist.
+- **Image:** `pgvector/pgvector:pg18`. Es wird mit `OPTFLAGS=""` gebaut, also ohne `-march=native` und **ohne AVX-Annahme**.
+  Damit läuft es auf dem J3455. Der QEMU-Check in der CI (17) stellt das trotzdem sicher.
+- **Ablage:** eigene Freigabe **`xlrx-db`**, getrennt von `xlrx-state`:
+  - **Grund:** Datenbanken schreiben zufällig in große Dateien. Auf Btrfs mit Copy-on-Write fragmentiert das stark. Für `xlrx-db` wird deshalb
+    Copy-on-Write abgeschaltet (NOCOW bzw. Synology-Datenprüfsumme aus; das genaue Vorgehen klärt der M0-Spike).
+  - Die Integrität sichern Postgres' eigene Datenprüfsummen, ab PG 18 standardmäßig aktiv.
+  - Der Versionsspeicher in `xlrx-state` **muss** Copy-on-Write behalten. Reflinks zwischen NOCOW- und CoW-Dateien lehnt Btrfs ab.
+    Deshalb sind es zwei getrennte Freigaben.
+  - Der SSD-Cache fängt die zufälligen Lesezugriffe ab.
+- **Startwerte** (16–20 GB RAM, werden im Betrieb nachjustiert):
+
+  | Parameter | Wert | Zweck |
+  |---|---|---|
+  | `shared_buffers` | 3 GB | Arbeitsspeicher-Cache |
+  | `effective_cache_size` | 8 GB | Planer-Hinweis auf den Page-Cache |
+  | `work_mem` / `maintenance_work_mem` | 16 MB / 512 MB | Sortierungen / Index-Aufbau (HNSW) |
+  | `max_connections` | 40 | Connection-Pool liegt in der App (`sqlx`) |
+  | `synchronous_commit` | `on` | **kein Datenverlust** bei Stromausfall, nicht verhandelbar |
+  | `checkpoint_timeout` / `max_wal_size` | 15 min / 4 GB | weniger Schreiblast auf SSD und HDD |
+  | `wal_compression` | `zstd` | weniger WAL-Volumen |
+  | `io_method` | `worker` (Standard) | `io_uring` braucht einen neueren Kernel als 4.4 |
+
+- **Größe:** 10–30 GB bei ~1,5 Mio Dateien, inklusive extrahierter Texte und Vektoren.
+- **Backup:** nächtlicher `pg_dump` (Custom-Format, komprimiert) nach `xlrx-state/dumps` → Hyper Backup.
+  Point-in-Time-Recovery per WAL-Archivierung ist vorerst nicht nötig, kann aber nachgerüstet werden.
+- **IDs:** 64-Bit-Sequenzen für Knoten und Journal (kompakt, schnell, sortierbar). Für extern sichtbare IDs, etwa Link-Tokens, werden Zufallswerte verwendet.
+
+### 13.3 Schema-Skizze
+
+Die wichtigsten Tabellen:
 
 ```
 users(id, username, display_name, email, password_hash, totp_secret_enc, totp_last_step, is_admin, quota_bytes, …)
@@ -785,7 +846,7 @@ Metriken  /metrics (Prometheus) · /healthz
 - **Container Manager → Projekt** mit `docker-compose.yml` (liegt unter `deploy/`). Dienste: `xlrx-server`, `xlrx-worker`, `postgres`,
   `tika`, `embed-local`, `caddy` (eigene IP, siehe 15.3). Images werden per GitHub Actions für amd64 **mit x86-64-v2 als Basis** gebaut (kein AVX, siehe 3.1)
   und in GHCR veröffentlicht.
-- Ein eigener DSM-Benutzer `xlrx` (PUID/PGID, nie root) mit Lese-/Schreibrechten nur auf `homes`, die eingebundenen Team-Ordner und `xlrx-state`.
+- Ein eigener DSM-Benutzer `xlrx` (PUID/PGID, nie root) mit Lese-/Schreibrechten nur auf `homes`, die eingebundenen Team-Ordner, `xlrx-state` und `xlrx-db`.
   `/volume1` wird als Ganzes gemountet (4.1). Der Worker mountet es **read-only**.
   CPU-Limits in compose: Worker und `embed-local` zusammen max. 2 Kerne tagsüber.
 - **Boot-Aufgabe** (Aufgabenplaner, root):
@@ -835,7 +896,7 @@ Metriken  /metrics (Prometheus) · /healthz
 - **Kosten** für 3 TB bei Hetzner: ~19 €/Monat. Glacier-Klassen sind billiger, passen aber nicht, weil Hyper Backup direkten Lesezugriff braucht.
 - **Wiederherstellung üben:** Vierteljährlich einen zufälligen Ordner und den `pg_dump` in eine Testumgebung zurückspielen. Der Admin-Bereich erinnert daran.
 - **Status:** Das Backup ist eingerichtet. Offen bleiben eine erste Wiederherstellungsprobe (falls noch nicht gemacht) und die Ergänzung um
-  `xlrx-state/dumps` und `store/versions`, sobald xlrx produktiv läuft. `xlrx-state/db`, `index` und `thumbs` bleiben ausgenommen.
+  `xlrx-state/dumps` und `store/versions`, sobald xlrx produktiv läuft. Die Freigabe `xlrx-db` (Postgres-Dateien, Index, Thumbnails) bleibt ausgenommen.
 
 ### 15.2 Außen-Beschleuniger (S3-Cache)
 **Problem:** Jeder Download von außen, über Freigabe-Links oder vom Handy unterwegs, läuft durch den Upload des Heimanschlusses
@@ -1024,7 +1085,7 @@ Zwei parallele Stränge: **A – Server/Web/Suche** liefert früh Nutzen, währe
 
 | # | Meilenstein | Inhalt | Fertig, wenn … | Größe |
 |---|---|---|---|---|
-| **M0** | Fundament + DS918-Spike | Workspace, CI (Rust/Web/Apple, x86-64-v2 + QEMU-Check), Docker-Images, compose, Caddy-Beispiel, Postgres-Schema, **Auth (Passwort + TOTP oder Passkey, Wiederherstellungscodes, Sitzungen, Step-up)**, Admin-Grundgerüst. **Spike auf dem DS918+:** lokale Embedding-Laufzeit ohne AVX (ONNX vs. llama.cpp, e5-small vs. embeddinggemma), QUIC- vs. HTTP/2-Durchsatz, BLAKE3-Geschwindigkeit, **Subvolume-übergreifende Reflinks im `/volume1`-Mount**, Rechte-Durchsetzung für Benutzer `xlrx`, ACL-Vererbung, Temp-Dateien vs. Synology Drive, Hilfsdateien von Synology Drive. `Caddyfile` + compose für den Caddy-Container mit eigener IP (15.3). Router und DNS stellst du selbst um. | `docker compose up` auf der Synology zeigt den Login über die eigene Domain per HTTP/3. Messwerte stehen in `spikes/ds918/`. Anmeldung nur mit Passwort + OTP oder Passkey möglich | M |
+| **M0** | Fundament + DS918-Spike | Workspace, CI (Rust/Web/Apple, x86-64-v2 + QEMU-Check), Docker-Images, compose, Caddy-Beispiel, Postgres-Schema, **Auth (Passwort + TOTP oder Passkey, Wiederherstellungscodes, Sitzungen, Step-up)**, Admin-Grundgerüst. **Spike auf dem DS918+:** lokale Embedding-Laufzeit ohne AVX (ONNX vs. llama.cpp, e5-small vs. embeddinggemma), QUIC- vs. HTTP/2-Durchsatz, BLAKE3-Geschwindigkeit, **Subvolume-übergreifende Reflinks im `/volume1`-Mount**, Rechte-Durchsetzung für Benutzer `xlrx`, ACL-Vererbung, Temp-Dateien vs. Synology Drive, NOCOW für `xlrx-db`, Hilfsdateien von Synology Drive. `Caddyfile` + compose für den Caddy-Container mit eigener IP (15.3). Router und DNS stellst du selbst um. | `docker compose up` auf der Synology zeigt den Login über die eigene Domain per HTTP/3. Messwerte stehen in `spikes/ds918/`. Anmeldung nur mit Passwort + OTP oder Passkey möglich | M |
 | **M1** | Server-Kern + Web-Basis | Speicher-Schnittstelle `ContentStore` mit `PlainFsStore` (4.6), Roots (bestehende Drive-Ordner einbinden), Watcher + Abgleich-Scan, Journal, Upload/Download (Chunks), Versionen (Reflink), Papierkorb, Web: Durchsuchen, Upload, Vorschau, Thumbnails | Web-UI zeigt die echten Daten aus Synology Drive, Änderungen per SMB erscheinen in Sekunden | L |
 | **B1** | Sync-Kern in Simulation | xlrx-chunk, xlrx-sync (sans-IO), xlrx-sim, Konfliktregeln, Invarianten | 1 Mio Seeds ohne Verletzung | L |
 | **M2** | Volltextsuche I | Tika-Extraktion, Tesseract-OCR, Tantivy (de/en), Filter/Syntax, Snippets, Rechte-Filter, Such-UI | Suche nach Inhalt in PDF/Office/Scans, p95 < 300 ms bei Bestandsgröße | M |
