@@ -1100,7 +1100,12 @@ Zwei parallele Stränge: **A – Server/Web/Suche** liefert früh Nutzen, währe
 Größen: S ≈ Tage, M ≈ 1–3 Wochen, L ≈ 3–6 Wochen, XL ≈ 6+ Wochen fokussierte Arbeit. Das sind grobe Richtwerte.
 Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
 
-**Sinnvoller nächster Schritt:** M0 + Beginn von B1 (Chunker + Engine-Skelett + Simulator).
+**Stand 2026-10-02:**
+- **B1 erledigt:** Chunker, Sync-Engine (inkrementell), Simulator; nach einem adversarialen Review 1 Mio. Seeds ohne Befund (ADR 0001).
+- **M0 im Code erledigt:** Server mit Konten und Anmeldung (Passwort + TOTP oder Passkey, Wiederherstellungscodes, Step-up, Verwaltung, Audit-Log), Web-App dazu, Docker-Image, compose mit Caddy (macvlan, HTTP/3), CI inkl. Browser-Test und Prüfung ohne AVX.
+- **Offen für M0:** Inbetriebnahme auf dem DS918+ (`deploy/synology.md`) und die Messungen aus `spikes/ds918/`.
+
+**Nächster Schritt:** Spike-Ergebnisse auswerten, dann M1 (Speicher, Watcher, Journal, Upload/Download, Versionen, Web-Durchsuchen).
 
 ---
 
