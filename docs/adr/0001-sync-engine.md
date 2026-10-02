@@ -61,7 +61,37 @@ R gegen S ergibt die Server-Änderung, L gegen S die lokale Änderung.
    - Status: In den Simulationsläufen wird es derzeit nicht benötigt, es ist eine Rückfallebene.
 7. **Server-Versionen und Papierkorb** (siehe PLAN 4.2/4.3) bleiben als zusätzliches Netz.
 
-### 5. Deterministische Simulation (`xlrx-sim`)
+### 5. Inkrementelle Planung
+
+Die Engine prüft nicht bei jedem Durchlauf alle Dateien, sondern nur:
+- Objekte, die sich geändert haben, samt Nachbarn: Elternordner, Kinder bei Ordnern, deren Existenz oder Verknüpfung sich ändert, und Beteiligte an Operationsergebnissen.
+- Objekte, die beim letzten Mal warten mussten.
+
+Alle Änderungen an R, S und L laufen über Hilfsfunktionen, die diese Markierungen setzen. Nach einem
+Neustart, einem vollständigen Scan oder einem vollständigen Server-Stand wird einmal alles geprüft.
+
+Lokale Änderungen kommen einzeln über `on_local_changes`, im Client aus FSEvents und einem Rescan der
+betroffenen Ordner. **Vertrag dieser Schnittstelle:**
+- Verschobene Objekte werden mit ihrem neuen Ort gemeldet, zusammen mit allen Vorfahren, die die Engine nicht kennt.
+- Als gelöscht wird nur gemeldet, was es nicht mehr gibt.
+
+Der Simulator wechselt zufällig zwischen vollständigen Scans, Änderungslisten und Teil-Rescans einzelner
+Ordner. Nach **jeder** Planung ohne Ergebnis prüft er, dass auch eine vollständige Planung nichts mehr fände
+(`Engine::verify_incremental`).
+
+Messwerte (`cargo run --release -p xlrx-sync --example scale -- 1000000`, 1 Mio Dateien in 10.000 Ordnern):
+
+| Vorgang | vorher (alles prüfen) | inkrementell |
+|---|---|---|
+| Planung im Ruhezustand | 725 ms | **0,0004 ms** |
+| 1 geänderte Datei erkennen und Upload planen | ~1 s | **0,14 ms** |
+| Ersteinrichtung (identische Stände verknüpfen, ohne Übertragung) | ~3 s | ~10 s (einmalig) |
+| vollständiger Rescan + Planung (nur beim Start ohne gespeicherten Stand) | 4,5 s | 6,6 s |
+
+Der vollständige Fall ist gegenüber vorher langsamer, weil nun jede Änderung ihre Nachbarn markiert.
+Er kommt nur beim ersten Start vor; danach arbeitet der Client mit gespeichertem Stand und FSEvents.
+
+### 6. Deterministische Simulation (`xlrx-sim`)
 
 - **Aufbau eines Laufs:** simulierter Server (Journal, Idempotenz, gleiche Konfliktsemantik) und 2–3 Clients mit simuliertem Dateisystem (Inodes, POSIX-`rename`, optional ohne Groß-/Kleinschreibung wie APFS).
 - **Zufällig gemischt werden:**
@@ -93,7 +123,7 @@ Der Sync blieb stehen oder ließ Unterschiede übrig.
 
 ## Offene Punkte
 
-- **Inkrementelle Planung:** Zurzeit vergleicht jeder Durchlauf alle Knoten, das sind O(Anzahl Dateien) pro Durchlauf. Für 1 Mio Dateien braucht es Dirty-Sets; die Struktur ist dafür vorbereitet.
+- **Vollständiger Scan/Erstplanung beschleunigen:** Baum-Aufbau mit vorberechneten Namensschlüsseln, Persistenz von L im Client.
 - **Selective Sync:** ausgeschlossene Teilbäume dürfen nicht als „lokal gelöscht“ gelten.
 - **Ignorierte Dateien:** `.DS_Store` u.ä. in zu löschenden Ordnern.
 - **Massenlösch-Schutz:** Der Konfigurationswert existiert, die Bestätigungslogik fehlt noch.

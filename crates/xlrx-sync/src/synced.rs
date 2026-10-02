@@ -91,6 +91,11 @@ impl Synced {
         }
     }
 
+    /// Gleiche Einträge (ohne Änderungszähler)?
+    pub fn same_entries(&self, other: &Synced) -> bool {
+        self.entries == other.entries
+    }
+
     /// Prüft die Konsistenz des Rückwärtsindex.
     pub fn check(&self) -> Result<(), String> {
         for (n, e) in &self.entries {

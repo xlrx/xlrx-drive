@@ -1,11 +1,14 @@
 //! Ablaufsteuerung: zufällige Nutzeraktionen, Sync-Schritte, Netzfehler und Abstürze –
 //! danach Ruhephase und Prüfung von Konvergenz und Datenerhalt.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 
 use xlrx_proto::{ContentHash, FileContent, Kind, Name, NodeId, Seq};
-use xlrx_sync::{Config, Engine, LocalId, LocalOp, LocalResult, Op, RemoteOp, RemoteResult, State};
+use xlrx_sync::{
+    Config, Engine, LocalEntry, LocalId, LocalObservation, LocalOp, LocalResult, Op, RemoteOp,
+    RemoteResult, State,
+};
 
 use crate::fs::SimFs;
 use crate::rng::Rng;
@@ -511,24 +514,139 @@ impl Sim {
         self.persist(ci)
     }
 
+    /// Scan in einer von drei Formen, wie sie der echte Client nutzt:
+    /// vollständig, als Änderungsliste gegen den Stand der Engine, oder als Rescan eines
+    /// einzelnen Ordners (FSEvents). Der Teil-Rescan hält den Vertrag des Clients ein:
+    /// Verschobene Objekte werden mit neuem Ort samt Vorfahren gemeldet, als gelöscht nur,
+    /// was es nicht mehr gibt.
     fn scan(&mut self, ci: usize) -> Result<(), SimFailure> {
+        self.scan_with(ci, true)
+    }
+
+    /// `partial`: Teil-Rescans erlaubt. In der Ruhephase nicht, denn dort soll jede Änderung
+    /// gesehen werden (wie im Client, dem FSEvents jede Änderung meldet).
+    fn scan_with(&mut self, ci: usize, partial: bool) -> Result<(), SimFailure> {
+        let mode = if !self.clients[ci].engine.has_local_tree() {
+            0
+        } else if partial {
+            self.rng.below(10)
+        } else {
+            self.rng.below(8)
+        };
         let c = &mut self.clients[ci];
-        let snap = c.fs.snapshot();
         let root = LocalId(c.fs.root);
-        c.engine.on_local_snapshot(root, snap);
-        self.log(format!("C{ci} scannt"));
+        if mode < 4 {
+            c.engine.on_local_snapshot(root, c.fs.snapshot());
+            self.log(format!("C{ci} scannt (vollständig)"));
+            return self.persist(ci);
+        }
+        let fs_now: BTreeMap<LocalId, LocalEntry> =
+            c.fs.snapshot()
+                .into_iter()
+                .map(|o| (o.id, o.entry))
+                .collect();
+        let known = c.engine.local_tree();
+        // Welche Objekte betrachtet dieser Scan?
+        let scope: BTreeSet<LocalId> = if mode < 8 {
+            known
+                .ids()
+                .into_iter()
+                .chain(fs_now.keys().copied())
+                .collect()
+        } else {
+            let dirs: Vec<u64> =
+                c.fs.inodes
+                    .iter()
+                    .filter(|(_, i)| i.kind == Kind::Dir)
+                    .map(|(k, _)| *k)
+                    .collect();
+            let d = if dirs.is_empty() {
+                c.fs.root
+            } else {
+                dirs[self.rng.below(dirs.len())]
+            };
+            let c = &self.clients[ci];
+            let known = c.engine.local_tree();
+            let mut sc: BTreeSet<LocalId> = known.descendants(LocalId(d)).into_iter().collect();
+            sc.insert(LocalId(d));
+            for (id, e) in &fs_now {
+                if c.fs.within(id.0, d) || e.parent.0 == d {
+                    sc.insert(*id);
+                }
+            }
+            sc
+        };
+        let c = &self.clients[ci];
+        let known = c.engine.local_tree();
+        let mut upserts = BTreeMap::new();
+        let mut removed = Vec::new();
+        for id in &scope {
+            if *id == root {
+                continue;
+            }
+            match fs_now.get(id) {
+                None => {
+                    if known.contains(*id) {
+                        removed.push(*id);
+                    }
+                }
+                Some(e) => {
+                    if known.get(*id) != Some(e) {
+                        upserts.insert(*id, e.clone());
+                        // Vorfahren mitmelden, die die Engine nicht (so) kennt.
+                        let mut p = e.parent;
+                        while p != root {
+                            let Some(pe) = fs_now.get(&p) else { break };
+                            if known.get(p) == Some(pe) {
+                                break;
+                            }
+                            upserts.insert(p, pe.clone());
+                            p = pe.parent;
+                        }
+                    }
+                }
+            }
+        }
+        let n_up = upserts.len();
+        let n_rm = removed.len();
+        let ups = upserts
+            .into_iter()
+            .map(|(id, entry)| LocalObservation { id, entry })
+            .collect();
+        self.clients[ci].engine.on_local_changes(ups, removed);
+        self.log(format!(
+            "C{ci} scannt ({}, {n_up} geändert, {n_rm} entfernt)",
+            if mode < 8 {
+                "Änderungen"
+            } else {
+                "Teil-Rescan"
+            }
+        ));
         self.persist(ci)
     }
 
     fn plan(&mut self, ci: usize) -> Result<usize, SimFailure> {
         let before = self.clients[ci].engine.state().breakers_used;
-        let summary = self.clients[ci].engine.debug_summary();
+        let mutations = self.clients[ci].engine.state().synced.mutations();
         let ops = self.clients[ci].engine.plan();
         if self.clients[ci].engine.state().breakers_used != before {
             let b = self.clients[ci].engine.state().last_breaker.clone();
+            let summary = self.clients[ci].engine.debug_summary();
             self.log(format!(
-                "C{ci} SICHERHEITSNETZ {b:?} bei Zustand:\n{summary}"
+                "C{ci} SICHERHEITSNETZ {b:?}, Zustand danach:\n{summary}"
             ));
+        }
+        // Die inkrementelle Planung darf nichts übersehen: Ohne Ergebnis muss auch eine
+        // vollständige Planung nichts finden.
+        let fresh_ops = ops.iter().any(|op| matches!(op, Op::Local(..)))
+            || ops.iter().any(|op| matches!(op, Op::Remote(..)));
+        if !fresh_ops
+            && self.clients[ci].engine.state().synced.mutations() == mutations
+            && let Err(e) = self.clients[ci].engine.verify_incremental()
+        {
+            return Err(self.fail(format!(
+                "Inkrementelle Planung unvollständig bei C{ci}: {e}"
+            )));
         }
         let n = ops.len();
         for op in &ops {
@@ -625,7 +743,7 @@ impl Sim {
             for ci in 0..self.clients.len() {
                 for _ in 0..400 {
                     self.fetch(ci)?;
-                    self.scan(ci)?;
+                    self.scan_with(ci, false)?;
                     let mut n = self.plan(ci)?;
                     if n == 0 {
                         // Zustandsänderungen ohne Operation (Verknüpfen) können neue ermöglichen.

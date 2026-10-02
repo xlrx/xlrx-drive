@@ -103,6 +103,14 @@ enum Breaker {
     Unlink(NodeId),
 }
 
+/// Schlüssel für die inkrementelle Planung.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Key {
+    Node(NodeId),
+    Local(LocalId),
+}
+
+#[derive(Clone)]
 pub struct Engine {
     st: State,
     local: Tree<LocalId, LocalEntry>,
@@ -113,6 +121,14 @@ pub struct Engine {
     need_fetch: bool,
     /// Aufeinanderfolgende Planungen ohne Fortschritt bei frischem Zustand.
     stalled: u32,
+    /// Inkrementelle Planung: Objekte, deren Lage sich seit der letzten Planung geändert hat.
+    dirty: BTreeSet<Key>,
+    /// Objekte, die bei der letzten Planung warten mussten; sie werden jedes Mal neu geprüft.
+    waiting: BTreeSet<Key>,
+    /// Verknüpfte Knoten, deren lokales Objekt fehlt (Kandidaten für das Neu-Verknüpfen).
+    orphans: BTreeSet<NodeId>,
+    /// Die nächste Planung prüft alles (nach Start, vollständigem Scan oder Server-Stand).
+    full: bool,
 }
 
 /// So viele Planungen ohne Fortschritt (bei frischem Server- und lokalem Stand) müssen
@@ -138,6 +154,10 @@ impl Engine {
             need_scan: true,
             need_fetch: true,
             stalled: 0,
+            dirty: BTreeSet::new(),
+            waiting: BTreeSet::new(),
+            orphans: BTreeSet::new(),
+            full: true,
         }
     }
 
@@ -147,6 +167,11 @@ impl Engine {
 
     pub fn local_tree(&self) -> &Tree<LocalId, LocalEntry> {
         &self.local
+    }
+
+    /// Hat die Engine schon einen lokalen Stand (vollständiger Scan seit dem Start)?
+    pub fn has_local_tree(&self) -> bool {
+        self.local_root.is_some()
     }
 
     pub fn wants_scan(&self) -> bool {
@@ -173,15 +198,39 @@ impl Engine {
     /// Änderungen aus dem Server-Journal seit dem letzten Cursor.
     pub fn on_remote_changes(&mut self, changes: Vec<RemoteChange>, cursor: Seq) {
         let root = self.root();
+        let mut inserted = Vec::new();
+        let mut deleted = Vec::new();
+        // Erst alle neuen Zustände übernehmen, dann Löschungen auswerten: Ein Knoten, der im selben
+        // Stapel aus einem gelöschten Ordner heraus verschoben wurde, darf nicht mitgelöscht werden.
         for ch in changes {
             if ch.node == root {
                 continue;
             }
             match ch.state {
-                Some(e) => self.st.remote.insert(ch.node, e),
-                None => {
-                    self.st.remote.remove(ch.node);
+                Some(e) => {
+                    self.r_insert(ch.node, e);
+                    inserted.push(ch.node);
                 }
+                None => deleted.push(ch.node),
+            }
+        }
+        for n in deleted {
+            // Gelöscht oder aus dem Sichtbereich verschoben: samt (verbliebenem) Unterbaum entfernen.
+            for d in self.st.remote.descendants(n) {
+                self.r_remove(d);
+            }
+            self.r_remove(n);
+        }
+        // Ein Knoten, dessen Elternknoten nach dem ganzen Stapel fehlt, ist nicht sichtbar.
+        for n in inserted {
+            if let Some(p) = self.st.remote.get(n).map(|e| e.parent)
+                && p != root
+                && !self.st.remote.contains(p)
+            {
+                for d in self.st.remote.descendants(n) {
+                    self.r_remove(d);
+                }
+                self.r_remove(n);
             }
         }
         self.finish_remote_update(cursor);
@@ -195,15 +244,28 @@ impl Engine {
                 t.insert(n, e);
             }
         }
+        t.retain_reachable(self.root());
         self.st.remote = t;
+        self.full = true;
         self.finish_remote_update(cursor);
     }
 
     fn finish_remote_update(&mut self, cursor: Seq) {
-        let root = self.root();
-        self.st.remote.retain_reachable(root);
         self.st.cursor = Some(cursor);
-        self.st.pending.retain(|_, s| *s > cursor);
+        let cleared: Vec<NodeId> = self
+            .st
+            .pending
+            .iter()
+            .filter(|(_, s)| **s <= cursor)
+            .map(|(n, _)| *n)
+            .collect();
+        for n in cleared {
+            self.st.pending.remove(&n);
+            self.mark_node_dir(n);
+            if let Some(p) = self.st.remote.get(n).map(|e| e.parent) {
+                self.dirty.insert(Key::Node(p));
+            }
+        }
         self.need_fetch = false;
     }
 
@@ -218,6 +280,77 @@ impl Engine {
         t.retain_reachable(root);
         self.local = t;
         self.local_root = Some(root);
+        self.need_scan = false;
+        self.full = true;
+        self.orphans = self.st.synced.ids().into_iter().collect();
+        let moving: BTreeSet<LocalId> = self
+            .inflight_local
+            .values()
+            .filter_map(|op| match op {
+                LocalOp::Move { local, .. } => Some(*local),
+                _ => None,
+            })
+            .collect();
+        let local = &self.local;
+        self.st.local_temps.retain(|l, (tp, tn)| {
+            moving.contains(l)
+                || local
+                    .get(*l)
+                    .is_some_and(|e| e.parent == *tp && e.name == *tn)
+        });
+        self.rebind();
+    }
+
+    /// Einzelne lokale Änderungen (z.B. aus FSEvents und einem Rescan der betroffenen Ordner).
+    /// Vorher muss es einen vollständigen Scan gegeben haben.
+    pub fn on_local_changes(&mut self, upserts: Vec<LocalObservation>, removed: Vec<LocalId>) {
+        let Some(root) = self.local_root else {
+            self.need_scan = true;
+            return;
+        };
+        for l in removed {
+            if l == root {
+                continue;
+            }
+            for d in self.local.descendants(l) {
+                if let Some(n) = self.st.synced.node_of(d) {
+                    self.orphans.insert(n);
+                }
+                self.l_remove(d);
+            }
+            if let Some(n) = self.st.synced.node_of(l) {
+                self.orphans.insert(n);
+            }
+            self.l_remove(l);
+        }
+        let mut upserted = Vec::with_capacity(upserts.len());
+        for o in upserts {
+            if o.id == root || o.id == LocalId::GONE {
+                continue;
+            }
+            if let Some(n) = self.st.synced.node_of(o.id)
+                && self.local.get(o.id).is_some_and(|e| e.kind != o.entry.kind)
+            {
+                self.orphans.insert(n);
+            }
+            upserted.push(o.id);
+            self.l_insert(o.id, o.entry);
+        }
+        // Konsistenz: Ein gemeldetes Objekt, dessen Elternordner fehlt, existiert lokal nicht.
+        let dangling: Vec<LocalId> = upserted
+            .into_iter()
+            .filter(|l| {
+                self.local
+                    .get(*l)
+                    .is_some_and(|e| e.parent != root && !self.local.contains(e.parent))
+            })
+            .collect();
+        for l in dangling {
+            for d in self.local.descendants(l) {
+                self.l_remove(d);
+            }
+            self.l_remove(l);
+        }
         self.need_scan = false;
         let moving: BTreeSet<LocalId> = self
             .inflight_local
@@ -245,23 +378,32 @@ impl Engine {
     ///    (neue Datei schreiben, dann über das Original umbenennen) und wird als Inhaltsänderung behandelt,
     ///    nicht als Löschen + Neuanlegen.
     fn rebind(&mut self) {
-        for n in self.st.synced.ids() {
+        let candidates: Vec<NodeId> = self.orphans.iter().copied().collect();
+        for n in candidates {
             let Some(s) = self.st.synced.get(n) else {
                 continue;
             };
             if let Some(le) = self.local.get(s.local)
                 && le.kind != s.kind
             {
-                self.st.synced.update(n, |e| e.local = LocalId::GONE);
+                self.s_update(n, |e| e.local = LocalId::GONE);
             }
         }
+        // Nur Knoten ohne lokales Objekt bleiben Kandidaten.
+        let synced = &self.st.synced;
+        let local = &self.local;
+        self.orphans
+            .retain(|n| synced.get(*n).is_some_and(|s| !local.contains(s.local)));
         loop {
             let mut changed = false;
-            for n in self.st.synced.ids() {
+            let candidates: Vec<NodeId> = self.orphans.iter().copied().collect();
+            for n in candidates {
                 let Some(s) = self.st.synced.get(n).cloned() else {
+                    self.orphans.remove(&n);
                     continue;
                 };
                 if self.local.contains(s.local) {
+                    self.orphans.remove(&n);
                     continue;
                 }
                 let Some(lp) = self.local_of_node(s.parent) else {
@@ -271,8 +413,11 @@ impl Engine {
                     self.st.synced.node_of(*o).is_none()
                         && self.local.get(*o).is_some_and(|e| e.kind == s.kind)
                 });
-                if let Some(o) = candidate {
-                    changed |= self.st.synced.update(n, |e| e.local = o);
+                if let Some(o) = candidate
+                    && self.s_update(n, |e| e.local = o)
+                {
+                    self.orphans.remove(&n);
+                    changed = true;
                 }
             }
             if !changed {
@@ -289,6 +434,7 @@ impl Engine {
         let Some(op) = self.inflight_local.remove(&id) else {
             return;
         };
+        self.mark_local_op(&op);
         match result {
             LocalResult::Done { id: new_id, fp } => self.apply_local_done(op, new_id, fp),
             LocalResult::Precondition | LocalResult::Error => self.need_scan = true,
@@ -303,7 +449,7 @@ impl Engine {
                 node,
                 node_parent,
             } => {
-                self.local.insert(
+                self.l_insert(
                     new_id,
                     LocalEntry {
                         parent,
@@ -335,7 +481,7 @@ impl Engine {
                 rev,
                 content,
             } => {
-                self.local.insert(
+                self.l_insert(
                     new_id,
                     LocalEntry {
                         parent,
@@ -365,8 +511,8 @@ impl Engine {
                 content,
                 ..
             } => {
-                if let Some(e) = self.local.remove(local) {
-                    self.local.insert(
+                if let Some(e) = self.l_remove(local) {
+                    self.l_insert(
                         new_id,
                         LocalEntry {
                             fp,
@@ -376,7 +522,7 @@ impl Engine {
                     );
                 }
                 if self.st.synced.get(node).is_some_and(|s| s.local == local) {
-                    self.st.synced.update(node, |s| {
+                    self.s_update(node, |s| {
                         s.local = new_id;
                         s.content = Some(content);
                         s.rev = rev;
@@ -394,32 +540,32 @@ impl Engine {
                 if self.st.local_temps.get(&local) != Some(&(parent, name.clone())) {
                     self.st.local_temps.remove(&local);
                 }
-                self.local.update(local, |e| {
+                self.l_update(local, |e| {
                     e.parent = parent;
                     e.name = name;
                 });
                 if let Some((p, nm)) = synced_to
                     && let Some(n) = self.st.synced.node_of(local)
                 {
-                    self.st.synced.update(n, |s| {
+                    self.s_update(n, |s| {
                         s.parent = p;
                         s.name = nm;
                     });
                 }
             }
             LocalOp::DeleteFile { local, node, .. } => {
-                self.local.remove(local);
+                self.l_remove(local);
                 if self.st.synced.get(node).is_some_and(|s| s.local == local) {
-                    self.st.synced.remove(node);
+                    self.s_remove(node);
                 }
             }
             LocalOp::DeleteDir { local, node } => {
                 for d in self.local.descendants(local) {
-                    self.local.remove(d);
+                    self.l_remove(d);
                 }
-                self.local.remove(local);
+                self.l_remove(local);
                 if self.st.synced.get(node).is_some_and(|s| s.local == local) {
-                    self.st.synced.remove(node);
+                    self.s_remove(node);
                 }
             }
         }
@@ -429,6 +575,7 @@ impl Engine {
         let Some(op) = self.st.outbox.get(&id).cloned() else {
             return;
         };
+        self.mark_remote_op(&op);
         if result == RemoteResult::Transient {
             // Unbekannt, ob ausgeführt: später mit derselben ID erneut senden (Server dedupliziert).
             self.sent.remove(&id);
@@ -494,7 +641,7 @@ impl Engine {
                 RemoteResult::Updated { rev, seq },
             ) => {
                 if self.st.synced.get(node).is_some_and(|s| s.local == source) {
-                    self.st.synced.update(node, |s| {
+                    self.s_update(node, |s| {
                         s.content = Some(content);
                         s.rev = rev;
                         s.fp = Some(fp);
@@ -521,7 +668,7 @@ impl Engine {
                 if let Some(s) = self.st.synced.get(node).cloned()
                     && s.local == source
                 {
-                    self.st.synced.remove(node);
+                    self.s_remove(node);
                     self.link_if_free(
                         copy,
                         SyncedEntry {
@@ -538,7 +685,7 @@ impl Engine {
                 self.mark_pending(copy, seq);
             }
             (RemoteOp::Move { node, parent, name }, RemoteResult::Moved { seq }) => {
-                self.st.synced.update(node, |s| {
+                self.s_update(node, |s| {
                     s.parent = parent;
                     s.name = name;
                 });
@@ -548,7 +695,7 @@ impl Engine {
                 RemoteOp::DeleteFile { node, .. } | RemoteOp::DeleteDir { node },
                 RemoteResult::Deleted { seq },
             ) => {
-                self.st.synced.remove(node);
+                self.s_remove(node);
                 self.mark_pending(node, seq);
             }
             (_, RemoteResult::SourceChanged) => self.need_scan = true,
@@ -579,7 +726,7 @@ impl Engine {
                 if let Some(old) = replaces
                     && self.st.synced.get(old).is_some_and(|s| s.local == source)
                 {
-                    self.st.synced.remove(old);
+                    self.s_remove(old);
                 }
                 (local_parent, local_name)
             }
@@ -601,7 +748,7 @@ impl Engine {
     /// Verknüpft nur, wenn weder Knoten noch lokale ID schon verknüpft sind.
     fn link_if_free(&mut self, node: NodeId, e: SyncedEntry) {
         if !self.st.synced.contains(node) && self.st.synced.node_of(e.local).is_none() {
-            self.st.synced.insert(node, e);
+            self.s_insert(node, e);
         }
     }
 
@@ -639,38 +786,43 @@ impl Engine {
         let resent = cx.ops.len();
         let mutations = self.st.synced.mutations();
 
-        for n in self.st.synced.ids() {
-            if cx.busy_n.contains(&n) || self.st.pending.contains_key(&n) {
+        // Arbeitsliste: alles (nach Start/vollständigem Scan) oder nur Geändertes und Wartendes.
+        let mut initial: Vec<Key> = Vec::new();
+        if std::mem::take(&mut self.full) {
+            initial.extend(self.st.synced.ids().into_iter().map(Key::Node));
+            initial.extend(self.st.remote.ids().into_iter().map(Key::Node));
+            initial.extend(self.local.ids().into_iter().map(Key::Local));
+        }
+        initial.extend(std::mem::take(&mut self.dirty));
+        initial.extend(std::mem::take(&mut self.waiting));
+        let mut work: BTreeSet<(u8, usize, u64)> =
+            initial.into_iter().map(|k| self.order(k)).collect();
+        let mut evaluated: BTreeMap<Key, u8> = BTreeMap::new();
+        let mut deferred: BTreeSet<Key> = BTreeSet::new();
+        while let Some(w) = work.pop_first() {
+            let k = unorder(w);
+            let count = evaluated.entry(k).or_insert(0);
+            if *count >= 3 {
+                // Mehrfach in diesem Durchlauf geändert: beim nächsten Mal weiter.
+                deferred.insert(k);
                 continue;
             }
-            self.plan_synced(n, &mut cx);
-        }
-
-        for n in self.st.remote.ids() {
-            if self.st.synced.contains(n)
-                || cx.busy_n.contains(&n)
-                || self.st.pending.contains_key(&n)
-            {
-                continue;
+            *count += 1;
+            self.evaluate(k, &mut cx);
+            if self.is_settled(k, &cx) {
+                self.waiting.remove(&k);
+            } else {
+                self.waiting.insert(k);
             }
-            self.plan_remote_new(n, &mut cx);
-        }
-
-        let root = self.local_root;
-        let mut unmapped: Vec<(usize, LocalId)> = self
-            .local
-            .iter()
-            .filter(|(l, _)| {
-                Some(*l) != root && self.st.synced.node_of(*l).is_none() && !cx.busy_l.contains(l)
-            })
-            .filter_map(|(l, _)| Some((self.local.depth(l, root?)?, l)))
-            .collect();
-        unmapped.sort();
-        for (_, l) in unmapped {
-            if self.st.synced.node_of(l).is_none() && !cx.busy_l.contains(&l) {
-                self.plan_local_new(l, &mut cx);
+            for d in std::mem::take(&mut self.dirty) {
+                if evaluated.get(&d).is_some_and(|c| *c >= 3) {
+                    deferred.insert(d);
+                } else {
+                    work.insert(self.order(d));
+                }
             }
         }
+        self.dirty.extend(deferred);
 
         // Sicherheitsnetz: Nichts geplant, nichts verändert, nichts unterwegs – aber Regeln warten
         // aufeinander. Dann löst eine sichere Aktion den Zyklus auf, statt für immer zu hängen.
@@ -696,11 +848,343 @@ impl Engine {
                 Breaker::TempLocal(o) => self.yield_local_temp(o, &mut cx),
                 Breaker::TempRemote(m) => self.yield_remote_temp(m, &mut cx),
                 Breaker::Unlink(n) => {
-                    self.st.synced.remove(n);
+                    self.s_remove(n);
+                    // (s_remove markiert die Nachbarn für die nächste Planung)
                 }
             }
         }
         cx.ops
+    }
+
+    /// Prüft einen Schlüssel der Arbeitsliste.
+    fn evaluate(&mut self, k: Key, cx: &mut Ctx) {
+        match k {
+            Key::Node(n) => {
+                if cx.busy_n.contains(&n) || self.st.pending.contains_key(&n) {
+                    return;
+                }
+                if self.st.synced.contains(n) {
+                    self.plan_synced(n, cx);
+                } else if self.st.remote.contains(n) {
+                    self.plan_remote_new(n, cx);
+                }
+            }
+            Key::Local(l) => {
+                if Some(l) == self.local_root || cx.busy_l.contains(&l) {
+                    return;
+                }
+                if let Some(n) = self.st.synced.node_of(l) {
+                    self.evaluate(Key::Node(n), cx);
+                } else if self.local.contains(l) {
+                    self.plan_local_new(l, cx);
+                }
+            }
+        }
+    }
+
+    /// Ist für diesen Schlüssel nichts mehr zu tun (oder läuft gerade eine Operation)?
+    fn is_settled(&self, k: Key, cx: &Ctx) -> bool {
+        match k {
+            Key::Node(n) => {
+                if cx.busy_n.contains(&n) || self.st.pending.contains_key(&n) {
+                    return true;
+                }
+                let Some(s) = self.st.synced.get(n) else {
+                    return !self.st.remote.contains(n);
+                };
+                if cx.busy_l.contains(&s.local) {
+                    return true;
+                }
+                let (Some(r), Some(le)) = (self.st.remote.get(n), self.local.get(s.local)) else {
+                    return false;
+                };
+                let file = s.kind == Kind::File;
+                r.parent == s.parent
+                    && r.name == s.name
+                    && (!file || (r.content == s.content && r.rev == s.rev))
+                    && self.loc_of(s.local) == Some((s.parent, s.name.clone()))
+                    && (!file || (le.content == s.content && le.fp == s.fp))
+                    && !self.st.local_temps.contains_key(&s.local)
+                    && temp_home(&s.name).is_none()
+            }
+            Key::Local(l) => {
+                if Some(l) == self.local_root || cx.busy_l.contains(&l) {
+                    return true;
+                }
+                match self.st.synced.node_of(l) {
+                    Some(n) => self.is_settled(Key::Node(n), cx),
+                    None => !self.local.contains(l),
+                }
+            }
+        }
+    }
+
+    /// Reihenfolge der Arbeitsliste: Knoten vor lokalen Objekten, flache vor tiefen.
+    fn order(&self, k: Key) -> (u8, usize, u64) {
+        match k {
+            Key::Node(n) => {
+                let d = self.st.remote.depth(n, self.root()).unwrap_or(0);
+                (0, d, n.0)
+            }
+            Key::Local(l) => {
+                let d = self
+                    .local_root
+                    .and_then(|r| self.local.depth(l, r))
+                    .unwrap_or(0);
+                (1, d, l.0)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Änderungen an den Bäumen – markieren betroffene Nachbarn für die inkrementelle Planung
+    // ------------------------------------------------------------------------------------------
+
+    /// Alle an einer Operation Beteiligten neu prüfen (nach Erfolg wie nach Fehlschlag).
+    fn mark_local_op(&mut self, op: &LocalOp) {
+        match op {
+            LocalOp::CreateDir {
+                parent,
+                node,
+                node_parent,
+                ..
+            }
+            | LocalOp::Download {
+                parent,
+                node,
+                node_parent,
+                ..
+            } => {
+                self.dirty.extend([
+                    Key::Local(*parent),
+                    Key::Node(*node),
+                    Key::Node(*node_parent),
+                ]);
+            }
+            LocalOp::Replace { local, node, .. }
+            | LocalOp::DeleteFile { local, node, .. }
+            | LocalOp::DeleteDir { local, node } => {
+                self.dirty.extend([Key::Local(*local), Key::Node(*node)]);
+            }
+            LocalOp::Move {
+                local,
+                from_parent,
+                parent,
+                ..
+            } => {
+                self.dirty.extend([
+                    Key::Local(*local),
+                    Key::Local(*from_parent),
+                    Key::Local(*parent),
+                ]);
+            }
+        }
+    }
+
+    fn mark_remote_op(&mut self, op: &RemoteOp) {
+        match op {
+            RemoteOp::CreateDir {
+                parent,
+                source,
+                origin,
+                ..
+            }
+            | RemoteOp::CreateFile {
+                parent,
+                source,
+                origin,
+                ..
+            } => {
+                self.dirty.extend([Key::Node(*parent), Key::Local(*source)]);
+                if let Origin::ConflictCopy {
+                    replaces: Some(r),
+                    local_parent,
+                    ..
+                } = origin
+                {
+                    self.dirty.extend([Key::Node(*r), Key::Node(*local_parent)]);
+                }
+            }
+            RemoteOp::Upload { node, source, .. } => {
+                self.dirty.extend([Key::Node(*node), Key::Local(*source)]);
+            }
+            RemoteOp::Move { node, parent, .. } => {
+                self.dirty.extend([Key::Node(*node), Key::Node(*parent)]);
+                if let Some(p) = self.st.remote.get(*node).map(|e| e.parent) {
+                    self.dirty.insert(Key::Node(p));
+                }
+            }
+            RemoteOp::DeleteFile { node, .. } | RemoteOp::DeleteDir { node } => {
+                self.dirty.insert(Key::Node(*node));
+                if let Some(p) = self.st.remote.get(*node).map(|e| e.parent) {
+                    self.dirty.insert(Key::Node(p));
+                }
+            }
+        }
+    }
+
+    /// Ordner, dessen Existenz oder Verknüpfung sich geändert hat: auch alle Kinder neu prüfen.
+    fn mark_node_dir(&mut self, n: NodeId) {
+        self.dirty.insert(Key::Node(n));
+        let kids: Vec<NodeId> = self.st.remote.children(n).collect();
+        self.dirty.extend(kids.into_iter().map(Key::Node));
+        if let Some(l) = self.st.synced.get(n).map(|s| s.local) {
+            self.mark_local_dir(l);
+        }
+    }
+
+    fn mark_local_dir(&mut self, l: LocalId) {
+        self.dirty.insert(Key::Local(l));
+        let kids: Vec<LocalId> = self.local.children(l).collect();
+        self.dirty.extend(kids.into_iter().map(Key::Local));
+    }
+
+    fn s_changed(&mut self, n: NodeId, old: Option<SyncedEntry>, new: Option<SyncedEntry>) {
+        self.dirty.insert(Key::Node(n));
+        let structural = old.as_ref().map(|e| (e.local, e.parent))
+            != new.as_ref().map(|e| (e.local, e.parent))
+            || old.is_none() != new.is_none();
+        for e in [old, new].into_iter().flatten() {
+            self.dirty.insert(Key::Node(e.parent));
+            self.dirty.insert(Key::Local(e.local));
+            if let Some(lp) = self.local.get(e.local).map(|le| le.parent) {
+                self.dirty.insert(Key::Local(lp));
+            }
+            if e.kind == Kind::Dir && structural {
+                self.mark_local_dir(e.local);
+                let kids: Vec<NodeId> = self.st.remote.children(n).collect();
+                self.dirty.extend(kids.into_iter().map(Key::Node));
+            }
+        }
+    }
+
+    fn s_insert(&mut self, n: NodeId, e: SyncedEntry) -> bool {
+        let old = self.st.synced.get(n).cloned();
+        let ok = self.st.synced.insert(n, e);
+        if ok {
+            let new = self.st.synced.get(n).cloned();
+            self.s_changed(n, old, new);
+        }
+        ok
+    }
+
+    fn s_remove(&mut self, n: NodeId) -> Option<SyncedEntry> {
+        let old = self.st.synced.remove(n);
+        if let Some(o) = &old {
+            self.s_changed(n, Some(o.clone()), None);
+        }
+        old
+    }
+
+    fn s_update(&mut self, n: NodeId, f: impl FnOnce(&mut SyncedEntry)) -> bool {
+        let old = self.st.synced.get(n).cloned();
+        let ok = self.st.synced.update(n, f);
+        if ok {
+            let new = self.st.synced.get(n).cloned();
+            self.s_changed(n, old, new);
+        }
+        ok
+    }
+
+    fn l_changed(&mut self, l: LocalId, old: Option<LocalEntry>, new: Option<LocalEntry>) {
+        self.dirty.insert(Key::Local(l));
+        if let Some(n) = self.st.synced.node_of(l) {
+            self.dirty.insert(Key::Node(n));
+        }
+        let existence = old.is_none() != new.is_none();
+        let was_dir = [&old, &new]
+            .into_iter()
+            .flatten()
+            .any(|e| e.kind == Kind::Dir);
+        for e in [old, new].into_iter().flatten() {
+            self.dirty.insert(Key::Local(e.parent));
+            if let Some(pn) = self.st.synced.node_of(e.parent) {
+                self.dirty.insert(Key::Node(pn));
+            }
+        }
+        if was_dir && existence {
+            self.mark_local_dir(l);
+        }
+    }
+
+    fn l_insert(&mut self, l: LocalId, e: LocalEntry) {
+        let old = self.local.get(l).cloned();
+        if old.as_ref() == Some(&e) {
+            return;
+        }
+        self.local.insert(l, e.clone());
+        self.l_changed(l, old, Some(e));
+    }
+
+    fn l_remove(&mut self, l: LocalId) -> Option<LocalEntry> {
+        let old = self.local.remove(l);
+        if let Some(o) = &old {
+            self.l_changed(l, Some(o.clone()), None);
+        }
+        old
+    }
+
+    fn l_update(&mut self, l: LocalId, f: impl FnOnce(&mut LocalEntry)) -> bool {
+        let Some(mut e) = self.local.get(l).cloned() else {
+            return false;
+        };
+        f(&mut e);
+        self.l_insert(l, e);
+        true
+    }
+
+    fn r_changed(&mut self, n: NodeId, old: Option<RemoteEntry>, new: Option<RemoteEntry>) {
+        self.dirty.insert(Key::Node(n));
+        let existence = old.is_none() != new.is_none();
+        let is_dir = [&old, &new]
+            .into_iter()
+            .flatten()
+            .any(|e| e.kind == Kind::Dir);
+        for e in [old, new].into_iter().flatten() {
+            self.dirty.insert(Key::Node(e.parent));
+        }
+        if is_dir && existence {
+            self.mark_node_dir(n);
+        }
+    }
+
+    fn r_insert(&mut self, n: NodeId, e: RemoteEntry) {
+        let old = self.st.remote.get(n).cloned();
+        if old.as_ref() == Some(&e) {
+            return;
+        }
+        self.st.remote.insert(n, e.clone());
+        self.r_changed(n, old, Some(e));
+    }
+
+    fn r_remove(&mut self, n: NodeId) {
+        if let Some(old) = self.st.remote.remove(n) {
+            self.r_changed(n, Some(old), None);
+        }
+    }
+
+    /// Nur für Tests/Simulator: Findet eine vollständige Planung Arbeit, die die inkrementelle
+    /// Planung übersehen hat? Aufzurufen direkt nach einer Planung ohne Ergebnis.
+    pub fn verify_incremental(&self) -> Result<(), String> {
+        let mut probe = self.clone();
+        probe.full = true;
+        probe.stalled = 0;
+        let before = probe.st.synced.clone();
+        let ops: Vec<Op> = probe
+            .plan()
+            .into_iter()
+            .filter(|op| match op {
+                Op::Remote(id, _) => !self.st.outbox.contains_key(id),
+                Op::Local(..) => true,
+            })
+            .collect();
+        if !ops.is_empty() {
+            return Err(format!("vollständige Planung findet noch Arbeit: {ops:?}"));
+        }
+        if !probe.st.synced.same_entries(&before) {
+            return Err("vollständige Planung ändert noch den vereinbarten Stand".into());
+        }
+        Ok(())
     }
 
     fn plan_synced(&mut self, n: NodeId, cx: &mut Ctx) {
@@ -714,7 +1198,7 @@ impl Engine {
         let l = self.local.get(s.local).cloned();
         match (r, l) {
             (None, None) => {
-                self.st.synced.remove(n);
+                self.s_remove(n);
             }
             (None, Some(le)) => self.plan_remote_gone(n, &s, &le, cx),
             (Some(re), None) => self.plan_local_gone(n, &s, &re, cx),
@@ -734,8 +1218,8 @@ impl Engine {
             && rm.kind == s.kind
             && rm.name == s.name
         {
-            self.st.synced.remove(n);
-            self.st.synced.insert(
+            self.s_remove(n);
+            self.s_insert(
                 m,
                 SyncedEntry {
                     rev: rm.rev,
@@ -746,7 +1230,7 @@ impl Engine {
         }
         if self.local_differs(s, le) {
             // Lokale Änderung gewinnt gegen das Löschen: Verknüpfung lösen, das Objekt wird neu hochgeladen.
-            self.st.synced.remove(n);
+            self.s_remove(n);
             return;
         }
         match s.kind {
@@ -792,7 +1276,7 @@ impl Engine {
                 }
                 if keep {
                     // Es liegt noch etwas darin, das bleiben muss: Ordner auf dem Server neu anlegen.
-                    self.st.synced.remove(n);
+                    self.s_remove(n);
                 } else {
                     self.emit_local(
                         cx,
@@ -810,7 +1294,7 @@ impl Engine {
     fn plan_local_gone(&mut self, n: NodeId, s: &SyncedEntry, re: &RemoteEntry, cx: &mut Ctx) {
         if remote_differs(s, re) {
             // Änderung auf dem Server gewinnt gegen das lokale Löschen: neu herunterladen.
-            self.st.synced.remove(n);
+            self.s_remove(n);
             return;
         }
         match s.kind {
@@ -855,7 +1339,7 @@ impl Engine {
                 }
                 if keep {
                     // Auf dem Server liegt darin etwas, das bleiben muss: Ordner lokal wiederherstellen.
-                    self.st.synced.remove(n);
+                    self.s_remove(n);
                 } else {
                     self.emit_remote(cx, RemoteOp::DeleteDir { node: n });
                 }
@@ -878,7 +1362,7 @@ impl Engine {
             let fresh_fp = le.content == s.content && le.fp != s.fp;
             let fresh_rev = re.content == s.content && re.rev != s.rev;
             if fresh_fp || fresh_rev {
-                self.st.synced.update(n, |e| {
+                self.s_update(n, |e| {
                     if fresh_fp {
                         e.fp = le.fp;
                     }
@@ -899,7 +1383,7 @@ impl Engine {
         let l_moved = l_loc.as_ref() != Some(&s_loc);
         if r_moved || l_moved {
             if r_moved && l_moved && l_loc.as_ref() == Some(&r_loc) {
-                self.st.synced.update(n, |e| {
+                self.s_update(n, |e| {
                     e.parent = r_loc.0;
                     e.name = r_loc.1.clone();
                 });
@@ -952,7 +1436,7 @@ impl Engine {
                 },
             ),
             (true, true) if rc == lc => {
-                self.st.synced.update(n, |e| {
+                self.s_update(n, |e| {
                     e.content = Some(rc);
                     e.rev = re.rev;
                     e.fp = Some(lfp);
@@ -1221,7 +1705,7 @@ impl Engine {
                         && (rm.kind == Kind::Dir || rm.content == le.content);
                     if same {
                         // Beide Seiten haben dasselbe angelegt (z.B. Ersteinrichtung): nur verknüpfen.
-                        self.st.synced.insert(
+                        self.s_insert(
                             m,
                             SyncedEntry {
                                 parent: p,
@@ -1727,6 +2211,14 @@ impl Engine {
             }
         }
         Ok(())
+    }
+}
+
+fn unorder(w: (u8, usize, u64)) -> Key {
+    if w.0 == 0 {
+        Key::Node(NodeId(w.2))
+    } else {
+        Key::Local(LocalId(w.2))
     }
 }
 
