@@ -1,0 +1,8 @@
+target/
+web/node_modules/
+web/.svelte-kit/
+web/build/
+web/test-results/
+deploy/secrets/
+deploy/.env
+.git/

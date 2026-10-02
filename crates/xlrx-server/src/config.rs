@@ -73,7 +73,15 @@ pub fn parse_key(raw: &str) -> Result<[u8; 32], String> {
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
-        let database_url = var("DATABASE_URL").ok_or("DATABASE_URL fehlt")?;
+        // Die URL enthält das DB-Passwort: bevorzugt aus einem Docker-Secret.
+        let database_url = match (var("DATABASE_URL_FILE"), var("DATABASE_URL")) {
+            (Some(path), _) => std::fs::read_to_string(&path)
+                .map_err(|e| format!("DATABASE_URL_FILE {path}: {e}"))?
+                .trim()
+                .to_owned(),
+            (None, Some(v)) => v,
+            (None, None) => return Err("DATABASE_URL_FILE bzw. DATABASE_URL fehlt".into()),
+        };
         let bind = var("XLRX_BIND")
             .unwrap_or_else(|| "0.0.0.0:8080".into())
             .parse()

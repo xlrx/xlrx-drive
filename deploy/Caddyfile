@@ -1,0 +1,25 @@
+# Caddy vor xlrx: Let's Encrypt, HTTP/3 (QUIC) mit Rückfall auf HTTP/2/1.1.
+# Bestehende Regeln aus dem DSM-Reverse-Proxy unten ergänzen (PLAN 15.3).
+{
+	email {$ACME_EMAIL}
+	servers {
+		protocols h1 h2 h3
+	}
+}
+
+{$XLRX_HOST} {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+	reverse_proxy server:8080 {
+		# Server-Sent Events (Sync-Benachrichtigungen) ungepuffert durchreichen.
+		flush_interval -1
+	}
+}
+
+# Beispiel für eine übernommene DSM-Regel:
+# fotos.example.de {
+# 	reverse_proxy 192.168.1.10:5080
+# }

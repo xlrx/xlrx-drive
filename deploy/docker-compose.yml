@@ -1,0 +1,110 @@
+# xlrx-drive auf der Synology (Container Manager → Projekt). Anleitung: deploy/synology.md
+# Werte stehen in deploy/.env (Vorlage: .env.example), Geheimnisse in deploy/secrets/.
+name: xlrx
+
+services:
+  postgres:
+    # PostgreSQL 18 mit pgvector, ohne AVX-Annahme gebaut (PLAN 13.2).
+    image: pgvector/pgvector:pg18
+    restart: unless-stopped
+    user: "${PUID}:${PGID}"
+    shm_size: 1g
+    environment:
+      POSTGRES_DB: xlrx
+      POSTGRES_USER: xlrx
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+    secrets: [pg_password]
+    volumes:
+      # Eigene Freigabe mit abgeschaltetem Copy-on-Write (NOCOW), siehe synology.md.
+      - ${XLRX_DB_DIR:-/volume1/xlrx-db}/postgres:/var/lib/postgresql
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-3GB}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE:-8GB}
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=512MB
+      - -c
+      - max_connections=40
+      - -c
+      - synchronous_commit=on
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - wal_compression=zstd
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xlrx -d xlrx"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  server:
+    image: ${XLRX_IMAGE:-ghcr.io/xlrx/xlrx-drive-server:latest}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    restart: unless-stopped
+    user: "${PUID}:${PGID}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL_FILE: /run/secrets/database_url
+      XLRX_SECRET_KEY_FILE: /run/secrets/xlrx_secret_key
+      XLRX_PUBLIC_URL: https://${XLRX_HOST}
+      XLRX_EXTRA_ORIGINS: ${XLRX_EXTRA_ORIGINS:-}
+      XLRX_TRUST_PROXY: "1"
+      XLRX_ARGON2_M_KIB: ${XLRX_ARGON2_M_KIB:-19456}
+      XLRX_ARGON2_T: ${XLRX_ARGON2_T:-2}
+    secrets: [database_url, xlrx_secret_key]
+    # Ab M1: das ganze Volume, damit Versionen per Reflink zentral liegen können (PLAN 4.1).
+    # volumes:
+    #   - /volume1:/mnt/volume1
+    networks: [internal, proxy]
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [server]
+    environment:
+      XLRX_HOST: ${XLRX_HOST}
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${CADDY_DIR:-/volume1/docker/xlrx/caddy}/data:/data
+      - ${CADDY_DIR:-/volume1/docker/xlrx/caddy}/config:/config
+    networks:
+      # Eigene IP im Heimnetz: Ports 80/443 (TCP) und 443 (UDP, HTTP/3) ohne Konflikt mit DSM (PLAN 15.3).
+      lan:
+        ipv4_address: ${CADDY_IP}
+      proxy: {}
+
+networks:
+  # Nur Postgres und Server, kein Internet.
+  internal:
+    internal: true
+  # Caddy ↔ Server.
+  proxy: {}
+  lan:
+    driver: macvlan
+    driver_opts:
+      parent: ${LAN_PARENT:-ovs_eth0}
+    ipam:
+      config:
+        - subnet: ${LAN_SUBNET}
+          gateway: ${LAN_GATEWAY}
+          ip_range: ${CADDY_IP}/32
+
+secrets:
+  pg_password:
+    file: ./secrets/pg_password
+  database_url:
+    file: ./secrets/database_url
+  xlrx_secret_key:
+    file: ./secrets/xlrx_secret_key
