@@ -166,6 +166,18 @@ pub(super) async fn ensure_free(
     Ok(())
 }
 
+/// Is the name taken in the folder according to the database (a quick check before receiving an
+/// upload; the write itself checks again, also on disk)?
+pub async fn name_in_use(st: &AppState, parent_id: i64, name: &str) -> ApiResult<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM nodes WHERE parent_id = $1 AND name_folded = $2 AND deleted_at IS NULL)",
+    )
+    .bind(parent_id)
+    .bind(db::fold(name))
+    .fetch_one(&st.db)
+    .await?)
+}
+
 pub(super) async fn reload(st: &AppState, id: i64) -> ApiResult<NodeRow> {
     db::node_by_id(&st.db, id).await?.ok_or(ApiError::NotFound)
 }

@@ -1,6 +1,7 @@
 // Account setup, login with authenticator app and passkey, administration, browsing files – in a
 // real browser.
 import { createHmac } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
@@ -118,6 +119,75 @@ async function browseFiles(page: Page, data: string) {
 	expect(refused).toEqual([]);
 }
 
+/** Changes through the web app: folder, upload with conflicts, versions, rename, move, trash. */
+async function changeFiles(page: Page, data: string) {
+	const drive = join(data, 'homes/admin/Drive');
+	const nav = () => page.getByRole('navigation', { name: 'Pfad' });
+	const link = (name: string) => page.getByRole('link', { name, exact: true });
+	const menu = async (name: string, action: string) => {
+		await page.getByRole('button', { name: `Aktionen für ${name}` }).click();
+		await page.getByRole('menuitem', { name: action }).click();
+	};
+	const upload = async (name: string, content: string) => {
+		await page.getByTestId('upload-input').setInputFiles({ name, mimeType: 'text/plain', buffer: Buffer.from(content) });
+	};
+
+	await page.getByRole('link', { name: 'Dateien', exact: true }).click();
+	await page.getByRole('button', { name: 'Neuer Ordner' }).click();
+	await page.getByLabel('Name').fill('Belege');
+	await page.getByRole('button', { name: 'Anlegen' }).click();
+	await link('Belege').click();
+	await expect(page.getByRole('heading', { name: 'Belege' })).toBeVisible();
+
+	// Upload; the same name again: keep both, then replace (the old content becomes a version).
+	await upload('Rechnung.txt', 'Rechnung 1');
+	await expect(link('Rechnung.txt')).toBeVisible();
+	await upload('Rechnung.txt', 'Rechnung 2');
+	await page.getByRole('button', { name: 'Beide behalten' }).click();
+	await expect(link('Rechnung (1).txt')).toBeVisible();
+	await upload('rechnung.TXT', 'Rechnung 3');
+	await page.getByRole('button', { name: 'Ersetzen' }).click();
+	await expect(page.getByText('Uploads abgeschlossen')).toBeVisible();
+	await page.getByRole('button', { name: 'Uploads schließen' }).click();
+	await link('Rechnung.txt').click();
+	await expect(page.locator('pre')).toHaveText('Rechnung 3');
+	const versions = page.locator('section.versions tbody tr');
+	await expect(versions).toHaveCount(1);
+	await versions.getByRole('button', { name: 'Wiederherstellen' }).click();
+	await expect(page.locator('pre')).toHaveText('Rechnung 1');
+	await expect(versions).toHaveCount(2);
+
+	// Rename and move.
+	await nav().getByRole('link', { name: 'Belege' }).click();
+	await menu('Rechnung (1).txt', 'Umbenennen');
+	await page.getByLabel('Name').fill('Quittung.txt');
+	await page.getByRole('button', { name: 'Umbenennen' }).click();
+	await expect(link('Quittung.txt')).toBeVisible();
+	await menu('Quittung.txt', 'Verschieben');
+	const dialog = page.getByRole('dialog');
+	await dialog.getByRole('button', { name: 'Meine Ablage' }).click();
+	await dialog.getByRole('button', { name: 'Projekte' }).click();
+	await dialog.getByRole('button', { name: 'Hierher verschieben' }).click();
+	await expect(page.getByText('„Quittung.txt“ wurde verschoben.')).toBeVisible();
+	await expect(link('Quittung.txt')).toHaveCount(0);
+	expect(readFileSync(join(drive, 'Projekte/Quittung.txt'), 'utf8')).toBe('Rechnung 2');
+
+	// Delete, undo, delete again, restore from the trash.
+	await menu('Rechnung.txt', 'Löschen');
+	await expect(page.getByText('„Rechnung.txt“ liegt jetzt im Papierkorb.')).toBeVisible();
+	expect(existsSync(join(drive, 'Belege/Rechnung.txt'))).toBe(false);
+	await page.getByRole('button', { name: 'Rückgängig' }).click();
+	await expect(link('Rechnung.txt')).toBeVisible();
+	await menu('Rechnung.txt', 'Löschen');
+	await page.getByRole('link', { name: 'Papierkorb', exact: true }).click();
+	const row = page.getByRole('row', { name: /Rechnung\.txt/ });
+	await expect(row).toContainText('Meine Ablage/Belege');
+	await row.getByRole('button', { name: 'Wiederherstellen' }).click();
+	await expect(page.getByText('„Rechnung.txt“ ist wieder da.')).toBeVisible();
+	await expect(page.getByText('Der Papierkorb ist leer.')).toBeVisible();
+	expect(readFileSync(join(drive, 'Belege/Rechnung.txt'), 'utf8')).toBe('Rechnung 1');
+}
+
 test('Einrichtung, Anmeldung, Verwaltung und Dateien', async ({ page }) => {
 	const setupUrl = process.env.XLRX_SETUP_URL;
 	test.skip(!setupUrl, 'XLRX_SETUP_URL fehlt (e2e/run.sh verwenden)');
@@ -172,7 +242,10 @@ test('Einrichtung, Anmeldung, Verwaltung und Dateien', async ({ page }) => {
 	await expect(page.getByRole('cell', { name: 'user_created' }).first()).toBeVisible();
 
 	const data = process.env.XLRX_E2E_DATA;
-	if (data) await browseFiles(page, data);
+	if (data) {
+		await browseFiles(page, data);
+		await changeFiles(page, data);
+	}
 });
 
 test('Falsches Passwort zeigt einheitliche Meldung', async ({ page }) => {

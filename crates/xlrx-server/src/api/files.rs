@@ -395,14 +395,17 @@ pub async fn upload(
     Query(q): Query<UploadQuery>,
     body: axum::body::Body,
 ) -> ApiResult<(StatusCode, Json<NodeInfo>)> {
-    // Fail fast before receiving gigabytes into a folder the person cannot write to.
-    ops::valid_name(&q.name)?;
+    // Fail fast before receiving gigabytes that would be refused anyway.
+    let name = ops::valid_name(&q.name)?;
     let (folder, root) = visible(&st, &me, parent).await?;
     if !roots::can_write(&root, me.id) {
         return Err(ApiError::forbidden("Keine Schreibrechte in diesem Ordner."));
     }
     if !folder.is_dir() {
         return Err(ApiError::bad("Kein Ordner."));
+    }
+    if !q.keep_both && ops::name_in_use(&st, parent, &name).await? {
+        return Err(ApiError::Conflict(format!("„{name}“ gibt es hier schon.")));
     }
     let staged = file_content::stage(&st, body, q.size).await?;
     let (node, _) = file_content::write(

@@ -14,7 +14,10 @@ export interface NodeInfo {
 	name: string;
 	kind: 'file' | 'dir';
 	size: number | null;
+	/** Content revision (base for replacing the content). */
 	rev: number;
+	/** Last change of any kind (precondition for rename, move, delete). */
+	seq: number;
 	mtime: string | null;
 	mime: string | null;
 }
@@ -126,3 +129,76 @@ export function describeScan(r: ScanReport): string {
 	const skipped = r.skipped.length ? ` (${r.skipped.length} übersprungen)` : '';
 	return parts.length ? `Eingelesen: ${parts.join(', ')}${skipped}.` : `Keine Änderungen${skipped}.`;
 }
+
+export interface VersionInfo {
+	id: number;
+	rev: number;
+	size: number;
+	mtime: string | null;
+	created_at: string;
+	created_by: string | null;
+}
+
+export interface TrashItem {
+	id: number;
+	name: string;
+	kind: 'file' | 'dir';
+	size: number | null;
+	deleted_at: string;
+	/** Folder it was deleted from, e.g. "Meine Ablage/Projekte". */
+	from: string;
+}
+
+/**
+ * Sends a file as the raw request body, with progress (fetch cannot report upload progress).
+ * `path` is below /api, e.g. `/nodes/12/files?name=…`.
+ */
+export function sendFile(
+	method: 'POST' | 'PUT',
+	path: string,
+	file: Blob,
+	onProgress?: (loaded: number) => void
+): Promise<NodeInfo> {
+	return new Promise((resolve, reject) => {
+		const xhr = new XMLHttpRequest();
+		xhr.open(method, `/api${path}`);
+		xhr.withCredentials = true;
+		xhr.setRequestHeader('content-type', 'application/octet-stream');
+		if (onProgress) xhr.upload.onprogress = (e) => onProgress(e.loaded);
+		xhr.onload = () => {
+			let data: unknown = null;
+			try {
+				data = JSON.parse(xhr.responseText);
+			} catch {
+				// not JSON
+			}
+			if (xhr.status >= 200 && xhr.status < 300) resolve(data as NodeInfo);
+			else
+				reject(
+					new ApiError(
+						xhr.status,
+						(data as { error?: string } | null)?.error ?? `Fehler ${xhr.status}`
+					)
+				);
+		};
+		xhr.onerror = () => reject(new ApiError(0, 'Verbindung unterbrochen.'));
+		xhr.send(file);
+	});
+}
+
+/** Query string for an upload of `file` (name, size, modification time). */
+export function uploadQuery(file: File, extra: Record<string, string> = {}): string {
+	const q = new URLSearchParams({
+		size: String(file.size),
+		mtime_ms: String(file.lastModified),
+		...extra
+	});
+	return q.toString();
+}
+
+/** Same name for Macs and SMB (case and Unicode normalization ignored). */
+export const sameName = (a: string, b: string) =>
+	a.normalize('NFC').toLowerCase() === b.normalize('NFC').toLowerCase();
+
+/** Answer to "a file of that name exists already". */
+export type ConflictChoice = 'replace' | 'keep_both' | 'skip';
