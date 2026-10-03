@@ -40,6 +40,8 @@ pub struct Inner {
     /// One lock per (person, device): a device's sync operations run one after another, so a
     /// retried operation never runs twice at the same time.
     sync_locks: std::sync::Mutex<std::collections::HashMap<(i64, String), Lock>>,
+    /// Full-text search, once started (see [`crate::search::start`]).
+    pub search: std::sync::OnceLock<crate::search::Search>,
     /// Running watchers per root (dropping one stops it).
     watchers: std::sync::Mutex<std::collections::HashMap<i64, notify::RecommendedWatcher>>,
 }
@@ -78,6 +80,7 @@ impl AppState {
             watchers: Default::default(),
             sync_locks: Default::default(),
             live: Default::default(),
+            search: Default::default(),
             db,
             secrets: SecretBox::new(&cfg.secret_key),
             cfg,

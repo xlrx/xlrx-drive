@@ -160,6 +160,10 @@ async fn serve(state: AppState) -> Result<(), String> {
         xlrx_server::api::uploads::recover(&state)
             .await
             .map_err(|e| format!("Unterbrochene Uploads: {e:?}"))?;
+        // The search index follows the journal from where its last commit ended.
+        if let Err(e) = xlrx_server::search::start(&state).await {
+            tracing::error!(error = %e, "Suche nicht gestartet");
+        }
         let st = state.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));

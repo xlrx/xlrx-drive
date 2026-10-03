@@ -27,6 +27,8 @@ sha1 = "0.11"
 sha2 = "0.11"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "macros", "time", "uuid", "json"] }
 subtle = "2.6"
+# Full-text search (PLAN 6.2): embedded index with German and English stemming, pure Rust.
+tantivy = { version = "0.26", default-features = false, features = ["mmap", "lz4-compression", "stemmer"] }
 thiserror.workspace = true
 time = { version = "0.3", features = ["serde", "formatting", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time", "fs", "io-util"] }
@@ -37,6 +39,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2.5"
 uuid = { version = "1", features = ["v4", "serde"] }
 webauthn-rs = "0.5"
+# Language of extracted texts (German or English stemmer).
+whatlang = "0.18"
 xlrx-chunk.workspace = true
 xlrx-proto.workspace = true
 xlrx-sync.workspace = true

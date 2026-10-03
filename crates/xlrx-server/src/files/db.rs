@@ -195,7 +195,18 @@ pub async fn set_location(
     name: &str,
     src: Source,
 ) -> ApiResult<i64> {
-    let seq = journal(tx, node.root_id, node.id, "move", src).await?;
+    // Whether the parent changed tells the search index to refresh the subtree (ancestors).
+    let (seq,): (i64,) = sqlx::query_as(
+        "INSERT INTO journal (root_id, node_id, op, source, actor_user_id, reparented)
+         VALUES ($1, $2, 'move', $3, $4, $5) RETURNING seq",
+    )
+    .bind(node.root_id)
+    .bind(node.id)
+    .bind(src.name())
+    .bind(src.actor)
+    .bind(node.parent_id != Some(parent_id))
+    .fetch_one(&mut **tx)
+    .await?;
     sqlx::query(
         "UPDATE nodes SET parent_id = $2, name = $3, name_folded = $4, seq = $5, updated_at = now()
          WHERE id = $1",

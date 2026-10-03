@@ -18,6 +18,8 @@ pub enum ApiError {
     /// A precondition of a change does not hold: sync clients get the reason, people the message.
     Rejected(xlrx_sync::Reject, String),
     TooManyRequests,
+    /// A part of the server is not set up or not running (e.g. search without a state directory).
+    Unavailable(String),
     Internal(String),
 }
 
@@ -61,6 +63,7 @@ impl IntoResponse for ApiError {
                 StatusCode::TOO_MANY_REQUESTS,
                 "Zu viele Versuche. Bitte später erneut versuchen.".into(),
             ),
+            Self::Unavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
             Self::Internal(detail) => {
                 tracing::error!(%detail, "interner Fehler");
                 (StatusCode::INTERNAL_SERVER_ERROR, "Interner Fehler".into())

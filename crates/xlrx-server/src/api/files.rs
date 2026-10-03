@@ -418,25 +418,56 @@ pub async fn recent(
     .bind(q.limit.unwrap_or(8).clamp(1, 50))
     .fetch_all(&st.db)
     .await?;
-    let mut out = Vec::with_capacity(rows.len());
-    for n in &rows {
-        let root = roots.iter().find(|r| r.id == n.root_id);
-        let mut folder = vec![root.map(|r| r.name.clone()).unwrap_or_default()];
-        if let Some(parent) = n.parent_id {
-            folder.extend(
-                db::ancestors(&st.db, parent)
-                    .await?
-                    .into_iter()
-                    .skip(1)
-                    .map(|a| a.name),
-            );
-        }
-        out.push(RecentItem {
+    let folders = folder_names(&st, &roots, &rows).await?;
+    let out = rows
+        .iter()
+        .map(|n| RecentItem {
             node: NodeInfo::from(n),
-            folder: folder.join("/"),
-        });
-    }
+            folder: folders.get(&n.id).cloned().unwrap_or_default(),
+        })
+        .collect();
     Ok(Json(out))
+}
+
+/// The folder each node is in, e.g. "Meine Ablage/Belege": the root's name, then the directories
+/// below its root directory.
+pub async fn folder_names(
+    st: &AppState,
+    roots: &[RootRow],
+    nodes: &[NodeRow],
+) -> ApiResult<std::collections::HashMap<i64, String>> {
+    let parents: Vec<i64> = nodes.iter().filter_map(|n| n.parent_id).collect();
+    let paths: std::collections::HashMap<i64, Option<String>> = sqlx::query_as::<_, (i64, Option<String>)>(
+        "WITH RECURSIVE up AS (
+            SELECT id AS start, id, parent_id, name, 0 AS depth FROM nodes WHERE id = ANY($1)
+            UNION ALL
+            SELECT up.start, n.id, n.parent_id, n.name, up.depth + 1
+              FROM nodes n JOIN up ON n.id = up.parent_id WHERE up.depth < 1000
+         )
+         SELECT start, string_agg(name, '/' ORDER BY depth DESC) FILTER (WHERE parent_id IS NOT NULL)
+           FROM up GROUP BY start",
+    )
+    .bind(&parents)
+    .fetch_all(&st.db)
+    .await?
+    .into_iter()
+    .collect();
+    Ok(nodes
+        .iter()
+        .map(|n| {
+            let root = roots
+                .iter()
+                .find(|r| r.id == n.root_id)
+                .map(|r| r.name.clone())
+                .unwrap_or_default();
+            let below = n.parent_id.and_then(|p| paths.get(&p).cloned().flatten());
+            let folder = match below {
+                Some(b) if !b.is_empty() => format!("{root}/{b}"),
+                _ => root,
+            };
+            (n.id, folder)
+        })
+        .collect())
 }
 
 #[derive(Deserialize)]
