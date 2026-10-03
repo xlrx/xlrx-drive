@@ -171,6 +171,8 @@ async fn serve(state: AppState) -> Result<(), String> {
         }
         // Text from file content, for the search: on the NAS only.
         xlrx_server::extract::start(&state).await?;
+        // The outside cache in S3 (if a bucket is configured).
+        xlrx_server::files::mirror::start(&state);
         let st = state.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));

@@ -18,6 +18,7 @@ use crate::files::access::{self, Role, Scope};
 use crate::files::content::{self as file_content, Target, VersionInfo};
 use crate::files::data_class::{self, Class};
 use crate::files::db::{self, NODE_COLS, NodeRow, RootRow};
+use crate::files::mirror;
 use crate::files::ops::{self, TrashItem};
 use crate::files::{roots, thumbs};
 use crate::state::AppState;
@@ -301,7 +302,7 @@ pub(crate) fn inline_allowed(mime: &str) -> bool {
         || mime == "text/plain"
 }
 
-fn disposition(kind: &str, name: &str) -> HeaderValue {
+pub(crate) fn disposition(kind: &str, name: &str) -> HeaderValue {
     let ascii: String = name
         .chars()
         .map(|c| {
@@ -339,6 +340,7 @@ pub(crate) fn starts_download(headers: &axum::http::HeaderMap) -> bool {
 pub async fn content(
     State(st): State<AppState>,
     me: CurrentUser,
+    client: ClientInfo,
     Path(id): Path<i64>,
     Query(q): Query<ContentQuery>,
     req: Request,
@@ -347,9 +349,14 @@ pub async fn content(
     if node.is_dir() {
         return Err(ApiError::bad("Ordner können nicht heruntergeladen werden."));
     }
+    let inline = q.inline && inline_allowed(&mime_of(&node.name));
     // A download (not a preview, not the continuation of one) for the start page.
-    if !(q.inline && inline_allowed(&mime_of(&node.name))) && starts_download(req.headers()) {
+    if !inline && starts_download(req.headers()) {
         super::suggest::record(&st, me.id, node.id, "download", "web", None).await?;
+        mirror::fetched(&st, &client.ip, &node).await?;
+    }
+    if let Some(url) = mirror::redirect(&st, &client.ip, &node, inline).await {
+        return Ok(to_outside_cache(&url));
     }
     let data_dir = st.cfg.data_dir.as_deref().ok_or(ApiError::NotFound)?;
     let path = roots::dir(data_dir, &root).join(db::rel_path(&st.db, node.id).await?);
@@ -368,6 +375,18 @@ pub(crate) fn mime_of(name: &str) -> String {
     mime_guess::from_path(name)
         .first_or_octet_stream()
         .to_string()
+}
+
+/// From outside the home network: the file from the outside cache (PLAN 15.2).
+pub(crate) fn to_outside_cache(url: &str) -> Response {
+    (
+        StatusCode::TEMPORARY_REDIRECT,
+        [
+            (axum::http::header::LOCATION, url),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+    )
+        .into_response()
 }
 
 /// Serves a file of a person with the safety headers for user content.
@@ -858,12 +877,14 @@ pub async fn set_data_class(
         .get(&id)
         .map(|e| e.class);
     data_class::set(&st.db, id, class, me.id).await?;
+    // Now "Nur lokal": its contents leave the outside cache at once (and are never served again).
+    mirror::revoke_forbidden(&st).await?;
     let after = data_class::effective(&st.db, default, &[id])
         .await?
         .get(&id)
         .map(|e| e.class);
     // Becoming "local" will also have to remove what cloud services produced for it (M4:
-    // vectors, image descriptions, outside cache); the log keeps the change either way.
+    // vectors, image descriptions); the log keeps the change either way.
     crate::audit::log(
         &st.db,
         Some(me.id),

@@ -199,6 +199,11 @@ pub struct Open {
 /// there, and its creator still allowed what the link allows.
 pub async fn open(db: &PgPool, token: &str) -> ApiResult<Open> {
     let link = by_token(db, token).await?.ok_or(ApiError::NotFound)?;
+    usable(db, link).await
+}
+
+/// A link if it may be used now (see [`open`]).
+pub async fn usable(db: &PgPool, link: LinkRow) -> ApiResult<Open> {
     if link.expired() {
         return Err(ApiError::Gone("Dieser Link ist abgelaufen.".into()));
     }

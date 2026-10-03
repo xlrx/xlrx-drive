@@ -186,6 +186,8 @@ pub async fn create(
         json!({ "kind": kind }),
     )
     .await?;
+    // The outside cache mirrors the file (PLAN 15.2).
+    st.mirror_wake.notify_one();
     Ok((StatusCode::CREATED, Json(info(&st, &row).await?)))
 }
 
@@ -211,6 +213,8 @@ pub async fn remove(
         json!({ "link": id, "node": row.node_id, "kind": row.kind() }),
     )
     .await?;
+    // Its file leaves the outside cache.
+    st.mirror_wake.notify_one();
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -473,7 +477,11 @@ pub async fn public_content(
                 json!({ "kind": o.kind }),
             )
             .await?;
+            crate::files::mirror::fetched(&st, &client.ip, &node).await?;
         }
+    }
+    if let Some(url) = crate::files::mirror::redirect(&st, &client.ip, &node, inline).await {
+        return Ok(files::to_outside_cache(&url));
     }
     let data_dir = st.cfg.data_dir.as_deref().ok_or(ApiError::NotFound)?;
     let path =

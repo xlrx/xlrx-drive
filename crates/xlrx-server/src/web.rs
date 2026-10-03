@@ -56,7 +56,8 @@ fn attr_value(attrs: &str, name: &str) -> Option<String> {
 }
 
 /// Builds the CSP for the web app from all HTML files below `dir`.
-pub fn csp_for_dir(dir: &Path) -> Result<String, String> {
+/// `media`: a further origin audio and video may come from (the outside cache).
+pub fn csp_for_dir(dir: &Path, media: Option<&str>) -> Result<String, String> {
     let mut hashes = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     let mut pages = 0;
@@ -85,9 +86,10 @@ pub fn csp_for_dir(dir: &Path) -> Result<String, String> {
     tracing::info!(pages, inline_scripts = hashes.len(), "Web-App gefunden");
     Ok(format!(
         "default-src 'self'; script-src 'self' {}; style-src 'self' 'unsafe-inline'; \
-         img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; \
-         base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
-        hashes.join(" ")
+         img-src 'self' data:; media-src 'self'{}; connect-src 'self'; font-src 'self'; \
+         object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+        hashes.join(" "),
+        media.map(|m| format!(" {m}")).unwrap_or_default()
     ))
 }
 
@@ -114,10 +116,13 @@ mod tests {
     fn missing_index_is_an_error() {
         let dir = std::env::temp_dir().join(format!("xlrx-web-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(csp_for_dir(&dir).is_err());
+        assert!(csp_for_dir(&dir, None).is_err());
         std::fs::write(dir.join("index.html"), "<script>a()</script>").unwrap();
-        let csp = csp_for_dir(&dir).unwrap();
+        let csp = csp_for_dir(&dir, None).unwrap();
         assert!(csp.contains("'sha256-") && csp.contains("frame-ancestors 'none'"));
+        assert!(csp.contains("media-src 'self';"));
+        let csp = csp_for_dir(&dir, Some("https://fsn1.example.com")).unwrap();
+        assert!(csp.contains("media-src 'self' https://fsn1.example.com;"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

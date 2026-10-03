@@ -181,6 +181,42 @@ pub async fn suggestions(
     State(st): State<AppState>,
     me: CurrentUser,
 ) -> ApiResult<Json<Vec<Suggestion>>> {
+    let ranked = ranked(&st, me.id).await?;
+    let scope = access::scope(&st.db, me.id).await?;
+    let rows: Vec<NodeRow> = ranked.iter().map(|r| r.2.clone()).collect();
+    let folders = folder_names(&st, &scope, &rows).await?;
+    // What was shown (at most once an hour per item and reason).
+    for (score, reason, n) in &ranked {
+        sqlx::query(
+            "INSERT INTO suggestion_log (user_id, node_id, reason, score)
+             SELECT $1, $2, $3, $4
+              WHERE NOT EXISTS (
+                    SELECT 1 FROM suggestion_log
+                     WHERE user_id = $1 AND node_id = $2 AND reason = $3
+                       AND shown_at > now() - interval '1 hour')",
+        )
+        .bind(me.id)
+        .bind(n.id)
+        .bind(reason.name())
+        .bind(*score as f32)
+        .execute(&st.db)
+        .await?;
+    }
+    Ok(Json(
+        ranked
+            .into_iter()
+            .map(|(score, reason, n)| Suggestion {
+                folder: folders.get(&n.id).cloned().unwrap_or_default(),
+                node: NodeInfo::from(&n),
+                reason,
+                score,
+            })
+            .collect(),
+    ))
+}
+
+/// The person's suggestions, best first: score, reason, item (still there and visible).
+pub async fn ranked(st: &AppState, user: i64) -> ApiResult<Vec<(f64, Reason, NodeRow)>> {
     let tz = &st.cfg.timezone;
     let mut parts: HashMap<i64, Parts> = HashMap::new();
 
@@ -199,7 +235,7 @@ pub async fn suggestions(
           WHERE user_id = $1 AND at > now() - interval '60 days'
           GROUP BY node_id",
     )
-    .bind(me.id)
+    .bind(user)
     .bind(tz)
     .fetch_all(&st.db)
     .await?;
@@ -230,7 +266,7 @@ pub async fn suggestions(
           WHERE e.user_id = $1 AND e.at > now() - interval '1 day' AND n.deleted_at IS NULL
           ORDER BY e.at DESC LIMIT 1",
     )
-    .bind(me.id)
+    .bind(user)
     .fetch_optional(&st.db)
     .await?;
     if let Some((anchor, anchor_name)) = &last {
@@ -245,7 +281,7 @@ pub async fn suggestions(
               GROUP BY e.node_id
              HAVING count(DISTINCT a.at) >= 2",
         )
-        .bind(me.id)
+        .bind(user)
         .bind(anchor)
         .fetch_all(&st.db)
         .await?;
@@ -271,7 +307,7 @@ pub async fn suggestions(
                          WHERE e.user_id = $1 AND e.node_id = j.node_id)
           ORDER BY j.node_id, j.at DESC",
     )
-    .bind(me.id)
+    .bind(user)
     .bind(&known)
     .fetch_all(&st.db)
     .await?;
@@ -286,7 +322,7 @@ pub async fn suggestions(
             AND s.created_by IS DISTINCT FROM $1
           ORDER BY s.node_id, s.created_at DESC",
     )
-    .bind(me.id)
+    .bind(user)
     .fetch_all(&st.db)
     .await?;
 
@@ -326,7 +362,7 @@ pub async fn suggestions(
     .bind(&ids)
     .fetch_all(&st.db)
     .await?;
-    let roles = access::roles(&st.db, me.id, &nodes).await?;
+    let roles = access::roles(&st.db, user, &nodes).await?;
     let mut ranked: Vec<(f64, Reason, NodeRow)> = nodes
         .into_iter()
         .filter(|n| roles.contains_key(&n.id))
@@ -342,38 +378,7 @@ pub async fn suggestions(
         .collect();
     ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.2.id.cmp(&b.2.id)));
     ranked.truncate(SHOWN);
-
-    let scope = access::scope(&st.db, me.id).await?;
-    let rows: Vec<NodeRow> = ranked.iter().map(|r| r.2.clone()).collect();
-    let folders = folder_names(&st, &scope, &rows).await?;
-    // What was shown (at most once an hour per item and reason).
-    for (score, reason, n) in &ranked {
-        sqlx::query(
-            "INSERT INTO suggestion_log (user_id, node_id, reason, score)
-             SELECT $1, $2, $3, $4
-              WHERE NOT EXISTS (
-                    SELECT 1 FROM suggestion_log
-                     WHERE user_id = $1 AND node_id = $2 AND reason = $3
-                       AND shown_at > now() - interval '1 hour')",
-        )
-        .bind(me.id)
-        .bind(n.id)
-        .bind(reason.name())
-        .bind(*score as f32)
-        .execute(&st.db)
-        .await?;
-    }
-    Ok(Json(
-        ranked
-            .into_iter()
-            .map(|(score, reason, n)| Suggestion {
-                folder: folders.get(&n.id).cloned().unwrap_or_default(),
-                node: NodeInfo::from(&n),
-                reason,
-                score,
-            })
-            .collect(),
-    ))
+    Ok(ranked)
 }
 
 #[derive(Deserialize)]

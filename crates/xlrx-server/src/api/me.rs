@@ -36,6 +36,26 @@ pub async fn get_me(State(st): State<AppState>, me: CurrentUser) -> ApiResult<Js
 }
 
 #[derive(Deserialize)]
+pub struct PrefetchReq {
+    pub on: bool,
+}
+
+/// "Unterwegs vorausladen": my starred and suggested files go into the outside cache at night.
+pub async fn set_prefetch(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    Json(req): Json<PrefetchReq>,
+) -> ApiResult<StatusCode> {
+    sqlx::query("UPDATE users SET prefetch = $2, updated_at = now() WHERE id = $1")
+        .bind(me.id)
+        .bind(req.on)
+        .execute(&st.db)
+        .await?;
+    st.mirror_wake.notify_one();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
 pub struct PasswordReq {
     pub password: String,
 }

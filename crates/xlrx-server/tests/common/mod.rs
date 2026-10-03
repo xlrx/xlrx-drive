@@ -111,6 +111,9 @@ pub fn config() -> Config {
         default_data_class: xlrx_server::files::data_class::Class::Local,
         link_upload_max: 10_000_000,
         timezone: "Europe/Berlin".into(),
+        s3: None,
+        mirror: Default::default(),
+        lan_nets: Vec::new(),
     }
 }
 
@@ -138,6 +141,29 @@ impl Env {
         let mut env = Self::with_data().await?;
         let mut cfg = env.state.cfg.clone();
         cfg.force_copy = true;
+        env.state = AppState::new(env.db.pool.clone(), cfg).expect("Zustand");
+        env.app = xlrx_server::router(env.state.clone());
+        Some(env)
+    }
+
+    /// Like [`Env::with_data`], with the outside cache on a test bucket: everything "Cloud
+    /// erlaubt" unless a folder says otherwise, the caller's address from `X-Forwarded-For`,
+    /// files from 1 kB on, no upload limit, prefetching around the clock.
+    pub async fn with_s3(s3: &s3::FakeS3) -> Option<Self> {
+        let mut env = Self::with_data().await?;
+        let mut cfg = env.state.cfg.clone();
+        cfg.s3 = Some(s3.cfg.clone());
+        cfg.trust_proxy = true;
+        cfg.default_data_class = xlrx_server::files::data_class::Class::Cloud;
+        // The household's public IPv6 prefix counts as home.
+        cfg.lan_nets = vec![xlrx_server::files::mirror::Cidr::parse("2001:db8:1::/48").unwrap()];
+        cfg.mirror = xlrx_server::config::MirrorConfig {
+            budget: 10_000_000,
+            max_days: 30,
+            min_size: 1000,
+            upload_rate: None,
+            prefetch_hours: (0, 24),
+        };
         env.state = AppState::new(env.db.pool.clone(), cfg).expect("Zustand");
         env.app = xlrx_server::router(env.state.clone());
         Some(env)

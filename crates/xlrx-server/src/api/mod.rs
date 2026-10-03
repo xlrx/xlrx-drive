@@ -63,6 +63,7 @@ pub fn router(state: AppState) -> Router {
         // Own account
         .route("/me/password", post(me::change_password))
         .route("/me/totp", delete(me::totp_remove))
+        .route("/me/prefetch", put(me::set_prefetch))
         .route("/me/totp/begin", post(me::totp_begin))
         .route("/me/totp/confirm", post(me::totp_confirm))
         .route("/me/passkeys/begin", post(me::passkey_begin))
@@ -104,6 +105,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/admin/spaces/{id}", put(admin::update_space))
         .route("/admin/data-classes", get(admin::data_classes))
+        .route("/admin/cache", get(admin::cache_status))
+        .route("/admin/cache/clear", post(admin::cache_clear))
         .route("/admin/jobs/retry", post(admin::retry_jobs))
         .layer(middleware::from_fn(browser_only));
 

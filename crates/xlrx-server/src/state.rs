@@ -46,6 +46,12 @@ pub struct Inner {
     pub extract: std::sync::OnceLock<crate::extract::Running>,
     /// Full-text search, once started (see [`crate::search::start`]).
     pub search: std::sync::OnceLock<crate::search::Search>,
+    /// The outside cache's bucket (PLAN 15.2), if configured.
+    pub s3: Option<Arc<crate::s3::S3>>,
+    /// Wakes the outside cache's worker (a link ended, a folder became "Nur lokal" …).
+    pub mirror_wake: tokio::sync::Notify,
+    /// The outside cache's last error, for the administration.
+    pub mirror_error: std::sync::Mutex<Option<String>>,
     /// Notifications: the id of a person whose bell changed (see [`crate::bell`]).
     pub bell: tokio::sync::broadcast::Sender<i64>,
     /// Requests per address on public links (see [`crate::files::links`]).
@@ -77,10 +83,18 @@ impl AppState {
         let webauthn = builder
             .build()
             .map_err(|e| format!("Passkey-Konfiguration: {e}"))?;
+        let s3 = cfg
+            .s3
+            .clone()
+            .map(crate::s3::S3::new)
+            .transpose()?
+            .map(Arc::new);
+        // Audio and video from the outside cache play in the web app.
+        let media = cfg.s3.as_ref().map(|c| c.public_origin());
         let web_csp = cfg
             .web_dir
             .as_deref()
-            .map(crate::web::csp_for_dir)
+            .map(|d| crate::web::csp_for_dir(d, media.as_deref()))
             .transpose()?;
         Ok(Self(Arc::new(Inner {
             web_csp,
@@ -92,6 +106,9 @@ impl AppState {
             jobs_wake: Default::default(),
             extract: Default::default(),
             public_limit: Default::default(),
+            s3,
+            mirror_wake: Default::default(),
+            mirror_error: Default::default(),
             bell: tokio::sync::broadcast::channel(256).0,
             db,
             secrets: SecretBox::new(&cfg.secret_key),

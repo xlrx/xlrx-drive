@@ -3,6 +3,7 @@
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::OffsetDateTime;
@@ -734,6 +735,36 @@ pub struct DataClassOverview {
     /// For folders without any setting above them.
     pub default: crate::files::data_class::Class,
     pub entries: Vec<DataClassEntry>,
+}
+
+/// The outside cache (PLAN 15.2): what is in the bucket.
+pub async fn cache_status(
+    State(st): State<AppState>,
+    me: CurrentUser,
+) -> ApiResult<Json<crate::files::mirror::Status>> {
+    me.require_admin()?;
+    Ok(Json(crate::files::mirror::status(&st).await?))
+}
+
+/// Empties the outside cache: everything is removed from the bucket.
+pub async fn cache_clear(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    client: ClientInfo,
+) -> ApiResult<StatusCode> {
+    me.require_admin()?;
+    me.require_step_up()?;
+    let n = crate::files::mirror::clear(&st).await?;
+    audit::log(
+        &st.db,
+        Some(me.id),
+        None,
+        "cache_cleared",
+        Some(&client.ip),
+        serde_json::json!({ "objects": n }),
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Where data may go (PLAN 7.4, "Verzeichnis der Verarbeitungstätigkeiten"): every folder with a

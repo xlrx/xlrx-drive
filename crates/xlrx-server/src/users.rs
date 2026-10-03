@@ -275,6 +275,8 @@ pub struct Me {
     pub totp: bool,
     pub passkeys: Vec<PasskeyInfo>,
     pub recovery_codes_left: i64,
+    /// Starred and suggested files are put into the outside cache at night (PLAN 15.2).
+    pub prefetch: bool,
 }
 
 #[derive(Serialize)]
@@ -307,5 +309,9 @@ pub async fn me(db: &PgPool, user_id: i64) -> ApiResult<Me> {
             })
             .collect(),
         recovery_codes_left: recovery_left(db, user_id).await?,
+        prefetch: sqlx::query_scalar("SELECT prefetch FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(db)
+            .await?,
     })
 }

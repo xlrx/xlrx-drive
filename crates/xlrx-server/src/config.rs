@@ -64,6 +64,39 @@ pub struct Config {
     /// Time zone of the household, for "opened on Mondays" (`XLRX_TIMEZONE`, default
     /// `Europe/Berlin`; checked against the database at start).
     pub timezone: String,
+    /// The outside cache in S3 (PLAN 15.2); off without `XLRX_S3_BUCKET`.
+    pub s3: Option<crate::s3::S3Config>,
+    pub mirror: MirrorConfig,
+    /// Further networks counted as the home network (`XLRX_LAN_NETS`, e.g. the home IPv6
+    /// prefix): nothing is redirected to the outside cache for them. Private ranges always count.
+    pub lan_nets: Vec<crate::files::mirror::Cidr>,
+}
+
+/// What the outside cache may hold and how fast it fills.
+#[derive(Clone, Debug)]
+pub struct MirrorConfig {
+    /// Total size (`XLRX_S3_BUDGET_GB`, default 200).
+    pub budget: u64,
+    /// Objects not held by a link go after this many days (`XLRX_S3_MAX_DAYS`, default 30).
+    pub max_days: u32,
+    /// Smaller files are served from the NAS (`XLRX_S3_MIN_MB`, default 8).
+    pub min_size: u64,
+    /// Upload limit in bytes per second (`XLRX_S3_UPLOAD_MBIT`, default 20; 0: none).
+    pub upload_rate: Option<u64>,
+    /// Hours (local time) for prefetching, start and end (`XLRX_S3_PREFETCH_HOURS`, default 1-6).
+    pub prefetch_hours: (u32, u32),
+}
+
+impl Default for MirrorConfig {
+    fn default() -> Self {
+        Self {
+            budget: 200_000_000_000,
+            max_days: 30,
+            min_size: 8_000_000,
+            upload_rate: Some(20 * 125_000),
+            prefetch_hours: (1, 6),
+        }
+    }
 }
 
 /// Parameters for argon2id. Calibrate on the DS918+ (J3455) so that one check takes ~250 ms
@@ -92,6 +125,18 @@ pub const LOCAL_DEV_KEY: &[u8; 32] = b"xlrx-local-development-only-key!";
 
 fn var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+}
+
+/// A secret from `NAME_FILE` (a Docker secret) or else `NAME`.
+fn secret(name: &str) -> Result<String, String> {
+    match (var(&format!("{name}_FILE")), var(name)) {
+        (Some(path), _) => Ok(std::fs::read_to_string(&path)
+            .map_err(|e| format!("{name}_FILE {path}: {e}"))?
+            .trim()
+            .to_owned()),
+        (None, Some(v)) => Ok(v),
+        (None, None) => Err(format!("{name}_FILE bzw. {name} fehlt")),
+    }
 }
 
 /// Reads a 32-byte key (Base64 or hex).
@@ -229,6 +274,49 @@ impl Config {
                 )?,
             },
             link_upload_max: u64::from(num("XLRX_LINK_UPLOAD_MAX_MB", 10_240)?) * 1_000_000,
+            s3: match var("XLRX_S3_BUCKET").filter(|b| !b.trim().is_empty()) {
+                None => None,
+                Some(bucket) => Some(crate::s3::S3Config {
+                    endpoint: var("XLRX_S3_ENDPOINT")
+                        .ok_or(
+                            "XLRX_S3_ENDPOINT fehlt (z. B. https://fsn1.your-objectstorage.com)",
+                        )?
+                        .trim()
+                        .parse()
+                        .map_err(|e| format!("XLRX_S3_ENDPOINT: {e}"))?,
+                    bucket: bucket.trim().to_owned(),
+                    region: var("XLRX_S3_REGION").unwrap_or_else(|| "us-east-1".into()),
+                    access_key: secret("XLRX_S3_ACCESS_KEY")?,
+                    secret_key: secret("XLRX_S3_SECRET_KEY")?,
+                    virtual_host: var("XLRX_S3_VIRTUAL_HOST")
+                        .is_some_and(|v| v == "1" || v == "true"),
+                }),
+            },
+            mirror: MirrorConfig {
+                budget: u64::from(num("XLRX_S3_BUDGET_GB", 200)?) * 1_000_000_000,
+                max_days: num("XLRX_S3_MAX_DAYS", 30)?.max(1),
+                min_size: u64::from(num("XLRX_S3_MIN_MB", 8)?) * 1_000_000,
+                upload_rate: match num("XLRX_S3_UPLOAD_MBIT", 20)? {
+                    0 => None,
+                    m => Some(u64::from(m) * 125_000),
+                },
+                prefetch_hours: match var("XLRX_S3_PREFETCH_HOURS") {
+                    None => (1, 6),
+                    Some(v) => v
+                        .split_once('-')
+                        .and_then(|(a, b)| Some((a.trim().parse().ok()?, b.trim().parse().ok()?)))
+                        .filter(|(a, b): &(u32, u32)| *a < 24 && *b <= 24)
+                        .ok_or("XLRX_S3_PREFETCH_HOURS: z. B. 1-6")?,
+                },
+            },
+            lan_nets: var("XLRX_LAN_NETS")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(crate::files::mirror::Cidr::parse)
+                .collect::<Result<_, _>>()
+                .map_err(|e| format!("XLRX_LAN_NETS: {e}"))?,
             timezone: var("XLRX_TIMEZONE")
                 .map(|v| v.trim().to_owned())
                 .filter(|v| !v.is_empty())

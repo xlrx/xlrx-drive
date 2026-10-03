@@ -53,5 +53,8 @@ pub async fn cleanup(db: &PgPool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
     auth::device::cleanup(db).await?;
+    sqlx::query("DELETE FROM remote_fetches WHERE at < now() - interval '30 days'")
+        .execute(db)
+        .await?;
     Ok(())
 }
