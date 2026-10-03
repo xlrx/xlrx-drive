@@ -194,6 +194,9 @@ async fn teilen_meldet_sich_live() {
         .unwrap();
     anna.post("/api/notifications/read", json!({"ids": [bert_n]}))
         .await;
+    // Anna's bell is none of bert's stream's business.
+    let r = tokio::time::timeout(Duration::from_millis(1500), next_bell(&mut stream)).await;
+    assert!(r.is_err(), "fremde Glocke gemeldet: {r:?}");
     let unread: Option<time::OffsetDateTime> =
         sqlx::query_scalar("SELECT read_at FROM notifications WHERE id = $1")
             .bind(bert_n)
