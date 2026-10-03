@@ -879,12 +879,13 @@ pub async fn set_data_class(
     data_class::set(&st.db, id, class, me.id).await?;
     // Now "Nur lokal": its contents leave the outside cache at once (and are never served again).
     mirror::revoke_forbidden(&st).await?;
+    // Likewise what the cloud made from them (vectors, picture descriptions); what is allowed
+    // now is queued.
+    crate::ai::class_changed(&st, id).await?;
     let after = data_class::effective(&st.db, default, &[id])
         .await?
         .get(&id)
         .map(|e| e.class);
-    // Becoming "local" will also have to remove what cloud services produced for it (M4:
-    // vectors, image descriptions); the log keeps the change either way.
     crate::audit::log(
         &st.db,
         Some(me.id),

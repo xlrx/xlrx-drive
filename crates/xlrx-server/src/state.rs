@@ -52,6 +52,8 @@ pub struct Inner {
     pub mirror_wake: tokio::sync::Notify,
     /// The outside cache's last error, for the administration.
     pub mirror_error: std::sync::Mutex<Option<String>>,
+    /// AI search: providers and pipeline (see [`crate::ai`]).
+    pub ai: crate::ai::Ai,
     /// Notifications: the id of a person whose bell changed (see [`crate::bell`]).
     pub bell: tokio::sync::broadcast::Sender<i64>,
     /// Requests per address on public links (see [`crate::files::links`]).
@@ -96,8 +98,10 @@ impl AppState {
             .as_deref()
             .map(|d| crate::web::csp_for_dir(d, media.as_deref()))
             .transpose()?;
+        let ai = crate::ai::Ai::new(&cfg.ai)?;
         Ok(Self(Arc::new(Inner {
             web_csp,
+            ai,
             root_locks: Default::default(),
             watchers: Default::default(),
             sync_locks: Default::default(),

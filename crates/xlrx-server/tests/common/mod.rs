@@ -7,6 +7,7 @@
 
 #![allow(dead_code)]
 
+pub mod ai;
 pub mod files;
 pub mod s3;
 
@@ -114,6 +115,7 @@ pub fn config() -> Config {
         s3: None,
         mirror: Default::default(),
         lan_nets: Vec::new(),
+        ai: Default::default(),
     }
 }
 

@@ -91,6 +91,27 @@ pub async fn retry(db: &PgPool, job: &Job, error: &str) -> Result<(), sqlx::Erro
     Ok(())
 }
 
+/// The job could not start (its worker pauses): back in the queue, the attempt not counted.
+pub async fn release(db: &PgPool, id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE jobs SET run_after = now(), attempts = greatest(attempts - 1, 0) WHERE id = $1",
+    )
+    .bind(id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Gives a job up at once: trying again cannot help (it stays as 'failed').
+pub async fn fail(db: &PgPool, id: i64, error: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE jobs SET state = 'failed', last_error = $2 WHERE id = $1")
+        .bind(id)
+        .bind(error)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
 /// The job needs a tool that is not set up: it waits until the server starts with it.
 pub async fn park(db: &PgPool, job: &Job, reason: &str) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE jobs SET state = 'waiting', attempts = 0, last_error = $2 WHERE id = $1")

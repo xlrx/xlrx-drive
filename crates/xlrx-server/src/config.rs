@@ -70,6 +70,70 @@ pub struct Config {
     /// Further networks counted as the home network (`XLRX_LAN_NETS`, e.g. the home IPv6
     /// prefix): nothing is redirected to the outside cache for them. Private ranges always count.
     pub lan_nets: Vec<crate::files::mirror::Cidr>,
+    /// AI search (PLAN 6.3, 7).
+    pub ai: AiConfig,
+}
+
+/// AI analysis (PLAN 7): a provider in the cloud for "Cloud erlaubt", one in the home network for
+/// "Nur lokal". Both speak the OpenAI API (`/v1/embeddings`, `/v1/chat/completions`).
+#[derive(Clone, Debug)]
+pub struct AiConfig {
+    pub cloud: Option<CloudAi>,
+    pub local: Option<LocalAi>,
+    /// Spending limit per month in euros (`XLRX_AI_BUDGET_EUR`, default 20); the administration
+    /// can change it.
+    pub budget: f64,
+    /// Requests to the cloud at the same time (`XLRX_AI_WORKERS`, default 2).
+    pub cloud_workers: u32,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            cloud: None,
+            local: None,
+            budget: 20.0,
+            cloud_workers: 2,
+        }
+    }
+}
+
+/// The provider for "Cloud erlaubt" (e.g. Scaleway, `XLRX_AI_URL`).
+#[derive(Clone, Debug)]
+pub struct CloudAi {
+    /// Base address up to `/v1` (`https://api.scaleway.ai/v1`).
+    pub url: Url,
+    /// `XLRX_AI_KEY_FILE` (a Docker secret) or `XLRX_AI_KEY`.
+    pub key: String,
+    /// `XLRX_AI_EMBED_MODEL` (default `qwen3-embedding-8b`) with `XLRX_AI_EMBED_DIM` dimensions
+    /// (default 1024). One model per installation: changing it embeds everything again.
+    pub embed_model: String,
+    pub embed_dim: u32,
+    /// Picture analysis (`XLRX_AI_VISION_MODEL`, default `gemma-4-26b-a4b-it`; `off`: none).
+    pub vision_model: Option<String>,
+    pub prices: Prices,
+}
+
+/// Euros per million tokens (`XLRX_AI_PRICE_EMBED`, `XLRX_AI_PRICE_VISION_IN`,
+/// `XLRX_AI_PRICE_VISION_OUT`), for the budget and the cost estimate.
+#[derive(Clone, Copy, Debug)]
+pub struct Prices {
+    pub embed: f64,
+    pub vision_in: f64,
+    pub vision_out: f64,
+}
+
+/// The service in the home network for "Nur lokal" (`embed-local`, `XLRX_LOCAL_AI_URL`).
+#[derive(Clone, Debug)]
+pub struct LocalAi {
+    pub url: Url,
+    /// `XLRX_LOCAL_EMBED_MODEL` (default `multilingual-e5-small`, `XLRX_LOCAL_EMBED_DIM` 384).
+    pub embed_model: String,
+    pub embed_dim: u32,
+    /// Picture vectors (`XLRX_LOCAL_CLIP_MODEL`, default `clip-ViT-B-32-multilingual-v1`, 512
+    /// dimensions in `XLRX_LOCAL_CLIP_DIM`; `off`: none).
+    pub clip_model: Option<String>,
+    pub clip_dim: u32,
 }
 
 /// What the outside cache may hold and how fast it fills.
@@ -125,6 +189,120 @@ pub const LOCAL_DEV_KEY: &[u8; 32] = b"xlrx-local-development-only-key!";
 
 fn var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+}
+
+/// A model name as the provider knows it. Model names end up in index definitions, so only
+/// harmless characters are accepted.
+pub fn model_name(var_name: &str, v: &str) -> Result<String, String> {
+    let v = v.trim();
+    if v.is_empty()
+        || v.len() > 100
+        || !v
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._:/@+-".contains(c))
+    {
+        return Err(format!("{var_name}: „{v}“ ist kein gültiger Modellname"));
+    }
+    Ok(v.to_owned())
+}
+
+/// A model, a default one, or none with `off`.
+fn optional_model(name: &str, default: &str) -> Result<Option<String>, String> {
+    match var(name).as_deref().map(str::trim) {
+        Some("off" | "aus" | "0" | "false") => Ok(None),
+        Some(v) => model_name(name, v).map(Some),
+        None => Ok(Some(default.to_owned())),
+    }
+}
+
+fn float(name: &str, default: f64) -> Result<f64, String> {
+    var(name).map_or(Ok(default), |v| {
+        v.trim()
+            .replace(',', ".")
+            .parse::<f64>()
+            .ok()
+            .filter(|f| f.is_finite() && *f >= 0.0)
+            .ok_or_else(|| format!("{name}: „{v}“ ist keine Zahl ≥ 0"))
+    })
+}
+
+fn dimension(name: &str, default: u32) -> Result<u32, String> {
+    var(name).map_or(Ok(default), |v| {
+        v.trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|d| (2..=4096).contains(d))
+            .ok_or_else(|| format!("{name}: Dimension zwischen 2 und 4096"))
+    })
+}
+
+impl AiConfig {
+    fn from_env() -> Result<Self, String> {
+        let cloud = match var("XLRX_AI_URL") {
+            None => None,
+            Some(url) => {
+                let url: Url = url
+                    .trim()
+                    .parse()
+                    .map_err(|e| format!("XLRX_AI_URL: {e}"))?;
+                crate::ai::provider::check_cloud_url(&url)?;
+                Some(CloudAi {
+                    url,
+                    key: secret("XLRX_AI_KEY")?,
+                    embed_model: model_name(
+                        "XLRX_AI_EMBED_MODEL",
+                        &var("XLRX_AI_EMBED_MODEL").unwrap_or_else(|| "qwen3-embedding-8b".into()),
+                    )?,
+                    embed_dim: dimension("XLRX_AI_EMBED_DIM", 1024)?,
+                    vision_model: optional_model("XLRX_AI_VISION_MODEL", "gemma-4-26b-a4b-it")?,
+                    prices: Prices {
+                        embed: float("XLRX_AI_PRICE_EMBED", 0.10)?,
+                        vision_in: float("XLRX_AI_PRICE_VISION_IN", 0.25)?,
+                        vision_out: float("XLRX_AI_PRICE_VISION_OUT", 0.50)?,
+                    },
+                })
+            }
+        };
+        let local = match var("XLRX_LOCAL_AI_URL") {
+            None => None,
+            Some(url) => {
+                let url: Url = url
+                    .trim()
+                    .parse()
+                    .map_err(|e| format!("XLRX_LOCAL_AI_URL: {e}"))?;
+                crate::ai::provider::check_home_url("XLRX_LOCAL_AI_URL", &url)?;
+                Some(LocalAi {
+                    url,
+                    embed_model: model_name(
+                        "XLRX_LOCAL_EMBED_MODEL",
+                        &var("XLRX_LOCAL_EMBED_MODEL")
+                            .unwrap_or_else(|| "multilingual-e5-small".into()),
+                    )?,
+                    embed_dim: dimension("XLRX_LOCAL_EMBED_DIM", 384)?,
+                    clip_model: optional_model(
+                        "XLRX_LOCAL_CLIP_MODEL",
+                        "clip-ViT-B-32-multilingual-v1",
+                    )?,
+                    clip_dim: dimension("XLRX_LOCAL_CLIP_DIM", 512)?,
+                })
+            }
+        };
+        let workers = var("XLRX_AI_WORKERS")
+            .map(|v| {
+                v.trim()
+                    .parse::<u32>()
+                    .map_err(|e| format!("XLRX_AI_WORKERS: {e}"))
+            })
+            .transpose()?
+            .unwrap_or(2)
+            .clamp(1, 16);
+        Ok(Self {
+            cloud,
+            local,
+            budget: float("XLRX_AI_BUDGET_EUR", 20.0)?,
+            cloud_workers: workers,
+        })
+    }
 }
 
 /// A secret from `NAME_FILE` (a Docker secret) or else `NAME`.
@@ -317,6 +495,7 @@ impl Config {
                 .map(crate::files::mirror::Cidr::parse)
                 .collect::<Result<_, _>>()
                 .map_err(|e| format!("XLRX_LAN_NETS: {e}"))?,
+            ai: AiConfig::from_env()?,
             timezone: var("XLRX_TIMEZONE")
                 .map(|v| v.trim().to_owned())
                 .filter(|v| !v.is_empty())

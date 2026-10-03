@@ -101,16 +101,22 @@ pub async fn allows_cloud(db: &PgPool, default: Class, id: i64) -> ApiResult<boo
         .is_some_and(|e| e.class == Class::Cloud))
 }
 
-/// Contents that may not leave the home network (for every cloud path that sends contents: the
-/// outside cache, M4): a copy that still exists – a file, one in the trash, an old version – lies in
-/// a "Nur lokal" folder, or no live file in a "Cloud erlaubt" folder has it.
-pub async fn forbidden_contents(
-    db: &PgPool,
-    default: Class,
-    hashes: &[Vec<u8>],
-) -> ApiResult<HashSet<Vec<u8>>> {
+/// Where the copies of contents lie.
+struct Placement {
+    /// A copy that still exists – a file, one in the trash, an old version – lies in a "Nur
+    /// lokal" folder.
+    local: HashSet<Vec<u8>>,
+    /// A live file in a "Cloud erlaubt" folder has it.
+    allowed: HashSet<Vec<u8>>,
+}
+
+async fn placement(db: &PgPool, default: Class, hashes: &[Vec<u8>]) -> ApiResult<Placement> {
+    let mut p = Placement {
+        local: HashSet::new(),
+        allowed: HashSet::new(),
+    };
     if hashes.is_empty() {
-        return Ok(HashSet::new());
+        return Ok(p);
     }
     let rows: Vec<(i64, Vec<u8>, bool)> = sqlx::query_as(
         "SELECT n.id, n.content_hash, n.deleted_at IS NULL FROM nodes n
@@ -130,25 +136,45 @@ pub async fn forbidden_contents(
         .into_iter()
         .collect();
     let classes = effective(db, default, &ids).await?;
-    let mut local = HashSet::new();
-    let mut allowed = HashSet::new();
     for (id, hash, live) in rows {
         // Unknown means local: only an explicit "Cloud erlaubt" lets a content out.
         match classes.get(&id).map(|e| e.class) {
             Some(Class::Cloud) if live => {
-                allowed.insert(hash);
+                p.allowed.insert(hash);
             }
             Some(Class::Cloud) => {}
             _ => {
-                local.insert(hash);
+                p.local.insert(hash);
             }
         }
     }
+    Ok(p)
+}
+
+/// Contents that may not leave the home network (for every cloud path that sends contents: the
+/// outside cache, M4): a copy that still exists – a file, one in the trash, an old version – lies in
+/// a "Nur lokal" folder, or no live file in a "Cloud erlaubt" folder has it.
+pub async fn forbidden_contents(
+    db: &PgPool,
+    default: Class,
+    hashes: &[Vec<u8>],
+) -> ApiResult<HashSet<Vec<u8>>> {
+    let p = placement(db, default, hashes).await?;
     Ok(hashes
         .iter()
-        .filter(|h| local.contains(*h) || !allowed.contains(*h))
+        .filter(|h| p.local.contains(*h) || !p.allowed.contains(*h))
         .cloned()
         .collect())
+}
+
+/// Contents of which a copy that still exists (a file, one in the trash, an old version) lies in a
+/// "Nur lokal" folder: what cloud services made from them must go (PLAN 7.4).
+pub async fn local_contents(
+    db: &PgPool,
+    default: Class,
+    hashes: &[Vec<u8>],
+) -> ApiResult<HashSet<Vec<u8>>> {
+    Ok(placement(db, default, hashes).await?.local)
 }
 
 /// The settings made on these nodes themselves.

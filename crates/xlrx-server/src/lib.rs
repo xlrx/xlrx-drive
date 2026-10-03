@@ -3,6 +3,7 @@
 //! As of M0: accounts and sign-in (password + TOTP or passkey, recovery codes, sessions, step-up),
 //! account management, audit log. Sync, storage and search follow from M1 (see `docs/PLAN.md`).
 
+pub mod ai;
 pub mod api;
 pub mod audit;
 pub mod auth;

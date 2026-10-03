@@ -262,6 +262,7 @@ impl Worker {
                     if let Some(s) = st.search.get() {
                         s.wake();
                     }
+                    st.ai.plan.notify_one();
                     Ok(Outcome::Done)
                 }
                 Read::Missing(reason) => Ok(Outcome::Waiting(reason)),

@@ -25,7 +25,7 @@ pub fn language(text: &str) -> Option<&'static str> {
     info.is_reliable().then(|| info.lang().code())
 }
 
-/// Stores the text of a content (replacing an earlier one) for the index to pick up.
+/// Stores the text of a content (replacing an earlier, different one) for the index to pick up.
 pub async fn store(db: &PgPool, hash: &[u8; 32], source: &str, text: &str) -> ApiResult<()> {
     let (text, truncated) = match text.char_indices().nth(MAX_CHARS) {
         Some((i, _)) => (&text[..i], true),
@@ -44,7 +44,9 @@ pub async fn store(db: &PgPool, hash: &[u8; 32], source: &str, text: &str) -> Ap
          VALUES ($1, $2, $3, $4, $5, nextval('content_text_seq'))
          ON CONFLICT (hash) DO UPDATE
             SET lang = EXCLUDED.lang, source = EXCLUDED.source, text = EXCLUDED.text,
-                truncated = EXCLUDED.truncated, seq = EXCLUDED.seq, created_at = now()",
+                truncated = EXCLUDED.truncated, seq = EXCLUDED.seq, created_at = now()
+          -- The same text again changes nothing (no new indexing, no new embedding).
+          WHERE (content_text.text, content_text.source) IS DISTINCT FROM (EXCLUDED.text, EXCLUDED.source)",
     )
     .bind(hash.to_vec())
     .bind(lang)
