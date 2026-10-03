@@ -212,7 +212,53 @@ den Bucket – das kostet nur Bandbreite, ist aber kein Risiko.
 
 Vor dem Einschalten: AVV mit Hetzner abschließen (Cloud Console → Datenschutz).
 
-## 15. DSM-Reverse-Proxy ablösen
+## 15. KI-Suche
+
+Die Suche findet Dateien dann auch nach ihrer Bedeutung („Therme“ findet die Rechnung über die Heizungswartung) und
+Fotos nach ihrem Inhalt („Hund am Strand“). Treffer, die nur so gefunden wurden, sind markiert („Passt inhaltlich“,
+„Passt zum Bildinhalt“). Zwei Teile, getrennt nach Datenklasse:
+
+**Im Heimnetz – `embed-local` (für „Nur lokal“).** Läuft mit `sudo docker compose up -d` von selbst:
+
+1. Beim ersten Start lädt der Hilfsdienst `embed-models` die Modelle (~1,6 GB, feste Versionen von Hugging Face) nach
+   `XLRX_MODELS_DIR`. Er ist der einzige Teil mit Internetzugang; `embed-local` selbst hängt nur im internen Netz.
+2. Speicher: etwa 0,8 GB für Texte, 1,7 GB mit Bildern. Bei wenig RAM die Bildsuche aus: `XLRX_EMBED_CLIP=0` und
+   `XLRX_LOCAL_CLIP_MODEL=off` in `.env`.
+3. Messen, wie schnell das NAS ist: `sudo docker compose run --rm embed-local bench` (Zeit je Textstück, Bild und
+   Suchanfrage; die erste Zeile sagt, ob AVX da ist – beim DS918+ nicht, das ist eingeplant). `XLRX_EMBED_THREADS`
+   (Standard 2) legt fest, wie viele der vier Kerne er nutzt.
+4. Steht ein schnellerer Rechner im Heimnetz (Mac mini, Mini-PC), kann `embed-local` dort laufen:
+   `XLRX_LOCAL_AI_URL=http://192.168.1.30:8090/v1`. Akzeptiert werden nur Adressen im Heimnetz.
+
+**In der Cloud (für „Cloud erlaubt“).** Bessere Modelle und echte Bildbeschreibungen, kostet Geld:
+
+1. Bei Scaleway (Paris) „Generative APIs“ freischalten und einen API-Schlüssel anlegen (IAM → API-Schlüssel, Berechtigung für
+   Generative APIs). Die Datenschutzvereinbarung (DPA) prüfen und abschließen.
+2. Schlüssel und Adresse eintragen:
+   ```sh
+   umask 077
+   printf '%s' 'SCHLÜSSEL' > secrets/ai_key
+   ```
+   ```
+   XLRX_AI_URL=https://api.scaleway.ai/v1
+   XLRX_AI_BUDGET_EUR=20
+   ```
+   (Mit Projekt: `https://api.scaleway.ai/PROJEKT-ID/v1`.) `sudo docker compose up -d`.
+3. Verwaltung → **KI-Suche** → „Probelauf (500 Inhalte)“. Danach steht dort, was ein Text und ein Bild wirklich kosten und was
+   der Rest ungefähr kostet. Erst dann „Starten“. Ist das Monatsbudget ausgeschöpft, pausiert die Analyse bis zum nächsten
+   Monat (oder bis zu einem höheren Budget); die normale Suche läuft weiter.
+
+Gesendet werden Textstücke (die ersten ~16.000 Tokens eines Dokuments) und Bilder, verkleinert auf höchstens 1024 Pixel und
+neu kodiert – ohne EXIF und GPS, nie Dateinamen oder Pfade. Auch die Wörter einer Suche gehen an den Anbieter, um im
+selben Raum zu suchen. Was in einem „Nur lokal“-Ordner liegt (auch als Kopie, im Papierkorb, als alte Version), geht nie
+hinaus; wird ein Ordner „Nur lokal“, löscht xlrx seine Cloud-Ergebnisse sofort und erzeugt sie im Heimnetz neu
+(Protokoll: `ai_revoked`).
+
+Ein anderes Modell (`XLRX_AI_EMBED_MODEL`) bedeutet: alles wird neu eingebettet (Kosten!). Feinabstimmung, wie ähnlich ein
+Treffer nach Bedeutung sein muss: `XLRX_AI_MAX_DISTANCE`, `XLRX_LOCAL_MAX_DISTANCE`, `XLRX_LOCAL_CLIP_MAX_DISTANCE`
+(Kosinus-Abstand; kleiner = weniger, dafür passendere Treffer).
+
+## 16. DSM-Reverse-Proxy ablösen
 
 1. Bestehende Regeln (Systemsteuerung → Anmeldeportal → Erweitert → Reverse Proxy) als Blöcke in `Caddyfile` übernehmen.
 2. Caddy läuft parallel; über die Caddy-IP testen (`curl --resolve fotos.example.de:443:192.168.1.20 https://fotos.example.de`).

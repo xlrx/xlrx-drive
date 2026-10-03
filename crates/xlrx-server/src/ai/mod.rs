@@ -17,6 +17,7 @@ pub mod images;
 pub mod pipeline;
 pub mod provider;
 pub mod search;
+pub mod status;
 pub mod vectors;
 
 use std::collections::{HashMap, HashSet};

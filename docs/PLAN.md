@@ -141,7 +141,7 @@ auf die Daten und Netz nur zum KI-Anbieter. Wenn er abstürzt, läuft der Sync u
 | xlrx-server | 0,5–1 GB (+ Tantivy über Page-Cache/mmap) |
 | xlrx-worker | 1–2 GB (Spitzen bei LibreOffice/ffmpeg) |
 | Tika | ~1 GB Heap |
-| embed-local | 0,5–1 GB (Modell + Laufzeit) |
+| embed-local | 0,8 GB nur Texte, 1,7 GB mit Bildern (gemessen, M4; ohne Bilder: `EMBED_CLIP=0`) |
 | Rest | Page-Cache für Index & Dateien |
 
 ### Plattenbedarf für abgeleitete Daten (bei ~1,5 Mio Dateien, grob)
@@ -560,8 +560,9 @@ Kosten senken lässt sich so:
   | `embeddinggemma-300m` | 300 Mio Parameter | 768 (Matryoshka: 512/256/128) | Gemma-Lizenz | bessere Qualität, aber ~3–5× langsamer; nur wenn der Spike das zulässt |
 
   Beide laufen int8-quantisiert. Zum Vergleich: Das Cloud-Modell `qwen3-embedding-8b` ist deutlich stärker. Lokal ist ein Kompromiss für die sensiblen Ordner.
-- **Laufzeit ohne AVX:** ONNX Runtime aus dem Quellcode ohne AVX gebaut **oder** llama.cpp mit GGUF-Modell
-  (`GGML_NATIVE=OFF`, AVX-Optionen aus). Welche Variante schneller und stabil ist, entscheidet ein Benchmark im M0-Spike direkt auf dem DS918+.
+- **Laufzeit ohne AVX (umgesetzt in M4):** `embed-local` in Rust mit candle. Die Rechenkerne wählen SSE oder AVX zur Laufzeit,
+  ein Build für x86-64-v2 läuft also auf dem J3455 und nutzt auf schnelleren Rechnern AVX. Unter QEMU mit Goldmont-CPU (ohne AVX)
+  kommen dieselben Vektoren heraus. Die Messung auf dem DS918+ selbst: `embed-local bench` im M0-Spike.
 - **Erwartete Geschwindigkeit** (Überschlag, wird gemessen):
   - `multilingual-e5-small` mit 2 Kernen: ~0,5–2 Chunks/s (512 Tokens). Nachts dürfen alle 4 Kerne rechnen.
   - Ein Query-Embedding dauert ~50–100 ms, ist also unproblematisch für die Suche.
@@ -1151,7 +1152,7 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
   - Rechte doppelt geprüft: der Index sieht nur lesbare Ablagen, jeder Treffer wird in Postgres noch einmal geprüft. Eine Suche wartet kurz, bis eigene Änderungen im Index sind.
   - Textextraktion auf dem NAS (siehe 6.6) mit Fortschritt in der Verwaltung.
   - Web: Suche mit Vorschlägen (Dateinamen, Suchfilter, zuletzt gesucht – nur im Browser gespeichert), Ergebnisse mit Bildern als Kacheln und Textausschnitten, Suche in einem Ordner.
-  - Offen für später: `von:`, `ist:`, `dokument:`, `ort:` und die Facetten Besitzer und Ort (M3/M4); Messung p95 mit echtem Bestand auf dem DS918+.
+  - Offen für später: `von:`, `ist:`, `ort:` und die Facetten Besitzer, Ort und Dokumenttyp (`dokument:` als Filter seit M4); Messung p95 mit echtem Bestand auf dem DS918+.
 - **M3 erledigt (lokal getestet) – Teilen, Datenklassen, öffentliche Links, Aktivität, Vorschläge, Glocke:**
   - Eine Rechteprüfung für alles (Durchsuchen, Inhalte, Vorschaubilder, Versionen, Uploads, Änderungen, Papierkorb, Sync, Suche, Live-Ereignisse).
     Rolle = höchste aus Besitz der eigenen Ablage, Mitgliedschaft in einer Geteilten Ablage, Freigabe auf dem Element oder einem Ordner darüber
@@ -1219,6 +1220,36 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
     Aufräumen: Link-Ende, neue Fassung, Budget (LRU), 30 Tage ohne Nutzung, Waisen im Bucket, abgebrochene Uploads.
   - Verwaltung: Belegung, Gründe, Abrufe, letzter Fehler, „Leeren“ (mit erneuter Bestätigung). Einstellungen: „Unterwegs vorausladen“.
   - Für M5: Der Mac-Client folgt Umleitungen selbst und schickt dabei **kein** `Authorization` mit (S3 lehnt doppelte Anmeldung ab).
+
+- **M4 erledigt (lokal getestet; Cloud gegen einen Test-Anbieter, Heimnetz mit den echten Modellen):**
+  - Anbieter mit OpenAI-API (7.1): die Cloud (`XLRX_AI_URL`, z. B. Scaleway; Cloudflare über seinen OpenAI-Endpunkt) für „Cloud erlaubt“,
+    `embed-local` im Heimnetz für „Nur lokal“. Die Heimnetz-Adresse wird beim Einrichten und bei jeder Verbindung geprüft (jede Adresse,
+    zu der ein Name auflöst); Weiterleitungen werden nie befolgt. Schlüssel als Docker-Secret.
+  - Vektoren in pgvector (`halfvec`), ein Teilindex (HNSW) je Raum und Modell: `cloud` binär quantisiert mit Nachsortierung, `local` und
+    `clip` direkt (bei 50.000 Vektoren 15 ms, ~420 Byte je Vektor im Index). Texte in überlappenden Stücken (~1600 Zeichen), in der Cloud
+    die ersten ~40, im Heimnetz die ersten 3. Einmal je Inhalt und Textfassung; Kopien, Umbenennen, Verschieben kosten nichts.
+  - Bilder (7.2): „Cloud erlaubt“ ein Vision-Aufruf je Bild (Beschreibung, Schlagwörter, Text im Bild, Dokumenttyp, Datum; robust gegen
+    Code-Blöcke und Fließtext), die Beschreibung eingebettet und im Volltext (`dokument:rechnung`); „Nur lokal“ CLIP-Vektoren. Gesendet
+    werden nur auf ≤ 1024 px verkleinerte, neu kodierte Bilder (ohne EXIF/GPS) und Textstücke – nie Namen oder Pfade. Icons und kleine
+    Bilder werden übersprungen.
+  - Datenschutz: Vor dem Senden prüft `forbidden_contents` (ein Nachweistyp erzwingt es im Code), beim Speichern noch einmal unter einer
+    Sperre, die auch der Widerruf nimmt. Kopie, Verschieben oder Umstellen auf „Nur lokal“ löscht die Cloud-Ergebnisse sofort (auch aus dem
+    Volltextindex, Audit-Log `ai_revoked`) und erzeugt sie im Heimnetz neu; alle 6 Stunden eine vollständige Prüfung. Mit Absicht
+    eingebaute Fehler in diesen Regeln finden die Tests alle.
+  - Hybride Suche (6.4): die Anfrage je Raum mit dessen Modell (800 ms Zeitlimit, Zwischenspeicher), Kandidaten mit Abstandsgrenzen
+    (absolut und relativ zum besten Treffer, für e5 und CLIP gemessen), dieselben Filter wie die Volltextsuche (Rechte, `in:`, `typ:`,
+    Datum, `dokument:`, Ausschlüsse, „Phrasen“), Reciprocal Rank Fusion. Treffer nur nach Bedeutung zeigen das passende Stück und
+    „Passt inhaltlich“ / „Passt zum Bildinhalt“. Fällt ein Anbieter aus, fehlt nur seine Liste.
+  - `embed-local`: multilingual-e5-small, CLIP ViT-B/32 mit mehrsprachigem Text-Encoder; Download mit festen Revisionen über einen
+    eigenen Hilfsdienst (der einzige mit Internet), der Dienst selbst nur im internen Netz. Gemessen (4 Kerne mit AVX2): Anfrage 29 ms,
+    Bild 104 ms, Textstück mit 357 Tokens 367 ms. Deutsche Anfragen finden Hund am Strand, Berge im Schnee, rotes Auto, schlafende Katze
+    und Texte nach Bedeutung.
+  - Kosten (7.3): Cloud erst nach „Starten“ oder als Probelauf (Standard 500 Inhalte), Monatsbudget (`XLRX_AI_BUDGET_EUR`, in der
+    Verwaltung änderbar) mit Schätzung vor jedem Aufruf; Verbrauch je Monat und Art, Hochrechnung je Text, je Bild und für den Rest,
+    Fortschritt mit Restdauer. Starten, Anhalten und Budget nur mit erneuter Bestätigung, im Audit-Log.
+  - Noch nicht: Batch-API (−50 %), Re-Ranker, Facetten Dokumenttyp/Ort, Audio. Beim Modellwechsel wird neu eingebettet; bis dahin fehlen
+    Treffer nach Bedeutung für die noch nicht neu berechneten Inhalte (der alte Index antwortet nicht weiter). Abstandsgrenze der Cloud mit
+    dem Probelauf prüfen.
 
 **Nächster Schritt:** Inbetriebnahme auf dem DS918+ mit den Spike-Messungen (M0) und dem M1-Nachweis mit den echten Daten.
 

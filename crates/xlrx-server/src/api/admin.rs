@@ -767,6 +767,90 @@ pub async fn cache_clear(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The AI search: providers, progress, costs (PLAN 7.3).
+pub async fn ai_status(
+    State(st): State<AppState>,
+    me: CurrentUser,
+) -> ApiResult<Json<crate::ai::status::Status>> {
+    me.require_admin()?;
+    Ok(Json(crate::ai::status::status(&st).await?))
+}
+
+#[derive(Deserialize)]
+pub struct AiActionReq {
+    pub action: crate::ai::status::Action,
+    /// Contents in a trial run (default 500).
+    pub trial: Option<i32>,
+}
+
+/// Starts or stops the analysis in the cloud, or starts a trial run (it costs money: with a fresh
+/// second factor, logged).
+pub async fn ai_action(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    client: ClientInfo,
+    Json(req): Json<AiActionReq>,
+) -> ApiResult<Json<crate::ai::status::Status>> {
+    use crate::ai::status::Action;
+    me.require_admin()?;
+    me.require_step_up()?;
+    if st.ai.cloud.is_none() && req.action != Action::Stop {
+        return Err(ApiError::bad(
+            "Kein KI-Anbieter für die Cloud eingerichtet.",
+        ));
+    }
+    crate::ai::status::act(&st, req.action, req.trial).await?;
+    let action = match req.action {
+        Action::Start => "ai_started",
+        Action::Stop => "ai_stopped",
+        Action::Trial => "ai_trial_started",
+    };
+    audit::log(
+        &st.db,
+        Some(me.id),
+        None,
+        action,
+        Some(&client.ip),
+        json!({ "trial": req.trial }),
+    )
+    .await?;
+    Ok(Json(crate::ai::status::status(&st).await?))
+}
+
+#[derive(Deserialize)]
+pub struct AiBudgetReq {
+    /// Euros per month; `null`: the configured value.
+    pub budget: Option<f64>,
+}
+
+/// Sets the monthly budget of the cloud analysis.
+pub async fn ai_budget(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    client: ClientInfo,
+    Json(req): Json<AiBudgetReq>,
+) -> ApiResult<Json<crate::ai::status::Status>> {
+    me.require_admin()?;
+    me.require_step_up()?;
+    if req
+        .budget
+        .is_some_and(|b| !b.is_finite() || !(0.0..=100_000.0).contains(&b))
+    {
+        return Err(ApiError::bad("Budget zwischen 0 und 100.000 €."));
+    }
+    crate::ai::status::set_budget(&st, req.budget).await?;
+    audit::log(
+        &st.db,
+        Some(me.id),
+        None,
+        "ai_budget_set",
+        Some(&client.ip),
+        json!({ "budget": req.budget }),
+    )
+    .await?;
+    Ok(Json(crate::ai::status::status(&st).await?))
+}
+
 /// Where data may go (PLAN 7.4, "Verzeichnis der Verarbeitungstätigkeiten"): every folder with a
 /// setting of its own, and the default for all others.
 pub async fn data_classes(

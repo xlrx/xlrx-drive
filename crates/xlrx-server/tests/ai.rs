@@ -579,3 +579,143 @@ async fn vektorindizes_werden_genutzt() {
     }
     env.finish().await;
 }
+
+#[tokio::test]
+async fn verwaltung_starten_probelauf_budget_und_kosten() {
+    let fake = FakeAi::start().await;
+    let Some(env) = env_with(&fake, Class::Cloud).await else {
+        return;
+    };
+    let (mut klaus, root_id, _, dir) = signed_in(&env, "klaus").await;
+    let home = root(&env, root_id).await;
+    files(
+        &env,
+        &home,
+        &dir,
+        &[
+            ("Heizung.txt", HEIZUNG),
+            ("Urlaub.txt", URLAUB),
+            ("Notiz.txt", BEFUND),
+        ],
+    )
+    .await;
+    plan(&env).await;
+
+    // Only administrators.
+    assert_eq!(klaus.get("/api/admin/ai").await.status, 403);
+    sqlx::query("UPDATE users SET is_admin = true WHERE username = 'klaus'")
+        .execute(&env.db.pool)
+        .await
+        .unwrap();
+    let st = klaus.get("/api/admin/ai").await.ok().clone();
+    assert_eq!(st["cloud"]["provider"], "127.0.0.1");
+    assert_eq!(st["cloud"]["embed_model"], "qwen3-embedding-8b");
+    assert_eq!(st["cloud"]["on"], false);
+    assert_eq!(
+        st["cloud"]["paused"],
+        "Die Cloud-Analyse ist nicht gestartet"
+    );
+    assert_eq!(st["cloud"]["budget"], 20.0);
+    assert_eq!(st["local"]["clip_model"], fake::CLIP_MODEL);
+    assert_eq!(st["progress"]["queued_cloud"], 3);
+    assert!(st["estimate"].is_null());
+
+    // Costs money: only with a fresh second factor.
+    sqlx::query("UPDATE sessions SET step_up_at = now() - interval '1 day'")
+        .execute(&env.db.pool)
+        .await
+        .unwrap();
+    let r = klaus
+        .post("/api/admin/ai", json!({"action": "trial", "trial": 2}))
+        .await;
+    assert_eq!(
+        (r.status.as_u16(), r.err()),
+        (403, "step_up_required".into())
+    );
+    sqlx::query("UPDATE sessions SET step_up_at = now()")
+        .execute(&env.db.pool)
+        .await
+        .unwrap();
+    let st = klaus
+        .post("/api/admin/ai", json!({"action": "trial", "trial": 2}))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(st["cloud"]["trial_left"], 2);
+    assert!(st["cloud"]["paused"].is_null());
+    work(&env).await;
+    let st = klaus.get("/api/admin/ai").await.ok().clone();
+    assert_eq!(st["cloud"]["trial_left"], 0);
+    assert_eq!(st["progress"]["cloud_texts"], 2);
+    assert_eq!(st["progress"]["queued_cloud"], 1);
+    assert_eq!(st["progress"]["last_hour_cloud"], 2);
+    // What the trial run cost per content, and what the rest will cost.
+    let spent = st["cloud"]["spent_month"].as_f64().unwrap();
+    assert!(spent > 0.0);
+    let per_text = st["estimate"]["per_text"].as_f64().unwrap();
+    assert!((per_text - spent / 2.0).abs() < 1e-12);
+    assert!((st["estimate"]["remaining"].as_f64().unwrap() - per_text).abs() < 1e-12);
+    assert_eq!(st["usage"][0]["kind"], "embed");
+    assert_eq!(st["usage"][0]["calls"], 2);
+
+    // A budget below what was spent stops it; the configured one comes back with null.
+    let st = klaus
+        .send(
+            "PUT",
+            "/api/admin/ai/budget",
+            Some(json!({"budget": spent / 2.0})),
+        )
+        .await
+        .ok()
+        .clone();
+    assert_eq!(st["cloud"]["budget_set"], true);
+    let st = klaus
+        .post("/api/admin/ai", json!({"action": "start"}))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(st["cloud"]["on"], true);
+    assert_eq!(st["cloud"]["paused"], "Das Monatsbudget ist ausgeschöpft");
+    work(&env).await;
+    assert_eq!(fake.seen().await.len(), 2);
+    let r = klaus
+        .send("PUT", "/api/admin/ai/budget", Some(json!({"budget": -1})))
+        .await;
+    assert_eq!(r.status, 400);
+    let st = klaus
+        .send("PUT", "/api/admin/ai/budget", Some(json!({"budget": null})))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(
+        (
+            st["cloud"]["budget"].as_f64(),
+            st["cloud"]["budget_set"].as_bool()
+        ),
+        (Some(20.0), Some(false))
+    );
+    work(&env).await;
+    assert_eq!(fake.seen().await.len(), 3);
+    let st = klaus
+        .post("/api/admin/ai", json!({"action": "stop"}))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(st["cloud"]["on"], false);
+    let actions: Vec<String> =
+        sqlx::query_scalar("SELECT action FROM audit_log WHERE action LIKE 'ai_%' ORDER BY id")
+            .fetch_all(&env.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        actions,
+        [
+            "ai_trial_started",
+            "ai_budget_set",
+            "ai_started",
+            "ai_budget_set",
+            "ai_stopped"
+        ]
+    );
+    env.finish().await;
+}

@@ -8,7 +8,7 @@ db="xlrx_e2e_$$"
 psql "$DATABASE_ADMIN_URL" -qc "CREATE DATABASE $db"
 data="$(mktemp -d)"
 s3dir="$(mktemp -d)"
-trap 'kill ${server:-0} ${s3:-0} 2>/dev/null || true; psql "$DATABASE_ADMIN_URL" -qc "DROP DATABASE IF EXISTS $db WITH (FORCE)" || true; rm -rf "$data" "$s3dir"' EXIT
+trap 'kill ${server:-0} ${s3:-0} ${ai:-0} 2>/dev/null || true; psql "$DATABASE_ADMIN_URL" -qc "DROP DATABASE IF EXISTS $db WITH (FORCE)" || true; rm -rf "$data" "$s3dir"' EXIT
 
 export DATABASE_URL="${DATABASE_ADMIN_URL%/*}/$db"
 export XLRX_PUBLIC_URL=http://localhost:8080
@@ -30,6 +30,13 @@ if command -v s3s-fs >/dev/null; then
   # The test plays "away from home" with X-Forwarded-For.
   export XLRX_TRUST_PROXY=1 XLRX_E2E_S3=1
 fi
+
+# The AI search against a stand-in for the provider (web/e2e/fake-ai.mjs).
+node web/e2e/fake-ai.mjs &
+ai=$!
+export XLRX_AI_URL=http://127.0.0.1:8015/v1 XLRX_AI_KEY=e2e-schluessel XLRX_AI_EMBED_DIM=256
+# The stand-in's word vectors are far apart even when they match.
+export XLRX_AI_MAX_DISTANCE=0.9
 
 XLRX_SETUP_URL="$(target/release/xlrx-server create-user admin "Admin" --admin | tail -1)"
 export XLRX_SETUP_URL

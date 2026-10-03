@@ -621,6 +621,45 @@ async function classifyFolder(page: Page) {
 	await expect(page.getByText('Meine Ablage › Projekte')).toBeVisible();
 }
 
+/** AI search: started in the administration, a text in a "Cloud erlaubt" folder is found by what it means
+ *  (the provider is a stand-in, see fake-ai.mjs), and the administration shows progress and costs. */
+async function aiSearch(page: Page, data: string) {
+	await writeFile(
+		join(data, 'homes/admin/Drive/Projekte/Wartung.txt'),
+		'Rechnung der Firma Müller über die Wartung der Heizung im November.\n'
+	);
+	await page.getByRole('link', { name: 'Verwaltung' }).click();
+	const card = page.locator('section', { has: page.getByRole('heading', { name: 'KI-Suche' }) });
+	await expect(card.getByText('Die Cloud-Analyse ist nicht gestartet')).toBeVisible();
+	page.once('dialog', (d) => d.accept());
+	await card.getByRole('button', { name: 'Starten' }).click();
+	await expect(card.getByText('Läuft')).toBeVisible();
+	await expect(card.getByRole('button', { name: 'Anhalten' })).toBeVisible();
+	// Read, embedded in the background.
+	await expect
+		.poll(async () => (await (await page.request.get('/api/admin/ai')).json()).progress.cloud_texts, { timeout: 30_000 })
+		.toBeGreaterThan(0);
+
+	// "Therme" is nowhere in the text: found by meaning, and marked so.
+	const field = page.getByRole('combobox', { name: 'Suchen', exact: true });
+	await page.getByRole('link', { name: 'Suche', exact: true }).click();
+	// The mark is part of the link's name, so screen readers say it too.
+	const found = page.getByRole('link', { name: 'Wartung.txt Passt inhaltlich' });
+	await expect(async () => {
+		await field.fill('Therme');
+		await field.press('Enter');
+		await expect(found).toBeVisible({ timeout: 1000 });
+	}).toPass({ timeout: 20_000 });
+	const hit = page.getByRole('listitem').filter({ has: found });
+	await expect(hit.locator('.snippet')).toContainText('Rechnung der Firma Müller');
+
+	// What it cost so far.
+	await page.getByRole('link', { name: 'Verwaltung' }).click();
+	await expect(card.getByRole('cell', { name: 'Texte einbetten' })).toBeVisible();
+	await card.getByRole('button', { name: 'Anhalten' }).click();
+	await expect(card.getByText('Die Cloud-Analyse ist nicht gestartet')).toBeVisible();
+}
+
 test('Einrichtung, Anmeldung, Verwaltung und Dateien', async ({ page, browser }) => {
 	const setupUrl = process.env.XLRX_SETUP_URL;
 	test.skip(!setupUrl, 'XLRX_SETUP_URL fehlt (e2e/run.sh verwenden)');
@@ -682,6 +721,7 @@ test('Einrichtung, Anmeldung, Verwaltung und Dateien', async ({ page, browser })
 		await searchFiles(page, data);
 		await shareFiles(page, browser, bertSetup);
 		await classifyFolder(page);
+		await aiSearch(page, data);
 		await publicLinks(page, browser);
 		if (process.env.XLRX_E2E_S3) await outsideCache(page, browser, data);
 		await uploadLarge(page, data);

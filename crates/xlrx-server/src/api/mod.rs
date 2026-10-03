@@ -107,6 +107,8 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/data-classes", get(admin::data_classes))
         .route("/admin/cache", get(admin::cache_status))
         .route("/admin/cache/clear", post(admin::cache_clear))
+        .route("/admin/ai", get(admin::ai_status).post(admin::ai_action))
+        .route("/admin/ai/budget", put(admin::ai_budget))
         .route("/admin/jobs/retry", post(admin::retry_jobs))
         .layer(middleware::from_fn(browser_only));
 

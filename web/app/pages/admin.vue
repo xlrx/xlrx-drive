@@ -72,6 +72,66 @@ const clearCache = () =>
 		await apiPost('/admin/cache/clear');
 		await refresh();
 	});
+/** The AI search (PLAN 7). */
+type AiStatus = {
+	cloud: {
+		provider: string;
+		embed_model: string;
+		vision_model: string | null;
+		on: boolean;
+		trial_left: number | null;
+		paused: string | null;
+		budget: number;
+		budget_set: boolean;
+		spent_month: number;
+		error: string | null;
+	} | null;
+	local: { embed_model: string; clip_model: string | null; error: string | null } | null;
+	progress: {
+		cloud_texts: number;
+		cloud_pictures: number;
+		local_texts: number;
+		local_pictures: number;
+		queued_cloud: number;
+		queued_local: number;
+		failed: number;
+		last_hour_cloud: number;
+		last_hour_local: number;
+	};
+	usage: { month: string; kind: string; calls: number; tokens_in: number; tokens_out: number; cost: number }[];
+	estimate: { per_text: number; per_picture: number; remaining: number } | null;
+};
+const ai = ref<AiStatus | null>(null);
+const budgetInput = ref<number | null>(null);
+const USAGE_LABEL: Record<string, string> = { embed: 'Texte einbetten', vision: 'Bilder beschreiben', query: 'Suchanfragen' };
+/** Euros; tiny amounts (per text) with two significant digits. */
+const euro = (v: number) =>
+	v > 0 && v < 0.01
+		? `${v.toLocaleString('de-DE', { maximumSignificantDigits: 2 })} €`
+		: v.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
+const aiState = computed(() => {
+	const c = ai.value?.cloud;
+	if (!c) return '';
+	if (!c.paused) return c.trial_left ? `Probelauf: noch ${num(c.trial_left)} Inhalte` : 'Läuft';
+	if (c.trial_left === 0 && !c.on) return 'Probelauf beendet';
+	return c.paused;
+});
+/** How long the rest takes at the pace of the last hour. */
+const eta = (queued: number, perHour: number) => {
+	if (!queued || !perHour) return '';
+	const h = queued / perHour;
+	return h < 1 ? ' · unter einer Stunde' : h < 48 ? ` · etwa ${Math.round(h)} Std.` : ` · etwa ${Math.round(h / 24)} Tage`;
+};
+const aiAction = (action: 'start' | 'stop' | 'trial') =>
+	g.run(async () => {
+		if (action === 'start' && !confirm('Die Analyse in der Cloud starten? Sie kostet Geld – bis zum Monatsbudget.')) return;
+		ai.value = await apiPost<AiStatus>('/admin/ai', action === 'trial' ? { action, trial: 500 } : { action });
+	});
+const saveBudget = (reset = false) =>
+	g.run(async () => {
+		ai.value = await api<AiStatus>('PUT', '/admin/ai/budget', { budget: reset ? null : budgetInput.value });
+		budgetInput.value = ai.value.cloud?.budget ?? null;
+	});
 const users = ref<User[]>([]);
 const audit = ref<Audit[]>([]);
 const form = ref({ username: '', display_name: '', email: '', is_admin: false });
@@ -85,6 +145,8 @@ async function refresh() {
 	spaces.value = await apiGet<SpaceOut[]>('/admin/spaces');
 	classes.value = await apiGet<DataClasses>('/admin/data-classes');
 	cache.value = await apiGet<CacheStatus>('/admin/cache');
+	ai.value = await apiGet<AiStatus>('/admin/ai');
+	budgetInput.value = ai.value.cloud?.budget ?? null;
 }
 
 /** The record of where data may go, as a table for Numbers or Excel. */
@@ -375,10 +437,76 @@ const copy = () => link.value && navigator.clipboard.writeText(link.value.url);
 				</template>
 			</section>
 
+			<section v-if="ai" class="card" aria-labelledby="ki">
+				<h2 id="ki" style="margin-top: 0">KI-Suche</h2>
+				<p class="muted">
+					Findet Dateien nach ihrer Bedeutung und Bilder nach ihrem Inhalt. Inhalte aus Ordnern mit „Cloud erlaubt“ gehen an
+					den Anbieter in der EU, alles andere wird nur auf dem NAS verarbeitet.
+				</p>
+				<template v-if="ai.cloud">
+					<h3>Cloud · {{ ai.cloud.provider }}</h3>
+					<div class="kv"><span>Modelle</span><span>{{ ai.cloud.embed_model }} · {{ ai.cloud.vision_model ?? 'keine Bildanalyse' }}</span></div>
+					<div class="kv"><span>Zustand</span><span>{{ aiState }}</span></div>
+					<div class="kv"><span>Diesen Monat</span><span>{{ euro(ai.cloud.spent_month) }} von {{ euro(ai.cloud.budget) }}</span></div>
+					<form class="row" @submit.prevent="saveBudget()">
+						<label class="budget">Budget pro Monat (€)<input v-model.number="budgetInput" type="number" min="0" step="1" required /></label>
+						<button :disabled="g.busy.value">Speichern</button>
+						<button v-if="ai.cloud.budget_set" type="button" class="link" :disabled="g.busy.value" @click="saveBudget(true)">Voreinstellung</button>
+					</form>
+					<p v-if="ai.cloud.error" class="error" role="alert">{{ ai.cloud.error }}</p>
+					<div class="row">
+						<template v-if="!ai.cloud.on">
+							<button type="button" class="primary" :disabled="g.busy.value" @click="aiAction('start')">Starten</button>
+							<button v-if="!ai.cloud.trial_left" type="button" :disabled="g.busy.value" @click="aiAction('trial')">Probelauf (500 Inhalte)</button>
+							<button v-else type="button" :disabled="g.busy.value" @click="aiAction('stop')">Probelauf abbrechen</button>
+						</template>
+						<button v-else type="button" :disabled="g.busy.value" @click="aiAction('stop')">Anhalten</button>
+					</div>
+					<p class="muted small">Ein Probelauf zeigt die echten Kosten je Inhalt, bevor alles analysiert wird.</p>
+				</template>
+				<p v-else class="muted">
+					Kein Anbieter für „Cloud erlaubt“ eingerichtet (<code>XLRX_AI_URL</code>, siehe <code>deploy/synology.md</code>).
+				</p>
+				<template v-if="ai.local">
+					<h3>Heimnetz · embed-local</h3>
+					<div class="kv"><span>Modelle</span><span>{{ ai.local.embed_model }}{{ ai.local.clip_model ? ` · ${ai.local.clip_model}` : '' }}</span></div>
+					<p v-if="ai.local.error" class="error" role="alert">{{ ai.local.error }}</p>
+				</template>
+				<h3>Fortschritt</h3>
+				<div class="kv"><span>Texte</span><span>{{ num(ai.progress.cloud_texts) }} in der Cloud · {{ num(ai.progress.local_texts) }} im Heimnetz</span></div>
+				<div class="kv"><span>Bilder</span><span>{{ num(ai.progress.cloud_pictures) }} beschrieben · {{ num(ai.progress.local_pictures) }} im Heimnetz</span></div>
+				<div class="kv">
+					<span>Ausstehend</span>
+					<span>
+						{{ num(ai.progress.queued_cloud) }} Cloud{{ eta(ai.progress.queued_cloud, ai.progress.last_hour_cloud) }} ·
+						{{ num(ai.progress.queued_local) }} Heimnetz{{ eta(ai.progress.queued_local, ai.progress.last_hour_local) }}
+					</span>
+				</div>
+				<div v-if="ai.progress.failed" class="kv"><span>Fehlgeschlagen</span><span>{{ num(ai.progress.failed) }}</span></div>
+				<div v-if="ai.estimate" class="kv">
+					<span>Hochrechnung</span>
+					<span>{{ euro(ai.estimate.per_text) }} je Text · {{ euro(ai.estimate.per_picture) }} je Bild · Rest ≈ {{ euro(ai.estimate.remaining) }}</span>
+				</div>
+				<table v-if="ai.usage.length">
+					<thead>
+						<tr><th>Monat</th><th>Art</th><th>Aufrufe</th><th>Tokens</th><th>Kosten</th></tr>
+					</thead>
+					<tbody>
+						<tr v-for="u in ai.usage" :key="`${u.month}-${u.kind}`">
+							<td>{{ new Date(u.month).toLocaleDateString('de-DE', { month: 'long', year: 'numeric' }) }}</td>
+							<td>{{ USAGE_LABEL[u.kind] ?? u.kind }}</td>
+							<td>{{ num(u.calls) }}</td>
+							<td>{{ num(u.tokens_in + u.tokens_out) }}</td>
+							<td>{{ euro(u.cost) }}</td>
+						</tr>
+					</tbody>
+				</table>
+			</section>
+
 			<section v-if="classes" class="card">
 				<h2 style="margin-top: 0">Datenklassen</h2>
 				<p class="muted">
-					Was „Cloud erlaubt“ ist, darf später für die KI-Suche an einen Dienst in der EU – alles andere bleibt auf dem NAS.
+					Was „Cloud erlaubt“ ist, darf für die KI-Suche an einen Dienst in der EU – alles andere bleibt auf dem NAS.
 					Ohne eigene Einstellung gilt <strong>{{ CLASS_LABEL[classes.default] }}</strong> (<code>XLRX_DEFAULT_DATA_CLASS</code>).
 					Festlegen kann es, wer einen Ordner verwaltet – im Ordner über die Datenklasse.
 				</p>
@@ -428,5 +556,8 @@ const copy = () => link.value && navigator.clipboard.writeText(link.value.url);
 .member { display: flex; gap: 8px; align-items: center; }
 .member select { flex: 1; }
 .problems { margin: 12px 0; padding-left: 1.1rem; font-size: 13.5px; color: var(--ink-3); }
+.budget { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+.budget input { width: 8rem; }
+h3 { font-size: 14px; margin: 18px 0 6px; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 0 1rem; }
 </style>
