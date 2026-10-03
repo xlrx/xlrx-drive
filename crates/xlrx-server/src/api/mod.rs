@@ -1,5 +1,6 @@
 //! HTTP interface: `/api/…` (JSON), `/healthz`, and – if configured – the web app.
 
+pub mod activity;
 pub mod admin;
 pub mod auth;
 pub mod devices;
@@ -121,6 +122,7 @@ pub fn router(state: AppState) -> Router {
         .route("/nodes/{id}/data-class", put(files::set_data_class))
         .route("/nodes/{id}/thumbnail", get(files::thumbnail))
         .route("/recent", get(files::recent))
+        .route("/activity", get(activity::activity))
         .route("/people", get(shares::people))
         .route("/shared", get(shares::shared_with_me))
         .route(

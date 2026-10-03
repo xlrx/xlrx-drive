@@ -487,6 +487,14 @@ async function publicLinks(page: Page, browser: Browser) {
 	await anon.goto(url);
 	await expect(anon.getByText(/Diesen Link gibt es nicht/)).toBeVisible();
 	await ctx.close();
+
+	// The activity tells what happened, also through the link.
+	await page.getByRole('link', { name: 'Aktivität', exact: true }).first().click();
+	await expect(page.getByText('„Von draußen.txt“ wurde über einen Link hinzugefügt')).toBeVisible();
+	await expect(page.getByText(/Du hast „Projekte“ per Link freigegeben/).first()).toBeVisible();
+	await page.getByRole('tab', { name: 'Freigaben' }).click();
+	await expect(page.getByText(/Du hast „Projekte“ mit Bert zum Bearbeiten geteilt/)).toBeVisible();
+	await expect(page.getByText(/hochgeladen|hinzugefügt/).filter({ hasText: 'Du hast' })).toHaveCount(0);
 }
 
 /** Data class of a folder: "Nur lokal" until allowed on purpose; files inside and the administration show it. */

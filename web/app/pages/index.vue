@@ -1,10 +1,12 @@
 <script setup lang="ts">
-// Start (as in the design): date and greeting, the files changed last, hints – and the landscape.
+// Start (as in the design): date and greeting, the files changed last, what happened lately,
+// hints – and the landscape.
 type Recent = NodeInfo & { folder: string };
 const { me } = useSession();
 const clock = useClock();
 const today = computed(() => clock.value.toLocaleDateString('de-DE', { weekday: 'long', day: 'numeric', month: 'long' }));
 const recent = ref<Recent[] | null>(null);
+const activity = ref<ActivityGroup[] | null>(null);
 const landscape = ref(true);
 const uploads = useUploads();
 
@@ -13,6 +15,11 @@ async function load() {
 		recent.value = await apiGet<Recent[]>('/recent?limit=8');
 	} catch {
 		recent.value = [];
+	}
+	try {
+		activity.value = (await apiGet<ActivityPage>('/activity?limit=100')).groups.slice(0, 5);
+	} catch {
+		activity.value = [];
 	}
 }
 onMounted(() => {
@@ -57,6 +64,17 @@ const ext = (name: string) => {
 				„Drive“ auf dem NAS.
 			</p>
 		</section>
+
+		<template v-if="activity?.length">
+			<hr />
+			<section class="recent">
+				<div class="title">
+					<h2>Aktivität</h2>
+					<NuxtLink to="/activity">Alle</NuxtLink>
+				</div>
+				<ActivityList :groups="activity" />
+			</section>
+		</template>
 
 		<template v-if="me && (me.recovery_codes_left < 4 || !me.passkeys.length)">
 			<hr />

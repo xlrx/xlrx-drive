@@ -366,6 +366,14 @@ pub async fn create(
     )
     .await?;
     let info = share_info(&st, row, a.node.id, a.node.name.clone()).await?;
+    crate::events::record(
+        &st.db,
+        Some(me.id),
+        a.node.id,
+        "shared",
+        json!({ "to": info.to.name, "role": role }),
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(info)))
 }
 

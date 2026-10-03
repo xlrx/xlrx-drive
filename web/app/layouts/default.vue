@@ -25,10 +25,12 @@ const sections = computed(() => [
 	{ to: '/files', label: 'Dateien', icon: 'folder' as const },
 	{ to: '/search', label: 'Suche', icon: 'search' as const },
 	{ to: '/shared', label: 'Geteilt', icon: 'shared' as const },
+	{ to: '/activity', label: 'Aktivität', icon: 'clock' as const },
 	{ to: '/trash', label: 'Papierkorb', icon: 'trash' as const }
 ]);
-// The bar at the bottom of phones holds four, as in the design; the trash is in the folder view.
-const docked = computed(() => sections.value.filter((s) => s.to !== '/trash'));
+// The bar at the bottom of phones holds four, as in the design; the trash is in the folder view,
+// the activity on the start page.
+const docked = computed(() => sections.value.filter((s) => s.to !== '/trash' && s.to !== '/activity'));
 const current = (s: { to: string; exact?: boolean }) =>
 	s.exact ? route.path === s.to : route.path === s.to || route.path.startsWith(`${s.to}/`);
 </script>

@@ -178,6 +178,14 @@ pub async fn create(
         }),
     )
     .await?;
+    crate::events::record(
+        &st.db,
+        Some(me.id),
+        a.node.id,
+        "link_created",
+        json!({ "kind": kind }),
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(info(&st, &row).await?)))
 }
 
@@ -468,6 +476,14 @@ pub async fn public_content(
                 json!({ "link": o.link.id, "node": node.id }),
             )
             .await?;
+            crate::events::record(
+                &st.db,
+                None,
+                node.id,
+                "link_download",
+                json!({ "kind": o.kind }),
+            )
+            .await?;
         }
     }
     let data_dir = st.cfg.data_dir.as_deref().ok_or(ApiError::NotFound)?;
@@ -556,6 +572,14 @@ pub async fn public_upload(
         json!({ "link": o.link.id, "node": node.id, "name": node.name, "size": node.size }),
     )
     .await?;
+    crate::events::record(
+        &st.db,
+        None,
+        node.id,
+        "link_upload",
+        json!({ "kind": o.kind }),
+    )
+    .await?;
     if o.kind.browse() {
         Ok((StatusCode::CREATED, Json(NodeInfo::from(&node))).into_response())
     } else {
@@ -614,6 +638,14 @@ pub async fn public_replace(
         "link_replaced",
         Some(&client.ip),
         json!({ "link": o.link.id, "node": node.id, "rev": node.rev }),
+    )
+    .await?;
+    crate::events::record(
+        &st.db,
+        None,
+        node.id,
+        "link_edit",
+        json!({ "kind": o.kind }),
     )
     .await?;
     Ok(Json(NodeInfo::from(&node)))

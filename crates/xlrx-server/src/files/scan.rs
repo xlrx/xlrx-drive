@@ -115,10 +115,13 @@ pub async fn scan_root(
         settle: false,
     };
     let (report, _, _) = run(db, &dir, root, scope, Deletion::All).await?;
-    sqlx::query("UPDATE roots SET scanned_at = now() WHERE id = $1")
-        .bind(root.id)
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "UPDATE roots SET scanned_at = now(), first_scanned_at = coalesce(first_scanned_at, now())
+          WHERE id = $1",
+    )
+    .bind(root.id)
+    .execute(db)
+    .await?;
     Ok(report)
 }
 

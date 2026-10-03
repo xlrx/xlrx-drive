@@ -66,10 +66,20 @@ const sorted = computed(() => {
 const count = computed(() => (children.value.length === 1 ? '1 Element' : `${children.value.length} Elemente`));
 
 // File view: tabs (the actions menu links to the versions directly).
-type Tab = 'info' | 'versionen' | 'zugriff';
-const tabFrom = (q: unknown): Tab => (q === 'versionen' || q === 'zugriff' ? q : 'info');
+type Tab = 'info' | 'versionen' | 'zugriff' | 'aktivitaet';
+const tabFrom = (q: unknown): Tab => (q === 'versionen' || q === 'zugriff' || q === 'aktivitaet' ? q : 'info');
 const tab = ref<Tab>(tabFrom(route.query.tab));
 watch(id, () => (tab.value = tabFrom(route.query.tab)));
+/** History of the file (tab "Aktivität"), loaded when shown. */
+const history = ref<ActivityGroup[] | null>(null);
+watch([tab, () => node.value?.id, () => node.value?.rev], async ([t]) => {
+	if (t !== 'aktivitaet' || !node.value) return;
+	try {
+		history.value = (await apiGet<ActivityPage>(`/activity?node=${node.value.id}&limit=200`)).groups;
+	} catch {
+		history.value = [];
+	}
+});
 
 async function load() {
 	clearTimeout(poll);
@@ -349,6 +359,7 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 					Versionen{{ versions.length ? ` (${versions.length})` : '' }}
 				</button>
 				<button role="tab" type="button" :aria-selected="tab === 'zugriff'" @click="tab = 'zugriff'">Zugriff</button>
+				<button role="tab" type="button" :aria-selected="tab === 'aktivitaet'" @click="tab = 'aktivitaet'">Aktivität</button>
 			</div>
 			<section v-if="tab === 'info'" class="info" role="tabpanel" aria-label="Info">
 				<div class="kv"><span>Speicherort</span><span>{{ place }}</span></div>
@@ -359,6 +370,10 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 					<span>Cloud-Analyse</span>
 					<span>{{ node.data_class.class === 'cloud' ? 'Erlaubt' : 'Nicht erlaubt' }} ({{ CLASS_LABEL[node.data_class.class] }}, {{ classSource(node.data_class) }})</span>
 				</div>
+			</section>
+			<section v-else-if="tab === 'aktivitaet'" class="history" role="tabpanel" aria-label="Aktivität">
+				<ActivityList v-if="history?.length" :groups="history" :show-folder="false" />
+				<p v-else-if="history" class="muted">Noch nichts.</p>
 			</section>
 			<section v-else-if="tab === 'zugriff'" class="access" role="tabpanel" aria-label="Zugriff">
 				<div class="kv"><span>Deine Rolle</span><span>{{ ROLE_LABEL[node.role] }}</span></div>

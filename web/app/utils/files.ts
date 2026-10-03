@@ -364,3 +364,86 @@ export interface PublicNode extends NodeInfo {
 	/** From the link's item down to this one. */
 	path: { id: number; name: string }[];
 }
+
+/** Activity (PLAN 8.3). */
+export type ActivityKind =
+	| 'created'
+	| 'uploaded'
+	| 'edited'
+	| 'renamed'
+	| 'moved'
+	| 'deleted'
+	| 'restored'
+	| 'shared'
+	| 'link_created'
+	| 'link_download'
+	| 'link_upload'
+	| 'link_edit';
+
+export interface ActivityItem extends NodeInfo {
+	deleted: boolean;
+	prev_name: string | null;
+}
+
+export interface ActivityGroup {
+	kind: ActivityKind;
+	actor: { id: number; name: string } | null;
+	/** No person: found on the NAS, or someone through a public link. */
+	via: 'nas' | 'link' | null;
+	mine: boolean;
+	at: string;
+	since: string;
+	count: number;
+	items: ActivityItem[];
+	folder: string | null;
+	folder_id: number | null;
+	details: { to?: string; role?: Role; kind?: LinkKind } | null;
+}
+
+export interface ActivityPage {
+	groups: ActivityGroup[];
+	next: string | null;
+}
+
+const ROLE_WORD: Record<string, string> = { viewer: 'zum Ansehen', editor: 'zum Bearbeiten', manager: 'zum Verwalten' };
+
+/** The sentence of an activity entry, split around the item (which may become a link). */
+export function activitySentence(g: ActivityGroup): { pre: string; obj: string; post: string } {
+	const one = g.count === 1;
+	const first = g.items[0];
+	const allImages = g.items.length === g.count && g.items.every((i) => i.mime?.startsWith('image/'));
+	const allDirs = g.items.length === g.count && g.items.every((i) => i.kind === 'dir');
+	const allFiles = g.items.length === g.count && g.items.every((i) => i.kind === 'file');
+	const noun = allImages ? 'Fotos' : allDirs ? 'Ordner' : allFiles ? 'Dateien' : 'Elemente';
+	const obj = one && first ? `„${first.name}“` : `${g.count} ${noun}`;
+	const where = g.folder ? g.folder.split('/').at(-1) : '';
+	const verbs: Record<ActivityKind, string> = {
+		created: 'angelegt',
+		uploaded: 'hinzugefügt',
+		edited: 'bearbeitet',
+		renamed: 'umbenannt',
+		moved: where ? `nach „${where}“ verschoben` : 'verschoben',
+		deleted: g.via === 'nas' ? 'gelöscht' : 'in den Papierkorb gelegt',
+		restored: 'wiederhergestellt',
+		shared: g.details?.to ? `mit ${g.details.to} ${ROLE_WORD[g.details.role ?? ''] ?? ''} geteilt`.replace(/ +/g, ' ').trim() : 'geteilt',
+		link_created: 'per Link freigegeben',
+		link_download: 'heruntergeladen',
+		link_upload: 'hinzugefügt',
+		link_edit: 'geändert'
+	};
+	const verb = verbs[g.kind];
+	if (g.kind === 'renamed' && one && first?.prev_name) {
+		return {
+			pre: g.via ? `„${first.prev_name}“ wurde auf dem NAS in ` : `${g.mine ? 'Du hast' : `${g.actor?.name ?? 'Jemand'} hat`} „${first.prev_name}“ in `,
+			obj: `„${first.name}“`,
+			post: ' umbenannt'
+		};
+	}
+	const objOut = g.kind === 'created' && one ? `den Ordner ${obj}` : obj;
+	if (g.via) {
+		const how = g.via === 'nas' ? 'auf dem NAS' : 'über einen Link';
+		return { pre: '', obj: objOut, post: ` ${one ? 'wurde' : 'wurden'} ${how} ${verb}` };
+	}
+	const who = g.mine ? 'Du hast' : `${g.actor?.name ?? 'Jemand'} hat`;
+	return { pre: `${who} `, obj: objOut, post: ` ${verb}` };
+}

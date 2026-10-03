@@ -1183,7 +1183,14 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
     Fehlversuch, heruntergeladen, hochgeladen, ersetzt.
   - Web: Abschnitt „Link“ im Teilen-Dialog (Art, Passwort, Ablauf, Downloads; Kopieren, Beenden) und die Linkseite `/s/…` ohne Konto:
     Passwort, Ordner mit Vorschaubildern, Vorschau, Herunterladen, Hochladen per Ziehen oder Auswahl.
-  - Noch nicht: Ordner als ZIP herunterladen; Link-Ereignisse im Aktivitätsstream (kommt mit dem Aktivitätsstream).
+  - Noch nicht: Ordner als ZIP herunterladen.
+  - Aktivität (8.3): direkt aus dem Journal (wer, was, wann; „auf dem NAS“ für Änderungen, die ein Abgleich findet), dazu `events` für
+    Teilen und Links. Gruppiert nach Aktion, Person, Ordner und ~30 Minuten („Du hast 4 Fotos hinzugefügt“ mit Bilderleiste). Was das
+    Löschen oder Wiederherstellen eines Ordners mitnimmt (gleiche Transaktion), erscheint als der Ordner allein; der erste Import einer
+    Ablage ist keine Neuigkeit; Uploads über einen Link erscheinen als solche, nicht als Upload des Link-Erstellers. Umbenennen nennt den
+    alten Namen. Jede Person sieht nur, was zu Elementen geschah, die sie jetzt sehen darf (gleiche Rechteprüfung), die Nutzung von Links
+    nur, wer das Element verwaltet; Ordner darüber bleiben verborgen.
+  - Web: Seite „Aktivität“ (Alle / Von anderen / Freigaben, ältere nachladen), Abschnitt auf der Startseite, Tab „Aktivität“ einer Datei.
 
 **Nächster Schritt:** Inbetriebnahme auf dem DS918+ mit den Spike-Messungen (M0) und dem M1-Nachweis mit den echten Daten.
 

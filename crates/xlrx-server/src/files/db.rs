@@ -195,16 +195,18 @@ pub async fn set_location(
     name: &str,
     src: Source,
 ) -> ApiResult<i64> {
-    // Whether the parent changed tells the search index to refresh the subtree (ancestors).
+    // Whether the parent changed tells the search index to refresh the subtree (ancestors); the
+    // previous name tells the activity what it was called.
     let (seq,): (i64,) = sqlx::query_as(
-        "INSERT INTO journal (root_id, node_id, op, source, actor_user_id, reparented)
-         VALUES ($1, $2, 'move', $3, $4, $5) RETURNING seq",
+        "INSERT INTO journal (root_id, node_id, op, source, actor_user_id, reparented, prev_name)
+         VALUES ($1, $2, 'move', $3, $4, $5, $6) RETURNING seq",
     )
     .bind(node.root_id)
     .bind(node.id)
     .bind(src.name())
     .bind(src.actor)
     .bind(node.parent_id != Some(parent_id))
+    .bind((node.name != name).then_some(&node.name))
     .fetch_one(&mut **tx)
     .await?;
     sqlx::query(
