@@ -1191,6 +1191,12 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
     alten Namen. Jede Person sieht nur, was zu Elementen geschah, die sie jetzt sehen darf (gleiche Rechteprüfung), die Nutzung von Links
     nur, wer das Element verwaltet; Ordner darüber bleiben verborgen.
   - Web: Seite „Aktivität“ (Alle / Von anderen / Freigaben, ältere nachladen), Abschnitt auf der Startseite, Tab „Aktivität“ einer Datei.
+  - Startseite „Vorgeschlagen“ (8.2): `access_events` (Öffnen im Web, Downloads; Geräte melden später auch lokale Öffnungen, bis 30 Tage
+    rückwirkend), privat und je 10 Minuten nur einmal. Punkte aus Frecency (Halbwertszeit 7 Tage), Wochenmuster (gleicher Wochentag ±2 h
+    in mindestens 2 früheren Wochen, Zeitzone `XLRX_TIMEZONE`), Ko-Nutzung mit dem zuletzt Geöffneten, Änderungen anderer (oder auf dem
+    NAS) seit dem eigenen letzten Öffnen, neu Freigegebenes; feste Gewichte, die Begründung ist der stärkste Anteil („Anna hat das vor
+    2 Std. geändert“, „Öffnest du meist montags“). Nur was noch da ist und gesehen werden darf. Angezeigte und geöffnete Vorschläge
+    werden protokolliert (`suggestion_log`), um die Gewichte später anzupassen.
 
 **Nächster Schritt:** Inbetriebnahme auf dem DS918+ mit den Spike-Messungen (M0) und dem M1-Nachweis mit den echten Daten.
 

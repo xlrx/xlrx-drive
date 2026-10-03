@@ -447,3 +447,40 @@ export function activitySentence(g: ActivityGroup): { pre: string; obj: string; 
 	const who = g.mine ? 'Du hast' : `${g.actor?.name ?? 'Jemand'} hat`;
 	return { pre: `${who} `, obj: objOut, post: ` ${verb}` };
 }
+
+/** Why something is suggested on the start page (PLAN 8.2). */
+export type SuggestionReason =
+	| { kind: 'opened'; last: string; count: number }
+	| { kind: 'weekly'; weekday: number; weeks: number }
+	| { kind: 'together'; with: string }
+	| { kind: 'changed'; who: string | null; at: string }
+	| { kind: 'shared'; by: string | null; at: string };
+
+export interface StartSuggestion extends NodeInfo {
+	folder: string;
+	reason: SuggestionReason;
+	score: number;
+}
+
+const WEEKDAYS = ['montags', 'dienstags', 'mittwochs', 'donnerstags', 'freitags', 'samstags', 'sonntags'];
+
+/** "vor 2 Std.", "gestern" – or "am 3. Okt. 2026". */
+function when(s: string): string {
+	const ago = formatAgo(s);
+	return /^(vor|gerade|gestern)/.test(ago) ? ago : `am ${ago}`;
+}
+
+export function suggestionReason(r: SuggestionReason): string {
+	switch (r.kind) {
+		case 'opened':
+			return r.count >= 3 ? `Oft geöffnet, zuletzt ${when(r.last)}` : `Du hast das ${when(r.last)} geöffnet`;
+		case 'weekly':
+			return `Öffnest du meist ${WEEKDAYS[r.weekday - 1] ?? 'um diese Zeit'}`;
+		case 'together':
+			return `Oft zusammen mit „${r.with}“ geöffnet`;
+		case 'changed':
+			return r.who ? `${r.who} hat das ${when(r.at)} geändert` : `Auf dem NAS geändert, ${when(r.at)}`;
+		case 'shared':
+			return r.by ? `${r.by} hat das ${when(r.at)} mit dir geteilt` : 'Neu für dich freigegeben';
+	}
+}

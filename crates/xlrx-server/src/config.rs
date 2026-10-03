@@ -61,6 +61,9 @@ pub struct Config {
     /// Largest file accepted through a public link, in bytes (`XLRX_LINK_UPLOAD_MAX_MB`, default
     /// 10 240 MB).
     pub link_upload_max: u64,
+    /// Time zone of the household, for "opened on Mondays" (`XLRX_TIMEZONE`, default
+    /// `Europe/Berlin`; checked against the database at start).
+    pub timezone: String,
 }
 
 /// Parameters for argon2id. Calibrate on the DS918+ (J3455) so that one check takes ~250 ms
@@ -226,6 +229,10 @@ impl Config {
                 )?,
             },
             link_upload_max: u64::from(num("XLRX_LINK_UPLOAD_MAX_MB", 10_240)?) * 1_000_000,
+            timezone: var("XLRX_TIMEZONE")
+                .map(|v| v.trim().to_owned())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "Europe/Berlin".into()),
         })
     }
 

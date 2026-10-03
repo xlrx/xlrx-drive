@@ -311,6 +311,20 @@ fn disposition(kind: &str, name: &str) -> HeaderValue {
     .unwrap_or_else(|_| HeaderValue::from_static("attachment"))
 }
 
+/// Whether a request starts a download (not the continuation of one): those are counted.
+pub(crate) fn starts_download(headers: &axum::http::HeaderMap) -> bool {
+    match headers
+        .get(axum::http::header::RANGE)
+        .and_then(|v| v.to_str().ok())
+    {
+        None => true,
+        Some(r) => r
+            .trim()
+            .strip_prefix("bytes=")
+            .is_some_and(|r| r.trim_start().starts_with("0-")),
+    }
+}
+
 /// File content with range requests (resumable downloads, video seeking).
 pub async fn content(
     State(st): State<AppState>,
@@ -322,6 +336,10 @@ pub async fn content(
     let (node, root) = visible(&st, &me, id).await?;
     if node.is_dir() {
         return Err(ApiError::bad("Ordner können nicht heruntergeladen werden."));
+    }
+    // A download (not a preview, not the continuation of one) for the start page.
+    if !(q.inline && inline_allowed(&mime_of(&node.name))) && starts_download(req.headers()) {
+        super::suggest::record(&st, me.id, node.id, "download", "web", None).await?;
     }
     let data_dir = st.cfg.data_dir.as_deref().ok_or(ApiError::NotFound)?;
     let path = roots::dir(data_dir, &root).join(db::rel_path(&st.db, node.id).await?);

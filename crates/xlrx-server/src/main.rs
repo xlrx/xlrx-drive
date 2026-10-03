@@ -58,6 +58,11 @@ async fn run(args: &[String]) -> Result<(), String> {
                 println!("Migrationen ausgeführt.");
                 return Ok(());
             }
+            sqlx::query("SELECT now() AT TIME ZONE $1")
+                .bind(&cfg.timezone)
+                .execute(&db)
+                .await
+                .map_err(|_| format!("XLRX_TIMEZONE: unbekannte Zeitzone „{}“", cfg.timezone))?;
             let state = AppState::new(db.clone(), cfg.clone())?;
             match cmd {
                 "serve" => serve(state).await,

@@ -10,6 +10,7 @@ pub mod me;
 pub mod search;
 pub mod setup;
 pub mod shares;
+pub mod suggest;
 pub mod sync;
 pub mod uploads;
 
@@ -123,6 +124,9 @@ pub fn router(state: AppState) -> Router {
         .route("/nodes/{id}/thumbnail", get(files::thumbnail))
         .route("/recent", get(files::recent))
         .route("/activity", get(activity::activity))
+        .route("/suggestions", get(suggest::suggestions))
+        .route("/suggestions/opened", post(suggest::suggestion_opened))
+        .route("/nodes/{id}/opened", post(suggest::opened))
         .route("/people", get(shares::people))
         .route("/shared", get(shares::shared_with_me))
         .route(

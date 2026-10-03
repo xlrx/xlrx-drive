@@ -19,6 +19,7 @@ const notice = ref('');
 const undo = ref<NodeInfo | null>(null);
 const dragging = ref(false);
 let poll: ReturnType<typeof setTimeout> | undefined;
+let noted = 0;
 
 type Dialog =
 	| { kind: 'folder' }
@@ -93,6 +94,11 @@ async function load() {
 		]);
 		node.value = n;
 		children.value = kids;
+		// Opening a file is noted for the person's start page (once, not on every refresh).
+		if (n.kind === 'file' && noted !== n.id) {
+			noted = n.id;
+			apiPost(`/nodes/${n.id}/opened`, {}).catch(() => {});
+		}
 		versions.value = vers;
 		access.value = acc;
 		root.value = roots.find((r) => r.id === n.root_id) ?? null;

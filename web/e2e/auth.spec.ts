@@ -498,6 +498,11 @@ async function publicLinks(page: Page, browser: Browser) {
 	await page.getByRole('tab', { name: 'Freigaben' }).click();
 	await expect(page.getByText(/Du hast „Projekte“ mit Bert zum Bearbeiten geteilt/)).toBeVisible();
 	await expect(page.getByText(/hochgeladen|hinzugefügt/).filter({ hasText: 'Du hast' })).toHaveCount(0);
+
+	// The start page suggests what was opened, and says why.
+	await page.getByRole('link', { name: 'Start', exact: true }).first().click();
+	await expect(page.getByRole('heading', { name: 'Vorgeschlagen' })).toBeVisible();
+	await expect(page.getByText(/Du hast das .* geöffnet|Oft geöffnet/).first()).toBeVisible();
 }
 
 /** Data class of a folder: "Nur lokal" until allowed on purpose; files inside and the administration show it. */

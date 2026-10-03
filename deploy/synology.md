@@ -152,7 +152,17 @@ Ablaufdatum und einer Höchstzahl an Downloads; beenden geht jederzeit und wirkt
 - Links laufen über den Heimanschluss. Der Außen-Beschleuniger für große Dateien (S3) kommt mit M3b;
   „Nur lokal“-Inhalte gehen auch dann nie über S3.
 
-## 13. DSM-Reverse-Proxy ablösen
+## 13. Startseite und Aktivität
+
+Die Startseite schlägt vor, was du wahrscheinlich gleich brauchst, und sagt warum („Öffnest du meist montags“,
+„Anna hat das vor 2 Std. geändert“). Grundlage ist, was du im Web öffnest oder herunterlädst – das sieht nur
+du selbst. Die Zeitzone dafür steht in `XLRX_TIMEZONE` (Standard `Europe/Berlin`).
+
+Unter **Aktivität** steht, was mit Dateien geschah, die du sehen darfst: hochgeladen, geändert, umbenannt,
+verschoben, gelöscht, geteilt. Änderungen über SMB oder Synology Drive erscheinen als „auf dem NAS“, sobald der
+Abgleich sie findet; der allererste Import einer Ablage erscheint dort nicht.
+
+## 14. DSM-Reverse-Proxy ablösen
 
 1. Bestehende Regeln (Systemsteuerung → Anmeldeportal → Erweitert → Reverse Proxy) als Blöcke in `Caddyfile` übernehmen.
 2. Caddy läuft parallel; über die Caddy-IP testen (`curl --resolve fotos.example.de:443:192.168.1.20 https://fotos.example.de`).

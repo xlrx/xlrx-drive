@@ -3,7 +3,7 @@
 
 use axum::Json;
 use axum::extract::{Path, Query, Request, State};
-use axum::http::header::{RANGE, SET_COOKIE};
+use axum::http::header::SET_COOKIE;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
@@ -432,17 +432,6 @@ pub async fn public_children(
     Ok(Json(rows.iter().map(NodeInfo::from).collect()))
 }
 
-/// Whether a request starts a download (not the continuation of one): those are counted.
-fn starts_download(headers: &HeaderMap) -> bool {
-    match headers.get(RANGE).and_then(|v| v.to_str().ok()) {
-        None => true,
-        Some(r) => r
-            .trim()
-            .strip_prefix("bytes=")
-            .is_some_and(|r| r.trim_start().starts_with("0-")),
-    }
-}
-
 pub async fn public_content(
     State(st): State<AppState>,
     client: ClientInfo,
@@ -461,7 +450,7 @@ pub async fn public_content(
         if !o.kind.download() {
             return Err(ApiError::forbidden("Dieser Link erlaubt nur das Ansehen."));
         }
-        if starts_download(req.headers()) {
+        if files::starts_download(req.headers()) {
             if !links::count_download(&st.db, o.link.id).await? {
                 return Err(ApiError::Gone(
                     "Die erlaubte Zahl an Downloads ist erreicht.".into(),
