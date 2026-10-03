@@ -30,6 +30,8 @@ jobs:
           toolchain: "1.97.0"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Programme für die Textextraktion (PDF, Texterkennung)
+        run: sudo apt-get update -q && sudo apt-get install -y -q poppler-utils tesseract-ocr tesseract-ocr-deu
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests (inkl. 1000 Simulator-Seeds je Variante, Server gegen PostgreSQL 18)

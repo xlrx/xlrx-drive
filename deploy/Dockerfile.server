@@ -23,8 +23,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
  && cp target/release/xlrx-server target/release/examples/hashdir /out/
 
 FROM debian:bookworm-slim
+# poppler-utils: text of PDFs, page images for OCR; tesseract: OCR of scans (German, English).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates libssl3 curl \
+      poppler-utils tesseract-ocr tesseract-ocr-deu tesseract-ocr-eng \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/xlrx-server /out/hashdir /usr/local/bin/
 COPY --from=web /web/.output/public /srv/web

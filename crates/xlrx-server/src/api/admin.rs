@@ -276,3 +276,78 @@ pub async fn audit_log(
     .await?;
     Ok(Json(rows))
 }
+
+#[derive(Serialize)]
+pub struct SearchStatus {
+    /// The index is running.
+    pub running: bool,
+    /// Last journal entry, and how far the index got.
+    pub journal: i64,
+    pub indexed: i64,
+    /// Contents with an extracted text.
+    pub texts: i64,
+    pub jobs: crate::jobs::Counts,
+    /// What text extraction can read (`None`: not running).
+    pub extract: Option<crate::extract::Status>,
+    /// Why jobs failed or wait (most recent first).
+    pub problems: Vec<JobProblem>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct JobProblem {
+    pub state: String,
+    pub error: Option<String>,
+    pub n: i64,
+}
+
+/// How far search and text extraction are (PLAN 6.6: progress in the admin area).
+pub async fn search_status(
+    State(st): State<AppState>,
+    me: CurrentUser,
+) -> ApiResult<Json<SearchStatus>> {
+    me.require_admin()?;
+    let (journal, texts): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT coalesce(max(seq), 0) FROM journal), (SELECT count(*) FROM content_text)",
+    )
+    .fetch_one(&st.db)
+    .await?;
+    let problems = sqlx::query_as(
+        "SELECT state, last_error AS error, count(*) AS n FROM jobs
+          WHERE state IN ('failed', 'waiting')
+          GROUP BY state, last_error ORDER BY max(run_after) DESC LIMIT 10",
+    )
+    .fetch_all(&st.db)
+    .await?;
+    let search = st.search.get();
+    Ok(Json(SearchStatus {
+        running: search.is_some(),
+        journal,
+        indexed: search.map_or(0, |s| s.indexed()),
+        texts,
+        jobs: crate::jobs::counts(&st.db).await?,
+        extract: st.extract.get().map(|r| r.status),
+        problems,
+    }))
+}
+
+/// Gives jobs that failed for good another round of attempts.
+pub async fn retry_jobs(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    client: ClientInfo,
+) -> ApiResult<Json<serde_json::Value>> {
+    me.require_admin()?;
+    me.require_step_up()?;
+    let n = crate::jobs::retry_failed(&st.db).await?;
+    st.jobs_wake.notify_one();
+    audit::log(
+        &st.db,
+        Some(me.id),
+        None,
+        "jobs_retried",
+        Some(&client.ip),
+        json!({ "jobs": n }),
+    )
+    .await?;
+    Ok(Json(json!({ "retried": n })))
+}

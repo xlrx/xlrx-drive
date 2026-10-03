@@ -44,6 +44,17 @@ pub struct Config {
     /// Devices (Mac, iPhone) need a second factor again after this many days
     /// (`XLRX_DEVICE_CONFIRM_DAYS`, default 30).
     pub device_confirm_days: u32,
+    /// Apache Tika for Office, iWork and mail (`XLRX_TIKA_URL`, e.g. `http://tika:9998`). Only
+    /// addresses in the home network are accepted: documents never leave the NAS.
+    pub tika_url: Option<Url>,
+    /// Programs for PDFs and OCR (`XLRX_PDFTOTEXT`, `XLRX_PDFTOPPM`, `XLRX_TESSERACT`; default:
+    /// found in `PATH`) and the OCR languages (`XLRX_OCR_LANGS`, default `deu+eng`).
+    pub pdftotext: PathBuf,
+    pub pdftoppm: PathBuf,
+    pub tesseract: PathBuf,
+    pub ocr_langs: String,
+    /// Parallel text extractions (`XLRX_EXTRACT_WORKERS`, default 1; 0 turns extraction off).
+    pub extract_workers: u32,
 }
 
 /// Parameters for argon2id. Calibrate on the DS918+ (J3455) so that one check takes ~250 ms
@@ -180,6 +191,28 @@ impl Config {
             force_copy: false,
             watch: var("XLRX_WATCH").is_none_or(|v| v != "0" && v != "false"),
             device_confirm_days: num("XLRX_DEVICE_CONFIRM_DAYS", 30)?.max(1),
+            tika_url: var("XLRX_TIKA_URL")
+                .filter(|v| !v.trim().is_empty())
+                .map(|v| {
+                    let url: Url = v
+                        .trim()
+                        .parse()
+                        .map_err(|e| format!("XLRX_TIKA_URL: {e}"))?;
+                    crate::extract::tika::check_url(&url)?;
+                    Ok::<_, String>(url)
+                })
+                .transpose()?,
+            pdftotext: var("XLRX_PDFTOTEXT")
+                .unwrap_or_else(|| "pdftotext".into())
+                .into(),
+            pdftoppm: var("XLRX_PDFTOPPM")
+                .unwrap_or_else(|| "pdftoppm".into())
+                .into(),
+            tesseract: var("XLRX_TESSERACT")
+                .unwrap_or_else(|| "tesseract".into())
+                .into(),
+            ocr_langs: var("XLRX_OCR_LANGS").unwrap_or_else(|| "deu+eng".into()),
+            extract_workers: num("XLRX_EXTRACT_WORKERS", 1)?,
         })
     }
 

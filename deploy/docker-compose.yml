@@ -54,6 +54,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      tika:
+        condition: service_started
     environment:
       DATABASE_URL_FILE: /run/secrets/database_url
       XLRX_SECRET_KEY_FILE: /run/secrets/xlrx_secret_key
@@ -65,12 +67,23 @@ services:
       XLRX_ARGON2_T: ${XLRX_ARGON2_T:-2}
       # "My Drive" of account NAME: /volume1/homes/NAME/Drive (the Synology Drive folder).
       XLRX_DATA_DIR: /mnt/volume1
+      # Text of Office, iWork and mail documents for the search (container below, internal only).
+      XLRX_TIKA_URL: http://tika:9998
     secrets: [database_url, xlrx_secret_key]
     # The whole volume: homes, team folders and xlrx-state on one file system, so versions can be
     # kept via reflink (PLAN 4.1).
     volumes:
       - /volume1:/mnt/volume1
     networks: [internal, proxy]
+
+  # Apache Tika reads Office, iWork, OpenDocument and mail for the search. Only on the internal
+  # network, without internet access: documents never leave the NAS (PDFs and OCR run in the
+  # server itself).
+  tika:
+    image: apache/tika:4.1.0
+    restart: unless-stopped
+    mem_limit: 1536m
+    networks: [internal]
 
   caddy:
     image: caddy:2
@@ -90,7 +103,7 @@ services:
       proxy: {}
 
 networks:
-  # Only Postgres and the server, no internet access.
+  # Postgres, Tika and the server, no internet access.
   internal:
     internal: true
   # Caddy ↔ server.

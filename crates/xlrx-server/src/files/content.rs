@@ -31,11 +31,11 @@ use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 use xlrx_sync::Reject;
 
-fn hex(h: &[u8]) -> String {
+pub(crate) fn hex(h: &[u8]) -> String {
     h.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn unhex(s: &str) -> Option<[u8; 32]> {
+pub(crate) fn unhex(s: &str) -> Option<[u8; 32]> {
     let mut out = [0u8; 32];
     if s.len() != 64 {
         return None;
@@ -66,6 +66,11 @@ impl Staged {
     /// The content's hash.
     pub fn hash(&self) -> &[u8; 32] {
         &self.hash
+    }
+
+    /// Where the staged copy lies (read only; it goes when this is dropped).
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Keeps the staged file under another name in the staging area (replacing an older one).

@@ -83,6 +83,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/admin/users/{id}/disabled", post(admin::set_disabled))
         .route("/admin/audit", get(admin::audit_log))
+        .route("/admin/search", get(admin::search_status))
+        .route("/admin/jobs/retry", post(admin::retry_jobs))
         .layer(middleware::from_fn(browser_only));
 
     // Browser and devices: files and sync.

@@ -38,12 +38,17 @@ services:
       XLRX_ARGON2_M_KIB: "8192"
       XLRX_ARGON2_T: "1"
       XLRX_DATA_DIR: /data
+      XLRX_TIKA_URL: http://tika:9998
     volumes:
       # Stand-in for the NAS volume (same folder as scripts/dev.sh): "My Drive" of account NAME
       # is local-data/homes/NAME/Drive. On Linux hosts the folder must be writable for uid 65534.
       - ../local-data:/data
     ports:
       - "127.0.0.1:8080:8080"
+
+  # Text of Office, iWork and mail documents for the search.
+  tika:
+    image: apache/tika:4.1.0
 
 volumes:
   postgres: {}

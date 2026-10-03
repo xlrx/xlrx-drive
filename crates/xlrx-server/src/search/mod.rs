@@ -44,6 +44,8 @@ pub struct Shared {
     pub(crate) indexed: watch::Sender<indexer::Cursor>,
     /// Asks the indexer to look for changes now.
     pub(crate) wake: Notify,
+    /// Wakes the workers when the indexer queued text extractions.
+    pub(crate) jobs_wake: Arc<Notify>,
 }
 
 pub struct Search {
@@ -82,6 +84,7 @@ pub async fn start(st: &AppState) -> Result<(), String> {
         fields,
         indexed: watch::Sender::new(cursor),
         wake: Notify::new(),
+        jobs_wake: st.jobs_wake.clone(),
     });
     let (stop, stop_rx) = watch::channel(false);
     let task = tokio::spawn(indexer::run(

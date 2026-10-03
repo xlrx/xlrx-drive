@@ -19,6 +19,8 @@ use tokio::sync::watch;
 
 use super::Shared;
 use super::schema::{self, Category, Fields};
+use crate::files::content;
+use crate::{extract, jobs};
 
 /// Journal entries (and texts) per round.
 const BATCH: i64 = 2000;
@@ -134,6 +136,7 @@ struct Row {
     name: String,
     kind: String,
     content_hash: Option<Vec<u8>>,
+    size: Option<i64>,
     mtime: OffsetDateTime,
     deleted_at: Option<OffsetDateTime>,
     /// Directories above, from the root directory down.
@@ -225,7 +228,7 @@ async fn round(
     let all: Vec<Row> = rows.into_values().collect();
     let total = all.len();
     for chunk in all.chunks(CHUNK) {
-        let docs = documents(db, &sh.fields, chunk).await?;
+        let docs = documents(db, sh, chunk).await?;
         let deletes: Vec<i64> = chunk.iter().map(|r| r.id).chain(gone.drain(..)).collect();
         let (w, f) = (writer.clone(), sh.fields);
         blocking(move || {
@@ -294,7 +297,7 @@ async fn load(db: &PgPool, ids: &[i64]) -> Result<Vec<Row>, String> {
             SELECT node, array_agg(anc ORDER BY depth DESC) AS anc FROM up
              WHERE anc IS NOT NULL GROUP BY node
          )
-         SELECT n.id, n.root_id, n.parent_id, n.name, n.kind, n.content_hash,
+         SELECT n.id, n.root_id, n.parent_id, n.name, n.kind, n.content_hash, n.size,
                 coalesce(n.mtime, n.created_at) AS mtime, n.deleted_at,
                 coalesce(a.anc, '{}') AS anc
            FROM nodes n LEFT JOIN a ON a.node = n.id
@@ -316,7 +319,7 @@ async fn subtree(db: &PgPool, dir: i64, anc: &[i64]) -> Result<Vec<Row>, String>
             SELECT n.id, t.anc || t.id, t.depth + 1 FROM nodes n JOIN t ON n.parent_id = t.id
              WHERE n.deleted_at IS NULL AND t.depth < 1000
          )
-         SELECT n.id, n.root_id, n.parent_id, n.name, n.kind, n.content_hash,
+         SELECT n.id, n.root_id, n.parent_id, n.name, n.kind, n.content_hash, n.size,
                 coalesce(n.mtime, n.created_at) AS mtime, n.deleted_at, t.anc
            FROM t JOIN nodes n ON n.id = t.id",
     )
@@ -328,7 +331,9 @@ async fn subtree(db: &PgPool, dir: i64, anc: &[i64]) -> Result<Vec<Row>, String>
 }
 
 /// Documents for the live nodes among `rows` (root directories are not searchable themselves).
-async fn documents(db: &PgPool, f: &Fields, rows: &[Row]) -> Result<Vec<TantivyDocument>, String> {
+/// Files that can have a text but have none yet get a job to extract it.
+async fn documents(db: &PgPool, sh: &Shared, rows: &[Row]) -> Result<Vec<TantivyDocument>, String> {
+    let f = &sh.fields;
     let live: Vec<&Row> = rows
         .iter()
         .filter(|r| r.deleted_at.is_none() && r.parent_id.is_some())
@@ -351,6 +356,23 @@ async fn documents(db: &PgPool, f: &Fields, rows: &[Row]) -> Result<Vec<TantivyD
             .map(|t| (t.hash.clone(), t))
             .collect()
     };
+    let mut wanted: HashMap<String, i16> = HashMap::new();
+    for r in &live {
+        let Some(h) = &r.content_hash else { continue };
+        if r.kind == "file" && !texts.contains_key(h) && extract::wanted(&r.name, r.size) {
+            let p = extract::priority(r.mtime);
+            let e = wanted.entry(content::hex(h)).or_insert(p);
+            *e = (*e).max(p);
+        }
+    }
+    let wanted: Vec<(String, i16)> = wanted.into_iter().collect();
+    if jobs::enqueue(db, extract::KIND, &wanted)
+        .await
+        .map_err(|e| e.to_string())?
+        > 0
+    {
+        sh.jobs_wake.notify_one();
+    }
     Ok(live
         .into_iter()
         .map(|r| {

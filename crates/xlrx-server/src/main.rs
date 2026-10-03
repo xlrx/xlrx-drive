@@ -164,6 +164,8 @@ async fn serve(state: AppState) -> Result<(), String> {
         if let Err(e) = xlrx_server::search::start(&state).await {
             tracing::error!(error = %e, "Suche nicht gestartet");
         }
+        // Text from file content, for the search: on the NAS only.
+        xlrx_server::extract::start(&state).await?;
         let st = state.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));

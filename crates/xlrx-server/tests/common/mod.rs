@@ -101,6 +101,12 @@ pub fn config() -> Config {
         // Tests start watchers themselves where they test them.
         watch: false,
         device_confirm_days: 30,
+        tika_url: None,
+        pdftotext: "pdftotext".into(),
+        pdftoppm: "pdftoppm".into(),
+        tesseract: "tesseract".into(),
+        ocr_langs: "deu+eng".into(),
+        extract_workers: 1,
     }
 }
 
