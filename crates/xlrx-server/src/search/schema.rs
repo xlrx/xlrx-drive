@@ -10,7 +10,7 @@ use tantivy::tokenizer::{
 };
 
 /// Changing fields or analyzers needs a new number: the index is then rebuilt from the database.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 pub const PLAIN: &str = "xlrx_plain";
 pub const GERMAN: &str = "xlrx_de";
@@ -43,6 +43,10 @@ pub struct Fields {
     pub text: tantivy::schema::Field,
     pub text_de: tantivy::schema::Field,
     pub text_en: tantivy::schema::Field,
+    /// What the AI saw in a picture: description, tags, text in the picture (German).
+    pub seen: tantivy::schema::Field,
+    /// Kind of document the AI recognized in a picture (`dokument:rechnung`).
+    pub doc: tantivy::schema::Field,
 }
 
 pub fn build() -> (Schema, Fields) {
@@ -73,6 +77,8 @@ pub fn build() -> (Schema, Fields) {
         text: b.add_text_field("text", words(PLAIN)),
         text_de: b.add_text_field("text_de", words(GERMAN)),
         text_en: b.add_text_field("text_en", words(ENGLISH)),
+        seen: b.add_text_field("seen", words(GERMAN)),
+        doc: b.add_text_field("doc", STRING),
     };
     (b.build(), f)
 }

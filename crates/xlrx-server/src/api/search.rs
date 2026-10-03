@@ -14,7 +14,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::files::access;
 use crate::files::db::{self, NODE_COLS, NodeRow};
 use crate::search::query::{self, Parsed};
-use crate::search::{Found, Part, Request, Search};
+use crate::search::{Found, Part, Request, Search, Sources};
 use crate::state::AppState;
 
 /// A search waits this long for the index to take in changes made just before (your own upload
@@ -147,7 +147,7 @@ pub async fn search(
     let folders = files::folder_names(&st, &scope, &rows).await?;
 
     let texts = if request.parsed.clauses.is_empty() {
-        vec![None; rows.len()]
+        vec![Default::default(); rows.len()]
     } else {
         texts(&st, &rows).await?
     };
@@ -276,13 +276,10 @@ async fn folder_ids(st: &AppState, user_id: i64, names: &[String]) -> ApiResult<
 }
 
 /// The beginning of the extracted text of each file, with its language.
-async fn texts(
-    st: &AppState,
-    rows: &[NodeRow],
-) -> ApiResult<Vec<Option<(Option<String>, String)>>> {
+async fn texts(st: &AppState, rows: &[NodeRow]) -> ApiResult<Vec<Sources>> {
     let hashes: Vec<Vec<u8>> = rows.iter().filter_map(|n| n.content_hash.clone()).collect();
     if hashes.is_empty() {
-        return Ok(vec![None; rows.len()]);
+        return Ok(vec![Default::default(); rows.len()]);
     }
     let found: HashMap<Vec<u8>, (Option<String>, String)> =
         sqlx::query_as::<_, (Vec<u8>, Option<String>, String)>(
@@ -295,9 +292,22 @@ async fn texts(
         .into_iter()
         .map(|(h, lang, text)| (h, (lang, text)))
         .collect();
+    // What the AI saw in pictures.
+    let seen: HashMap<Vec<u8>, String> = sqlx::query_as::<_, (Vec<u8>, String)>(
+        "SELECT content_hash, concat_ws(E'\\n', description, array_to_string(tags, ', '), text_in_image)
+           FROM ai_vision WHERE content_hash = ANY($1)",
+    )
+    .bind(&hashes)
+    .fetch_all(&st.db)
+    .await?
+    .into_iter()
+    .collect();
     Ok(rows
         .iter()
-        .map(|n| n.content_hash.as_ref().and_then(|h| found.get(h).cloned()))
+        .map(|n| Sources {
+            text: n.content_hash.as_ref().and_then(|h| found.get(h).cloned()),
+            seen: n.content_hash.as_ref().and_then(|h| seen.get(h).cloned()),
+        })
         .collect())
 }
 

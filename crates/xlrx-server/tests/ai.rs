@@ -4,14 +4,12 @@
 
 mod common;
 
+use common::ai::*;
 use common::ai::{self as fake, FakeAi};
 use common::files::*;
-use common::*;
 use serde_json::json;
-use xlrx_server::AppState;
 use xlrx_server::ai::{self, Side, Space, pipeline, vectors};
 use xlrx_server::files::data_class::Class;
-use xlrx_server::files::db::{self, RootRow};
 use xlrx_server::files::roots;
 use xlrx_server::search::text;
 
@@ -21,139 +19,6 @@ const BEFUND: &str = "Befund der Blutwerte vom Hausarzt: Cholesterin leicht erhÃ
                       Kontrolle in drei Monaten empfohlen.";
 const URLAUB: &str = "Packliste fÃ¼r den Urlaub am Strand: Sonnencreme, Handtuch, Badehose, \
                       Sonnenbrille und ein gutes Buch.";
-
-async fn env_with(fake: &FakeAi, default: Class) -> Option<Env> {
-    let mut env = Env::with_data().await?;
-    let mut cfg = env.state.cfg.clone();
-    fake::configure(&mut cfg, fake);
-    cfg.default_data_class = default;
-    env.state = AppState::new(env.db.pool.clone(), cfg).unwrap();
-    env.app = xlrx_server::router(env.state.clone());
-    Some(env)
-}
-
-/// The same environment with other settings (as after a restart).
-fn restart(env: &mut Env, change: impl FnOnce(&mut xlrx_server::Config)) {
-    let mut cfg = env.state.cfg.clone();
-    change(&mut cfg);
-    env.state = AppState::new(env.db.pool.clone(), cfg).unwrap();
-    env.app = xlrx_server::router(env.state.clone());
-}
-
-async fn root(env: &Env, id: i64) -> RootRow {
-    db::root_by_id(&env.db.pool, id).await.unwrap().unwrap()
-}
-
-/// Writes text files, reads them in and stores their text (as the extraction would).
-async fn files(env: &Env, root: &RootRow, dir: &std::path::Path, list: &[(&str, &str)]) {
-    for (path, content) in list {
-        write(&dir.join(path), content.as_bytes());
-    }
-    roots::scan(&env.state, root).await.unwrap();
-    for (path, content) in list {
-        let h = hash(env, root, path).await;
-        text::store(
-            &env.db.pool,
-            &h.clone().try_into().unwrap(),
-            "plain",
-            content,
-        )
-        .await
-        .unwrap();
-    }
-}
-
-async fn hash(env: &Env, root: &RootRow, path: &str) -> Vec<u8> {
-    node(env, root, path).await.content_hash.unwrap()
-}
-
-async fn set_class(c: &mut Client, id: i64, class: &str) {
-    let r = c
-        .send(
-            "PUT",
-            &format!("/api/nodes/{id}/data-class"),
-            Some(json!({ "class": class })),
-        )
-        .await;
-    r.ok();
-}
-
-/// Plans until nothing is new.
-async fn plan(env: &Env) {
-    for _ in 0..20 {
-        if !pipeline::plan(&env.state).await.unwrap() {
-            return;
-        }
-    }
-    panic!("Planer kommt nicht zum Ende");
-}
-
-/// Does the queued work of both sides (a few rounds at most).
-async fn work(env: &Env) {
-    for _ in 0..20 {
-        let a = pipeline::work_one(&env.state, Side::Cloud).await.unwrap();
-        let b = pipeline::work_one(&env.state, Side::Local).await.unwrap();
-        if !a && !b {
-            return;
-        }
-    }
-}
-
-async fn start_cloud(env: &Env) {
-    sqlx::query("UPDATE ai_state SET cloud_on = true")
-        .execute(&env.db.pool)
-        .await
-        .unwrap();
-}
-
-/// (kind, key, state, attempts) of the AI jobs.
-async fn jobs(env: &Env) -> Vec<(String, String, String, i32)> {
-    sqlx::query_as(
-        "SELECT kind, key, state, attempts FROM jobs WHERE kind LIKE 'ai_%' ORDER BY kind, key",
-    )
-    .fetch_all(&env.db.pool)
-    .await
-    .unwrap()
-}
-
-fn key(h: &[u8]) -> String {
-    format!(
-        "text:{}",
-        h.iter().map(|b| format!("{b:02x}")).collect::<String>()
-    )
-}
-
-/// (space, model, pieces) of a content's vectors.
-async fn vectors_of(env: &Env, h: &[u8]) -> Vec<(String, String, i64)> {
-    sqlx::query_as(
-        "SELECT space, model, count(*) FROM ai_vectors WHERE content_hash = $1
-          GROUP BY space, model ORDER BY space",
-    )
-    .bind(h)
-    .fetch_all(&env.db.pool)
-    .await
-    .unwrap()
-}
-
-fn cloud_vec(n: i64) -> Vec<(String, String, i64)> {
-    vec![("cloud".into(), "qwen3-embedding-8b".into(), n)]
-}
-
-fn local_vec(n: i64) -> Vec<(String, String, i64)> {
-    vec![("local".into(), "multilingual-e5-small".into(), n)]
-}
-
-async fn nearest(env: &Env, space: Space, q: &str) -> Vec<Vec<u8>> {
-    let (model, dim) = env.state.ai.model(space).unwrap();
-    let mut v = fake::embed(q, dim as usize);
-    vectors::normalize(&mut v);
-    vectors::nearest(&env.db.pool, space, model, dim, &v, 10)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|n| n.content_hash)
-        .collect()
-}
 
 #[tokio::test]
 async fn texte_in_der_cloud_und_im_heimnetz() {

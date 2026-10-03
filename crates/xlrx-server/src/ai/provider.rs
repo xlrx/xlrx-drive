@@ -11,6 +11,7 @@
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -265,9 +266,9 @@ pub struct Embedded {
     pub tokens: u64,
 }
 
-/// A text embedding model at a provider.
+/// An embedding model at a provider (texts; for CLIP also pictures).
 pub struct Embedder {
-    ep: Endpoint,
+    ep: Arc<Endpoint>,
     pub model: String,
     pub dim: u32,
     /// Ask for the dimension (models with selectable size, e.g. qwen3-embedding).
@@ -277,40 +278,45 @@ pub struct Embedder {
 }
 
 impl Embedder {
-    /// Embeds texts (prefixed as documents or queries), in batches.
+    /// Embeds inputs in batches. `modality` tells a CLIP service whether they are texts or
+    /// pictures (as data URIs).
     async fn embed(
         &self,
-        texts: &[String],
-        query: bool,
+        inputs: Vec<String>,
+        modality: Option<&str>,
         limit: Duration,
     ) -> Result<Embedded, CallError> {
-        let prefix = if query {
-            &self.prefixes.query
-        } else {
-            &self.prefixes.document
-        };
         let mut out = Embedded::default();
-        for batch in texts.chunks(BATCH) {
-            let input: Vec<String> = batch.iter().map(|t| format!("{prefix}{t}")).collect();
+        for batch in inputs.chunks(BATCH) {
             let mut body = json!({
                 "model": self.model,
-                "input": input,
+                "input": batch,
                 "encoding_format": "float",
             });
             if self.ask_dim {
                 body["dimensions"] = json!(self.dim);
             }
+            if let Some(m) = modality {
+                body["modality"] = json!(m);
+            }
             let answer = self.ep.post("embeddings", &body, limit).await?;
-            let (vectors, tokens) = parse_embeddings(&answer, input.len(), self.dim as usize)?;
+            let (vectors, tokens) = parse_embeddings(&answer, batch.len(), self.dim as usize)?;
             out.vectors.extend(vectors);
-            out.tokens += tokens.unwrap_or_else(|| estimate_tokens(&input));
+            out.tokens += tokens.unwrap_or_else(|| estimate_tokens(batch));
         }
         Ok(out)
     }
 
+    async fn documents(&self, texts: &[String]) -> Result<Embedded, CallError> {
+        let p = &self.prefixes.document;
+        let inputs = texts.iter().map(|t| format!("{p}{t}")).collect();
+        self.embed(inputs, None, self.time).await
+    }
+
     /// Embeds a search query.
     pub async fn query(&self, q: &str, limit: Duration) -> Result<Embedded, CallError> {
-        self.embed(&[q.to_owned()], true, limit).await
+        let input = format!("{}{q}", self.prefixes.query);
+        self.embed(vec![input], None, limit).await
     }
 }
 
@@ -370,9 +376,151 @@ pub struct Cleared {
     pub(super) _private: (),
 }
 
+/// A picture as sent: scaled down, encoded anew (no EXIF, no GPS).
+pub struct Picture {
+    pub bytes: Vec<u8>,
+    pub mime: &'static str,
+}
+
+impl Picture {
+    fn data_uri(&self) -> String {
+        use base64::Engine as _;
+        format!(
+            "data:{};base64,{}",
+            self.mime,
+            base64::engine::general_purpose::STANDARD.encode(&self.bytes)
+        )
+    }
+}
+
+/// What a vision model saw in a picture (PLAN 7.2).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Seen {
+    pub description: String,
+    pub tags: Vec<String>,
+    pub text: String,
+    pub doc_type: Option<String>,
+    pub date: Option<time::Date>,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+}
+
+impl Seen {
+    /// What is embedded and indexed: description, tags and the text in the picture.
+    pub fn words(&self) -> String {
+        let mut out = self.description.clone();
+        if !self.tags.is_empty() {
+            out.push('\n');
+            out.push_str(&self.tags.join(", "));
+        }
+        if !self.text.is_empty() {
+            out.push('\n');
+            out.push_str(&self.text);
+        }
+        out
+    }
+}
+
+/// The instructions for the vision model. Names of people are not wanted; the answer is JSON.
+const VISION_PROMPT: &str = "Du beschreibst Bilder für die Suche in einer privaten Dateiablage. \
+Antworte nur mit einem JSON-Objekt mit diesen Feldern:\n\
+\"beschreibung\": ein bis zwei Sätze auf Deutsch, was zu sehen ist (Motiv, Ort, Situation; bei \
+Dokumenten Art, Absender und Thema),\n\
+\"tags\": 3 bis 10 deutsche Schlagwörter in Kleinbuchstaben,\n\
+\"text_im_bild\": gut lesbarer Text im Bild, höchstens 2000 Zeichen, sonst \"\",\n\
+\"dokumenttyp\": bei Dokumenten eines von rechnung, vertrag, brief, kontoauszug, quittung, \
+ausweis, zeugnis, bescheid, formular, rezept, fahrkarte, sonstiges; sonst null,\n\
+\"datum_erkannt\": ein im Bild erkennbares Datum als JJJJ-MM-TT, sonst null.\n\
+Nenne keine Personen beim Namen.";
+
+/// Longest values taken from a vision answer.
+const MAX_DESCRIPTION: usize = 1000;
+const MAX_IMAGE_TEXT: usize = 4000;
+const MAX_TAGS: usize = 15;
+
+fn cut(s: &str, max: usize) -> String {
+    s.trim().chars().take(max).collect()
+}
+
+/// Reads the vision model's answer: the JSON object in it (also inside a code fence); without
+/// one, the text is the description.
+pub fn parse_seen(answer: &Value) -> Result<Seen, CallError> {
+    let content = &answer["choices"][0]["message"]["content"];
+    let text = match content {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p["text"].as_str())
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => {
+            return Err(CallError::Transient(
+                "Unerwartete Antwort: keine Nachricht".into(),
+            ));
+        }
+    };
+    let usage = &answer["usage"];
+    let mut seen = Seen {
+        tokens_in: usage["prompt_tokens"].as_u64().unwrap_or(0),
+        tokens_out: usage["completion_tokens"].as_u64().unwrap_or(0),
+        ..Seen::default()
+    };
+    let json = match (text.find('{'), text.rfind('}')) {
+        (Some(a), Some(b)) if a < b => serde_json::from_str::<Value>(&text[a..=b]).ok(),
+        _ => None,
+    };
+    let Some(j) = json else {
+        seen.description = cut(&text, MAX_DESCRIPTION);
+        return Ok(seen);
+    };
+    seen.description = cut(
+        j["beschreibung"].as_str().unwrap_or_default(),
+        MAX_DESCRIPTION,
+    );
+    seen.tags = j["tags"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| t.as_str())
+                .map(|t| cut(&t.to_lowercase(), 40))
+                .filter(|t| !t.is_empty())
+                .take(MAX_TAGS)
+                .collect()
+        })
+        .unwrap_or_default();
+    seen.text = cut(
+        j["text_im_bild"].as_str().unwrap_or_default(),
+        MAX_IMAGE_TEXT,
+    );
+    seen.doc_type = j["dokumenttyp"]
+        .as_str()
+        .map(|t| t.trim().to_lowercase())
+        .filter(|t| {
+            !t.is_empty()
+                && t != "null"
+                && t.chars().count() <= 30
+                && t.chars().all(|c| c.is_alphabetic() || c == '-')
+        });
+    seen.date = j["datum_erkannt"].as_str().and_then(|d| {
+        time::Date::parse(
+            d.trim(),
+            time::macros::format_description!("[year]-[month]-[day]"),
+        )
+        .ok()
+    });
+    Ok(seen)
+}
+
+/// The vision model in the cloud.
+pub struct Vision {
+    ep: Arc<Endpoint>,
+    pub model: String,
+}
+
 /// The provider for "Cloud erlaubt".
 pub struct Cloud {
     pub embed: Embedder,
+    pub vision: Option<Vision>,
     pub prices: Prices,
 }
 
@@ -381,15 +529,17 @@ impl Cloud {
         check_cloud_url(&cfg.url)?;
         // Plain HTTP only goes to a proxy in the home network.
         let home_only = cfg.url.scheme() == "http";
+        let ep = Arc::new(Endpoint::new(&cfg.url, Some(cfg.key.clone()), home_only)?);
         Ok(Self {
             embed: Embedder {
-                ep: Endpoint::new(&cfg.url, Some(cfg.key.clone()), home_only)?,
+                ep: ep.clone(),
                 model: cfg.embed_model.clone(),
                 dim: cfg.embed_dim,
                 ask_dim: true,
                 prefixes: Prefixes::of(&cfg.embed_model),
                 time: CLOUD_TIME,
             },
+            vision: cfg.vision_model.clone().map(|model| Vision { ep, model }),
             prices: cfg.prices,
         })
     }
@@ -400,38 +550,105 @@ impl Cloud {
         _: &Cleared,
         texts: &[String],
     ) -> Result<Embedded, CallError> {
-        self.embed.embed(texts, false, self.embed.time).await
+        self.embed.documents(texts).await
+    }
+
+    /// Asks the vision model what a picture of a cleared content shows.
+    pub async fn describe(&self, _: &Cleared, picture: &Picture) -> Result<Seen, CallError> {
+        let vision = self
+            .vision
+            .as_ref()
+            .ok_or_else(|| CallError::Rejected("Kein Bildmodell eingerichtet".into()))?;
+        let body = json!({
+            "model": vision.model,
+            "messages": [
+                {"role": "system", "content": VISION_PROMPT},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Beschreibe dieses Bild."},
+                    {"type": "image_url", "image_url": {"url": picture.data_uri()}}
+                ]}
+            ],
+            "max_tokens": 1200,
+            "temperature": 0.1,
+        });
+        let answer = vision
+            .ep
+            .post("chat/completions", &body, CLOUD_TIME)
+            .await?;
+        parse_seen(&answer)
     }
 
     /// What tokens cost in euros.
     pub fn embed_cost(&self, tokens: u64) -> f64 {
         tokens as f64 / 1e6 * self.prices.embed
     }
+
+    pub fn vision_cost(&self, tokens_in: u64, tokens_out: u64) -> f64 {
+        tokens_in as f64 / 1e6 * self.prices.vision_in
+            + tokens_out as f64 / 1e6 * self.prices.vision_out
+    }
 }
 
 /// The service in the home network for "Nur lokal".
 pub struct Local {
     pub embed: Embedder,
+    /// Picture vectors (CLIP: pictures and texts in one space).
+    pub clip: Option<Embedder>,
 }
 
 impl Local {
     pub fn new(cfg: &LocalAi) -> Result<Self, String> {
         check_home_url("XLRX_LOCAL_AI_URL", &cfg.url)?;
+        let ep = Arc::new(Endpoint::new(&cfg.url, None, true)?);
         Ok(Self {
             embed: Embedder {
-                ep: Endpoint::new(&cfg.url, None, true)?,
+                ep: ep.clone(),
                 model: cfg.embed_model.clone(),
                 dim: cfg.embed_dim,
                 ask_dim: false,
                 prefixes: Prefixes::of(&cfg.embed_model),
                 time: HOME_TIME,
             },
+            clip: cfg.clip_model.clone().map(|model| Embedder {
+                ep,
+                model,
+                dim: cfg.clip_dim,
+                ask_dim: false,
+                prefixes: Prefixes {
+                    query: String::new(),
+                    document: String::new(),
+                },
+                time: HOME_TIME,
+            }),
         })
     }
 
     /// Embeds pieces of a content (everything stays in the home network).
     pub async fn embed_content(&self, texts: &[String]) -> Result<Embedded, CallError> {
-        self.embed.embed(texts, false, self.embed.time).await
+        self.embed.documents(texts).await
+    }
+
+    /// The CLIP vector of a picture.
+    pub async fn embed_picture(&self, picture: &Picture) -> Result<Vec<f32>, CallError> {
+        let clip = self
+            .clip
+            .as_ref()
+            .ok_or_else(|| CallError::Rejected("Kein Bildmodell eingerichtet".into()))?;
+        let mut e = clip
+            .embed(vec![picture.data_uri()], Some("image"), clip.time)
+            .await?;
+        e.vectors
+            .pop()
+            .ok_or_else(|| CallError::Transient("Kein Vektor".into()))
+    }
+
+    /// The CLIP vector of a search query (the text encoder: comparable with pictures).
+    pub async fn clip_query(&self, q: &str, limit: Duration) -> Result<Embedded, CallError> {
+        let clip = self
+            .clip
+            .as_ref()
+            .ok_or_else(|| CallError::Rejected("Kein Bildmodell eingerichtet".into()))?;
+        clip.embed(vec![q.to_owned()], Some("text"), limit).await
     }
 }
 
@@ -478,6 +695,34 @@ mod tests {
         );
         assert_eq!(Prefixes::of("qwen3-embedding-8b").document, "");
         assert_eq!(Prefixes::of("bge-m3"), Prefixes::of("unbekannt"));
+    }
+
+    #[test]
+    fn vision_answers() {
+        let a = json!({
+            "choices": [{"message": {"content": "```json\n{\"beschreibung\": \"Ein Hund am Strand.\", \"tags\": [\"Hund\", \"strand\", 3], \"text_im_bild\": \"\", \"dokumenttyp\": null, \"datum_erkannt\": \"2025-11-14\"}\n```"}}],
+            "usage": {"prompt_tokens": 300, "completion_tokens": 40}
+        });
+        let s = parse_seen(&a).unwrap();
+        assert_eq!(s.description, "Ein Hund am Strand.");
+        assert_eq!(s.tags, ["hund", "strand"]);
+        assert_eq!(s.doc_type, None);
+        assert_eq!(s.date, Some(time::macros::date!(2025 - 11 - 14)));
+        assert_eq!((s.tokens_in, s.tokens_out), (300, 40));
+        assert_eq!(s.words(), "Ein Hund am Strand.\nhund, strand");
+
+        let doc = json!({"choices": [{"message": {"content": "{\"beschreibung\": \"Rechnung\", \"dokumenttyp\": \"Rechnung\", \"datum_erkannt\": \"14.11.2025\"}"}}]});
+        let s = parse_seen(&doc).unwrap();
+        assert_eq!(s.doc_type.as_deref(), Some("rechnung"));
+        assert_eq!(s.date, None);
+        let odd = json!({"choices": [{"message": {"content": "{\"beschreibung\": \"x\", \"dokumenttyp\": \"<b>rechnung</b>\"}"}}]});
+        assert_eq!(parse_seen(&odd).unwrap().doc_type, None);
+        let prose = json!({"choices": [{"message": {"content": "Ein Sonnenuntergang am Meer."}}]});
+        assert_eq!(
+            parse_seen(&prose).unwrap().description,
+            "Ein Sonnenuntergang am Meer."
+        );
+        assert!(parse_seen(&json!({"choices": []})).is_err());
     }
 
     #[test]

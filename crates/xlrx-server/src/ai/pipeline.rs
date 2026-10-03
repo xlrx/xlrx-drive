@@ -10,10 +10,12 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 
-use super::chunk;
+use super::images::{self, Read};
+use super::provider::Seen;
 use super::provider::{CallError, estimate_tokens};
 use super::vectors::{self, Piece};
 use super::{CHUNK_CHARS, CHUNK_OVERLAP, CLOUD_CHUNKS, LOCAL_CHUNKS, Side, Space};
+use super::{Outcome, chunk};
 use crate::error::ApiError;
 use crate::files::content;
 use crate::jobs::{self, Job};
@@ -182,6 +184,7 @@ pub async fn plan(st: &AppState) -> Result<bool, ApiError> {
     for part in hashes.chunks(5000) {
         super::revoke_local(st, part, "Kopie in einem Ordner „Nur lokal“").await?;
         super::queue_texts(st, part).await?;
+        super::queue_images(st, part).await?;
     }
     sqlx::query("UPDATE ai_state SET text_seq = $1, journal_seq = $2")
         .bind(next_text)
@@ -223,33 +226,7 @@ pub async fn sweep(st: &AppState) -> Result<Sweep, ApiError> {
         out.revoked += super::revoke_local(st, &part, "Prüfung: Kopie in „Nur lokal“").await?;
         after = last;
     }
-    // Contents no file, file in the trash or old version has any more (a file restored from
-    // the trash keeps its results).
-    let gone: Vec<Vec<u8>> = sqlx::query_scalar(
-        "DELETE FROM ai_done d
-          WHERE NOT EXISTS (
-                  SELECT 1 FROM nodes n WHERE n.content_hash = d.content_hash
-                     AND (n.deleted_at IS NULL OR EXISTS (
-                           SELECT 1 FROM nodes t WHERE t.id = n.deleted_with AND t.trash_path IS NOT NULL)))
-            AND NOT EXISTS (SELECT 1 FROM versions v WHERE v.content_hash = d.content_hash)
-         RETURNING content_hash",
-    )
-    .fetch_all(&st.db)
-    .await?;
-    if !gone.is_empty() {
-        sqlx::query("DELETE FROM ai_vectors WHERE content_hash = ANY($1)")
-            .bind(&gone)
-            .execute(&st.db)
-            .await?;
-        sqlx::query("DELETE FROM ai_vision WHERE content_hash = ANY($1)")
-            .bind(&gone)
-            .execute(&st.db)
-            .await?;
-        let mut g = gone;
-        g.sort();
-        g.dedup();
-        out.removed = g.len() as u64;
-    }
+    out.removed = super::forget_gone(st).await?;
     if st.ai.configured() {
         let mut after: Vec<u8> = Vec::new();
         loop {
@@ -267,7 +244,29 @@ pub async fn sweep(st: &AppState) -> Result<Sweep, ApiError> {
             out.queued += super::queue_texts(st, &part).await?;
             after = last;
         }
+        let mut after: Vec<u8> = Vec::new();
+        loop {
+            let part: Vec<Vec<u8>> = sqlx::query_scalar(
+                "SELECT DISTINCT content_hash FROM nodes
+                  WHERE content_hash > $1 AND deleted_at IS NULL AND kind = 'file' AND name ~* $2
+                  ORDER BY content_hash LIMIT $3",
+            )
+            .bind(&after)
+            .bind(images::NAME_PATTERN)
+            .bind(SWEEP_BATCH)
+            .fetch_all(&st.db)
+            .await?;
+            let Some(last) = part.last().cloned() else {
+                break;
+            };
+            out.queued += super::queue_images(st, &part).await?;
+            after = last;
+        }
     }
+    // The search index follows the log within seconds; old entries are no longer needed.
+    sqlx::query("DELETE FROM ai_vision_log WHERE at < now() - interval '30 days'")
+        .execute(&st.db)
+        .await?;
     if out != Sweep::default() {
         tracing::info!(?out, "KI: Prüfung");
     }
@@ -416,6 +415,7 @@ async fn handle(st: &AppState, side: Side, job: &Job) -> Result<(), Fail> {
     };
     match task {
         "text" => text(st, side, &hash).await,
+        "image" => image(st, side, &hash).await,
         _ => Ok(()),
     }
 }
@@ -500,12 +500,195 @@ async fn text(st: &AppState, side: Side, hash: &[u8; 32]) -> Result<(), Fail> {
             vec,
         })
         .collect();
-    if !super::store(st, &h, space, model, seq, "text", "text", &pieces).await? {
+    let stored = super::store(
+        st,
+        Outcome {
+            hash: &h,
+            space,
+            model,
+            done_as: model,
+            version: seq,
+            task: "text",
+            source: "text",
+            pieces,
+            vision: None,
+        },
+    )
+    .await?;
+    if !stored {
         // Became "Nur lokal" while the cloud worked: the result is thrown away.
         super::queue_texts(st, &[h]).await?;
         return Ok(());
     }
     if side == Side::Cloud && !inputs.is_empty() {
+        sqlx::query("UPDATE ai_state SET trial_left = trial_left - 1 WHERE trial_left > 0")
+            .execute(&st.db)
+            .await?;
+    }
+    Ok(())
+}
+
+/// A stored picture description.
+#[derive(sqlx::FromRow)]
+struct KnownVision {
+    description: String,
+    tags: Vec<String>,
+    text_in_image: String,
+    doc_type: Option<String>,
+    date_found: Option<time::Date>,
+}
+
+/// Analyses a picture: in the cloud a description (embedded as text and indexed for the lexical
+/// search), in the home network a CLIP vector.
+async fn image(st: &AppState, side: Side, hash: &[u8; 32]) -> Result<(), Fail> {
+    let ai = &st.ai;
+    let h = hash.to_vec();
+    let targets = super::targets(st, std::slice::from_ref(&h)).await?;
+    let Some(space) = targets.get(&h).and_then(|t| ai.image_space(t)) else {
+        return Ok(());
+    };
+    if Side::of(space) != side {
+        super::queue_images(st, &[h]).await?;
+        return Ok(());
+    }
+    let Some(done_as) = ai.image_done_as(space) else {
+        return Ok(());
+    };
+    let done: Option<String> = sqlx::query_scalar(
+        "SELECT model FROM ai_done WHERE content_hash = $1 AND space = $2 AND task = 'image'",
+    )
+    .bind(&h)
+    .bind(space.as_str())
+    .fetch_optional(&st.db)
+    .await?;
+    if done.as_deref() == Some(done_as.as_str()) {
+        return Ok(());
+    }
+    let mut outcome = Outcome {
+        hash: &h,
+        space,
+        model: "",
+        done_as: &done_as,
+        version: 0,
+        task: "image",
+        source: "image",
+        pieces: Vec::new(),
+        vision: None,
+    };
+    let seen: Option<Seen>;
+    let mut called = false;
+    match space {
+        Space::Cloud => {
+            let cloud = ai.cloud.as_ref().ok_or(Fail::Paused("kein Anbieter"))?;
+            let vision = cloud
+                .vision
+                .as_ref()
+                .ok_or(Fail::Paused("kein Bildmodell"))?;
+            outcome.model = &cloud.embed.model;
+            outcome.source = "description";
+            // A description by the same model is kept (e.g. when only the text model changed).
+            let known: Option<KnownVision> = sqlx::query_as(
+                "SELECT description, tags, text_in_image, doc_type, date_found FROM ai_vision
+                  WHERE content_hash = $1 AND model = $2",
+            )
+            .bind(&h)
+            .bind(&vision.model)
+            .fetch_optional(&st.db)
+            .await?;
+            seen = match known {
+                Some(k) => Some(Seen {
+                    description: k.description,
+                    tags: k.tags,
+                    text: k.text_in_image,
+                    doc_type: k.doc_type,
+                    date: k.date_found,
+                    ..Seen::default()
+                }),
+                None => {
+                    // A picture costs a few hundred tokens in, its description some out.
+                    let estimate = cloud.vision_cost(1500, 400) + cloud.embed_cost(600);
+                    if let Some(why) = super::cloud_paused(st, estimate).await? {
+                        return Err(Fail::Paused(why));
+                    }
+                    let Some(cleared) = super::clear(st, &h).await? else {
+                        super::queue_images(st, &[h]).await?;
+                        return Ok(());
+                    };
+                    match images::read(st, hash).await.map_err(Fail::Other)? {
+                        Read::Gone => return Ok(()),
+                        Read::Unusable => None,
+                        Read::Picture(p) => {
+                            let s = cloud.describe(&cleared, &p).await?;
+                            called = true;
+                            super::record_usage(
+                                st,
+                                "vision",
+                                s.tokens_in,
+                                s.tokens_out,
+                                cloud.vision_cost(s.tokens_in, s.tokens_out),
+                            )
+                            .await?;
+                            Some(s)
+                        }
+                    }
+                }
+            };
+            if let Some(s) = &seen {
+                let words = s.words();
+                if chunk::worth_embedding(&words) {
+                    if let Some(why) = super::cloud_paused(
+                        st,
+                        cloud.embed_cost(estimate_tokens(std::slice::from_ref(&words))),
+                    )
+                    .await?
+                    {
+                        return Err(Fail::Paused(why));
+                    }
+                    let Some(cleared) = super::clear(st, &h).await? else {
+                        super::queue_images(st, &[h]).await?;
+                        return Ok(());
+                    };
+                    let e = cloud.embed_content(&cleared, &[words]).await?;
+                    called = true;
+                    super::record_usage(st, "embed", e.tokens, 0, cloud.embed_cost(e.tokens))
+                        .await?;
+                    outcome.pieces = e
+                        .vectors
+                        .into_iter()
+                        .map(|vec| Piece {
+                            start: 0,
+                            len: 0,
+                            vec,
+                        })
+                        .collect();
+                }
+            }
+            outcome.vision = seen.as_ref().map(|s| (vision.model.as_str(), s));
+        }
+        Space::Clip | Space::Local => {
+            let local = ai.local.as_ref().ok_or(Fail::Paused("kein Dienst"))?;
+            let clip = local.clip.as_ref().ok_or(Fail::Paused("kein Bildmodell"))?;
+            outcome.model = &clip.model;
+            match images::read(st, hash).await.map_err(Fail::Other)? {
+                Read::Gone => return Ok(()),
+                Read::Unusable => {}
+                Read::Picture(p) => {
+                    let vec = local.embed_picture(&p).await?;
+                    outcome.pieces = vec![Piece {
+                        start: 0,
+                        len: 0,
+                        vec,
+                    }];
+                }
+            }
+        }
+    }
+    if !super::store(st, outcome).await? {
+        // Became "Nur lokal" while the cloud worked: the result is thrown away.
+        super::queue_images(st, &[h]).await?;
+        return Ok(());
+    }
+    if side == Side::Cloud && called {
         sqlx::query("UPDATE ai_state SET trial_left = trial_left - 1 WHERE trial_left > 0")
             .execute(&st.db)
             .await?;

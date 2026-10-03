@@ -1,4 +1,5 @@
-//! The search syntax (PLAN 6.5): words, „Phrasen“, `-ausschluss`, `typ:`, `in:`, `nach:`, `vor:`.
+//! The search syntax (PLAN 6.5): words, „Phrasen“, `-ausschluss`, `typ:`, `in:`, `nach:`, `vor:`,
+//! `dokument:`.
 //!
 //! Our own small parser instead of Tantivy's query language: people cannot address internal
 //! fields, and every input is valid except a few named mistakes (an unreadable date).
@@ -27,6 +28,9 @@ pub struct Parsed {
     pub after: Option<i64>,
     /// `vor:` – modified before.
     pub before: Option<i64>,
+    /// `dokument:` – kind of document recognized in a picture (`rechnung`, `vertrag` …).
+    pub docs: Vec<String>,
+    pub not_docs: Vec<String>,
 }
 
 impl Parsed {
@@ -42,7 +46,9 @@ impl Parsed {
             && self.folders.is_empty()
             && self.not_folders.is_empty()
             && self.after.is_none()
-            && self.before.is_none())
+            && self.before.is_none()
+            && self.docs.is_empty()
+            && self.not_docs.is_empty())
     }
 }
 
@@ -65,6 +71,7 @@ enum Key {
     In,
     After,
     Before,
+    Doc,
 }
 
 fn key(word: &str) -> Option<Key> {
@@ -73,6 +80,7 @@ fn key(word: &str) -> Option<Key> {
         "in" => Key::In,
         "nach" | "after" | "ab" => Key::After,
         "vor" | "before" => Key::Before,
+        "dokument" | "doc" => Key::Doc,
         _ => return None,
     })
 }
@@ -145,6 +153,8 @@ pub fn parse(q: &str) -> Result<Parsed, String> {
                 }
                 Some(Key::In) if negated => out.not_folders.push(value),
                 Some(Key::In) => out.folders.push(value),
+                Some(Key::Doc) if negated => out.not_docs.push(value.to_lowercase()),
+                Some(Key::Doc) => out.docs.push(value.to_lowercase()),
                 Some(Key::After) => out.after = Some(date(&value, "nach")?),
                 Some(Key::Before) => out.before = Some(date(&value, "vor")?),
             }
@@ -245,6 +255,12 @@ mod tests {
         assert_eq!(p.after, Some(1_735_689_600));
         assert_eq!(p.before, Some(1_772_323_200));
         assert_eq!(p.clauses, [clause("Heizung", false)]);
+        let p = parse("dokument:Rechnung -dokument:brief Heizung").unwrap();
+        assert_eq!(
+            (p.docs, p.not_docs),
+            (vec!["rechnung".to_string()], vec!["brief".to_string()])
+        );
+        assert!(parse("dokument:vertrag").unwrap().has_filters());
     }
 
     #[test]

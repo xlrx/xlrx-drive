@@ -40,6 +40,9 @@ pub struct Cursor {
     pub journal: i64,
     /// Last text sequence applied.
     pub text: i64,
+    /// Last change of a picture description applied (`ai_vision_log`).
+    #[serde(default)]
+    pub vision: i64,
 }
 
 /// Opens the index in `dir`, or creates it afresh (nothing there, damaged, other schema).
@@ -150,6 +153,16 @@ struct Text {
     text: String,
 }
 
+/// What the AI saw in a picture.
+#[derive(sqlx::FromRow)]
+struct Vision {
+    content_hash: Vec<u8>,
+    description: String,
+    tags: Vec<String>,
+    text_in_image: String,
+    doc_type: Option<String>,
+}
+
 /// Applies the next batch of changes. True if more are waiting.
 async fn round(
     db: &PgPool,
@@ -174,7 +187,15 @@ async fn round(
             .fetch_all(db)
             .await
             .map_err(|e| e.to_string())?;
-    if entries.is_empty() && texts.is_empty() {
+    let seen: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+        "SELECT seq, content_hash FROM ai_vision_log WHERE seq > $1 ORDER BY seq LIMIT $2",
+    )
+    .bind(cursor.vision)
+    .bind(BATCH)
+    .fetch_all(db)
+    .await
+    .map_err(|e| e.to_string())?;
+    if entries.is_empty() && texts.is_empty() && seen.is_empty() {
         return Ok(false);
     }
     let mut next = *cursor;
@@ -184,6 +205,9 @@ async fn round(
     if let Some((seq, _)) = texts.last() {
         next.text = *seq;
     }
+    if let Some((seq, _)) = seen.last() {
+        next.vision = *seq;
+    }
 
     let mut ids: HashSet<i64> = entries.iter().map(|e| e.node_id).collect();
     let subtrees: HashSet<i64> = entries
@@ -191,8 +215,8 @@ async fn round(
         .filter(|e| e.kind == "dir" && e.op == "move" && e.reparented != Some(false))
         .map(|e| e.node_id)
         .collect();
-    if !texts.is_empty() {
-        let hashes: Vec<Vec<u8>> = texts.into_iter().map(|(_, h)| h).collect();
+    if !texts.is_empty() || !seen.is_empty() {
+        let hashes: Vec<Vec<u8>> = texts.into_iter().chain(seen).map(|(_, h)| h).collect();
         let with_text: Vec<i64> = sqlx::query_scalar(
             "SELECT id FROM nodes WHERE content_hash = ANY($1) AND deleted_at IS NULL",
         )
@@ -356,6 +380,21 @@ async fn documents(db: &PgPool, sh: &Shared, rows: &[Row]) -> Result<Vec<Tantivy
             .map(|t| (t.hash.clone(), t))
             .collect()
     };
+    let seen: HashMap<Vec<u8>, Vision> = if hashes.is_empty() {
+        HashMap::new()
+    } else {
+        sqlx::query_as::<_, Vision>(
+            "SELECT content_hash, description, tags, text_in_image, doc_type
+               FROM ai_vision WHERE content_hash = ANY($1)",
+        )
+        .bind(&hashes)
+        .fetch_all(db)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|v| (v.content_hash.clone(), v))
+        .collect()
+    };
     let mut wanted: HashMap<String, i16> = HashMap::new();
     for r in &live {
         let Some(h) = &r.content_hash else { continue };
@@ -377,12 +416,13 @@ async fn documents(db: &PgPool, sh: &Shared, rows: &[Row]) -> Result<Vec<Tantivy
         .into_iter()
         .map(|r| {
             let text = r.content_hash.as_ref().and_then(|h| texts.get(h));
-            document(f, r, text)
+            let vision = r.content_hash.as_ref().and_then(|h| seen.get(h));
+            document(f, r, text, vision)
         })
         .collect())
 }
 
-fn document(f: &Fields, r: &Row, text: Option<&Text>) -> TantivyDocument {
+fn document(f: &Fields, r: &Row, text: Option<&Text>, vision: Option<&Vision>) -> TantivyDocument {
     let is_dir = r.kind == "dir";
     let ext = if is_dir {
         String::new()
@@ -413,6 +453,16 @@ fn document(f: &Fields, r: &Row, text: Option<&Text>) -> TantivyDocument {
         };
         for field in fields {
             d.add_text(*field, &t.text);
+        }
+    }
+    if let Some(v) = vision {
+        d.add_text(f.seen, &v.description);
+        d.add_text(f.seen, v.tags.join(", "));
+        if !v.text_in_image.is_empty() {
+            d.add_text(f.seen, &v.text_in_image);
+        }
+        if let Some(t) = &v.doc_type {
+            d.add_text(f.doc, t);
         }
     }
     d

@@ -122,6 +122,13 @@ pub struct Request {
     pub fuzzy: bool,
 }
 
+/// What snippets of a hit can come from: its text (language, text) and what the AI saw in it.
+#[derive(Clone, Debug, Default)]
+pub struct Sources {
+    pub text: Option<(Option<String>, String)>,
+    pub seen: Option<String>,
+}
+
 pub struct Found {
     /// Node ids, best first.
     pub ids: Vec<i64>,
@@ -215,6 +222,7 @@ impl Search {
             (f.text, TEXT_BOOST),
             (f.text_de, TEXT_BOOST),
             (f.text_en, TEXT_BOOST),
+            (f.seen, TEXT_BOOST),
         ] {
             let tokens = self.tokens(field, &c.text);
             let q: Box<dyn Query> = match tokens.as_slice() {
@@ -308,6 +316,12 @@ impl Search {
         if !r.parsed.not_types.is_empty() {
             not.push(self.types(&r.parsed.not_types));
         }
+        if !r.parsed.not_docs.is_empty() {
+            not.push(self.docs(&r.parsed.not_docs));
+        }
+        if !r.parsed.docs.is_empty() {
+            filters.push(self.docs(&r.parsed.docs));
+        }
         if !r.not_folders.is_empty() {
             not.push(ids(f.anc, &r.not_folders));
         }
@@ -364,6 +378,14 @@ impl Search {
             })
             .collect();
         Box::new(BooleanQuery::new(any))
+    }
+
+    /// Pictures of these kinds of document.
+    fn docs(&self, values: &[String]) -> Box<dyn Query> {
+        let f = &self.shared.fields;
+        Box::new(TermSetQuery::new(
+            values.iter().map(|v| Term::from_field_text(f.doc, v)),
+        ))
     }
 
     /// Runs a search (blocking: call from a blocking thread).
@@ -440,12 +462,8 @@ impl Search {
         }))
     }
 
-    /// Snippets of the given texts (language, text) showing where the query matched (blocking).
-    pub fn snippets(
-        &self,
-        found: &Found,
-        texts: &[Option<(Option<String>, String)>],
-    ) -> Vec<Option<Vec<Part>>> {
+    /// Snippets of the given texts showing where the query matched (blocking).
+    pub fn snippets(&self, found: &Found, texts: &[Sources]) -> Vec<Option<Vec<Part>>> {
         let f = &self.shared.fields;
         let mut generators: HashMap<Field, Option<SnippetGenerator>> = HashMap::new();
         let mut snippet = |field: Field, text: &str| -> Option<Vec<Part>> {
@@ -469,13 +487,16 @@ impl Search {
         texts
             .iter()
             .map(|t| {
-                let (lang, text) = t.as_ref()?;
-                match lang.as_deref() {
-                    Some("deu") => snippet(f.text_de, text),
-                    Some("eng") => snippet(f.text_en, text),
-                    Some(_) => snippet(f.text, text),
-                    None => snippet(f.text_de, text).or_else(|| snippet(f.text_en, text)),
-                }
+                let from_text = t
+                    .text
+                    .as_ref()
+                    .and_then(|(lang, text)| match lang.as_deref() {
+                        Some("deu") => snippet(f.text_de, text),
+                        Some("eng") => snippet(f.text_en, text),
+                        Some(_) => snippet(f.text, text),
+                        None => snippet(f.text_de, text).or_else(|| snippet(f.text_en, text)),
+                    });
+                from_text.or_else(|| snippet(f.seen, t.seen.as_deref()?))
             })
             .collect()
     }
