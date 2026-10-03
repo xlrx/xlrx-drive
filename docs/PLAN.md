@@ -1023,6 +1023,7 @@ Ziel: eigene Konten, die so sicher sind wie bei einem guten Cloud-Dienst. Jede A
   - Anmeldung über den Browser-Flow (`ASWebAuthenticationSession`, PKCE) mit Passwort + OTP **oder Passkey**. Auf dem Mac und iPhone ist das meist
     ein Touch-ID- bzw. Face-ID-Klick. Danach gibt es ein **gerätegebundenes, rotierendes Refresh-Token** im Schlüsselbund.
     Wird ein altes Token erneut benutzt, widerruft das sofort die ganze Kette.
+  - Eine **Passwortänderung** beendet alle anderen Web-Sitzungen und meldet **alle Geräte** ab; sie melden sich danach über den Browser neu an.
   - Zugriffstokens sind kurzlebig (~15 min). Pro Gerät ist alle N Tage eine erneute Bestätigung per OTP oder Passkey nötig (konfigurierbar, z.B. 30).
   - Geräteliste mit Widerruf, Benachrichtigung bei Anmeldung eines neuen Geräts.
   - **Umgesetzt (M1):** Die App öffnet `/device?challenge=…&redirect_uri=xlrx://auth&name=…&platform=…`. Nach Anmeldung (oder frischem

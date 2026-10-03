@@ -116,7 +116,7 @@ const changePassword = () =>
 	g.run(async () => {
 		await apiPost('/me/password', { password: newPassword.value });
 		newPassword.value = '';
-		notice.value = 'Passwort geändert. Andere Sitzungen wurden beendet.';
+		notice.value = 'Passwort geändert. Andere Sitzungen und alle Geräte wurden abgemeldet.';
 		await refresh();
 	});
 
@@ -208,6 +208,7 @@ function codesDone() {
 					<input v-model="newPassword" type="password" autocomplete="new-password" minlength="12" placeholder="Neues Passwort" aria-label="Neues Passwort" required />
 					<button :disabled="g.busy.value">Ändern</button>
 				</form>
+				<p class="muted small-hint">Beendet alle anderen Sitzungen und meldet alle Geräte ab (Mac, iPhone). Sie melden sich danach über den Browser neu an.</p>
 			</section>
 
 			<section>
@@ -280,6 +281,7 @@ function codesDone() {
 </template>
 
 <style scoped>
+.small-hint { margin: 8px 0 0; font-size: 12.5px; }
 .notice { display: flex; align-items: center; gap: 8px; }
 .profile { display: flex; align-items: center; gap: 14px; padding: 16px 0; }
 .avatar.big { width: 52px; height: 52px; font-size: 20px; font-weight: 400; }

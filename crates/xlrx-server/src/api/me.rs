@@ -51,17 +51,21 @@ pub async fn change_password(
         .check_policy(&req.password, &me.username)
         .map_err(ApiError::BadRequest)?;
     let hash = st.hash_password(req.password).await?;
+    // All at once: anyone who knew the old password is locked out afterwards – other browser
+    // sessions end and every device (Mac, iPhone) has to sign in again through the browser.
+    let mut tx = st.db.begin().await?;
     sqlx::query("UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1")
         .bind(me.id)
         .bind(hash)
-        .execute(&st.db)
+        .execute(&mut *tx)
         .await?;
-    // End other sessions: anyone who knew the old password is locked out afterwards.
     sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND id <> $2")
         .bind(me.id)
         .bind(me.session()?)
-        .execute(&st.db)
+        .execute(&mut *tx)
         .await?;
+    crate::auth::device::revoke_all(&mut tx, me.id, "password_changed").await?;
+    tx.commit().await?;
     audit::log(
         &st.db,
         Some(me.id),

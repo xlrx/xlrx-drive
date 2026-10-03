@@ -397,6 +397,28 @@ async fn abmelden_widerrufen_und_zuruecksetzen() {
         "revoked"
     );
 
+    // Password changed: all devices out; the browser that changed it stays signed in.
+    let (mut app, t) = new_device(&env, &mut web, "Laptop").await;
+    let r = web
+        .post(
+            "/api/me/password",
+            json!({"password": "Ein ganz neues Passwort 2026"}),
+        )
+        .await;
+    assert_eq!(r.status, 204);
+    assert_eq!(app.get("/api/roots").await.status, 401);
+    assert_eq!(
+        reason(&refresh(&mut app, &s(&t, "refresh_token")).await),
+        "revoked"
+    );
+    assert_eq!(web.get("/api/roots").await.status, 200);
+    let why: String = sqlx::query_scalar("SELECT revoked_reason FROM devices WHERE id = $1")
+        .bind(t["device_id"].as_i64().unwrap())
+        .fetch_one(&env.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(why, "password_changed");
+
     // Second factors reset by an admin: all devices out.
     let (mut app, t) = new_device(&env, &mut web, "iPad").await;
     xlrx_server::api::admin::reset_user_factors(&env.state.db, user_id(&env, "fritz").await)
