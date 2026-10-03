@@ -1,11 +1,12 @@
 <script setup lang="ts">
 // Actions of a file or folder (as in the design): the "⋯" button opens a sheet from the bottom on
 // narrow screens, a menu beside the button on wide ones.
-const props = withDefaults(defineProps<{ node: NodeInfo; here?: boolean; canEdit?: boolean }>(), {
+const props = withDefaults(defineProps<{ node: NodeInfo; here?: boolean; canEdit?: boolean; starred?: boolean }>(), {
 	here: false,
-	canEdit: true
+	canEdit: true,
+	starred: false
 });
-const emit = defineEmits<{ rename: []; move: []; remove: []; share: []; dataClass: [] }>();
+const emit = defineEmits<{ rename: []; move: []; remove: []; share: []; dataClass: []; star: [] }>();
 const open = ref(false);
 const button = ref<HTMLButtonElement | null>(null);
 const panel = ref<HTMLElement | null>(null);
@@ -35,12 +36,13 @@ function close() {
 	open.value = false;
 	button.value?.focus();
 }
-function pick(what: 'rename' | 'move' | 'remove' | 'share' | 'dataClass') {
+function pick(what: 'rename' | 'move' | 'remove' | 'share' | 'dataClass' | 'star') {
 	open.value = false;
 	if (what === 'rename') emit('rename');
 	else if (what === 'move') emit('move');
 	else if (what === 'share') emit('share');
 	else if (what === 'dataClass') emit('dataClass');
+	else if (what === 'star') emit('star');
 	else emit('remove');
 }
 function onKey(e: KeyboardEvent) {
@@ -111,6 +113,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
 				</NuxtLink>
 				<button role="menuitem" type="button" class="item" @click="pick('share')">
 					<Icon name="shared" /><span>Teilen</span>
+				</button>
+				<button role="menuitem" type="button" class="item" @click="pick('star')">
+					<Icon name="star" :filled="starred" /><span>{{ starred ? 'Markierung entfernen' : 'Markieren' }}</span>
 				</button>
 				<button v-if="!isFile" role="menuitem" type="button" class="item" @click="pick('dataClass')">
 					<Icon name="lock" /><span>Datenklasse</span>

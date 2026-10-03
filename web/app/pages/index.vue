@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// Start (as in the design): date and greeting, suggestions with their reason, the files changed
-// last, what happened lately, hints – and the landscape.
+// Start (as in the design): date and greeting, suggestions with their reason, what I starred, the
+// files changed last, what happened lately, hints – and the landscape.
 type Recent = NodeInfo & { folder: string };
 const { me } = useSession();
 const clock = useClock();
@@ -8,6 +8,7 @@ const today = computed(() => clock.value.toLocaleDateString('de-DE', { weekday: 
 const recent = ref<Recent[] | null>(null);
 const activity = ref<ActivityGroup[] | null>(null);
 const suggested = ref<StartSuggestion[]>([]);
+const starred = ref<Recent[]>([]);
 const landscape = ref(true);
 const uploads = useUploads();
 
@@ -21,6 +22,11 @@ async function load() {
 		suggested.value = await apiGet<StartSuggestion[]>('/suggestions');
 	} catch {
 		suggested.value = [];
+	}
+	try {
+		starred.value = (await apiGet<Recent[]>('/starred')).slice(0, 12);
+	} catch {
+		starred.value = [];
 	}
 	try {
 		activity.value = (await apiGet<ActivityPage>('/activity?limit=100')).groups.slice(0, 5);
@@ -69,6 +75,27 @@ const ext = (name: string) => {
 							</span>
 							<span class="name">{{ s.name }}</span>
 							<span :id="`reason-${s.id}`" class="why reason">{{ suggestionReason(s.reason) }}</span>
+						</NuxtLink>
+					</li>
+				</ul>
+			</section>
+		</template>
+
+		<template v-if="starred.length">
+			<hr />
+			<section class="recent">
+				<div class="title"><h2>Markiert</h2></div>
+				<ul class="cards">
+					<li v-for="r in starred" :key="r.id">
+						<NuxtLink :to="`/files/${r.id}`" class="card-link" :aria-describedby="`star-${r.id}`">
+							<span class="preview">
+								<img v-if="thumb(r)" :src="thumb(r)!" alt="" loading="lazy" @error="failed(r)" />
+								<span v-else-if="r.kind === 'dir'" class="folder-mark" aria-hidden="true"><Icon name="folder" :size="40" :stroke="1.1" /></span>
+								<span v-else class="doc" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></span>
+								<span v-if="r.kind === 'file' && ext(r.name)" class="tag ext" aria-hidden="true">{{ ext(r.name) }}</span>
+							</span>
+							<span class="name">{{ r.name }}</span>
+							<span :id="`star-${r.id}`" class="why" aria-hidden="true">{{ r.folder.split('/').join(' › ') }}</span>
 						</NuxtLink>
 					</li>
 				</ul>

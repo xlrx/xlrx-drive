@@ -126,7 +126,7 @@ async fn vorschlaege_mit_begruendung() {
         return;
     };
     let (mut klaus, root_id, _, dir) = signed_in(&env, "klaus").await;
-    for f in ["A", "B", "C", "E", "F", "G"] {
+    for f in ["A", "B", "C", "E", "F", "G", "H"] {
         write(&dir.join(format!("Haus/{f}.txt")), f.as_bytes());
     }
     let home = root(&env, root_id).await;
@@ -142,6 +142,7 @@ async fn vorschlaege_mit_begruendung() {
         let n = n.to_owned();
         async move { node(env, home, &format!("Haus/{n}.txt")).await.id }
     };
+    let h = id("H").await;
     let (a, b, c, e, f, g) = (
         id("A").await,
         id("B").await,
@@ -201,6 +202,24 @@ async fn vorschlaege_mit_begruendung() {
         )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
+    // H: changed by bert, but klaus has opened it since – nothing new for him there.
+    let cur = klaus.get(&format!("/api/nodes/{h}")).await.ok().clone();
+    let r = bert
+        .send_bytes(
+            "PUT",
+            &format!("/api/nodes/{h}/content?base_rev={}", cur["rev"]),
+            b"H2".to_vec(),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    sqlx::query(
+        "UPDATE journal SET at = now() - interval '1 hour' WHERE node_id = $1 AND op = 'update'",
+    )
+    .bind(h)
+    .execute(&env.db.pool)
+    .await
+    .unwrap();
+    opened_ago(&env, "klaus", h, "10 minutes").await;
     // D: bert shares a file of his own with klaus.
     write(&bert_dir.join("D.txt"), b"D");
     roots::scan(&env.state, &root(&env, bert_root).await)
@@ -241,6 +260,10 @@ async fn vorschlaege_mit_begruendung() {
         (Some("changed"), Some("bert Test"))
     );
     assert_eq!(
+        r["H.txt"]["kind"], "opened",
+        "Änderung vor dem letzten Öffnen ist nichts Neues"
+    );
+    assert_eq!(
         (r["D.txt"]["kind"].as_str(), r["D.txt"]["by"].as_str()),
         (Some("shared"), Some("bert Test"))
     );
@@ -273,12 +296,16 @@ async fn vorschlaege_mit_begruendung() {
     // Bert: what he opened of klaus's is gone with the share.
     bert.post(&format!("/api/nodes/{c}/opened"), json!({}))
         .await;
-    assert!(reasons(&bert.get("/api/suggestions").await.ok().clone()).contains_key("C.txt"));
+    let for_bert = reasons(&bert.get("/api/suggestions").await.ok().clone());
+    assert!(for_bert.contains_key("C.txt"));
+    // Private: what klaus opened never counts for bert, though he may see it.
+    assert!(
+        !for_bert.contains_key("A.txt") && !for_bert.contains_key("B.txt"),
+        "{for_bert:?}"
+    );
     klaus
         .send("DELETE", &format!("/api/shares/{}", share["id"]), None)
         .await;
     assert!(!reasons(&bert.get("/api/suggestions").await.ok().clone()).contains_key("C.txt"));
-    // Private: klaus's openings never show for bert.
-    assert!(!reasons(&bert.get("/api/suggestions").await.ok().clone()).contains_key("A.txt"));
     env.finish().await;
 }

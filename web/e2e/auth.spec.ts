@@ -505,10 +505,20 @@ async function publicLinks(page: Page, browser: Browser) {
 	await expect(page.getByText(/Du hast „Projekte“ mit Bert zum Bearbeiten geteilt/)).toBeVisible();
 	await expect(page.getByText(/hochgeladen|hinzugefügt/).filter({ hasText: 'Du hast' })).toHaveCount(0);
 
+	// Starred: shown on the start page.
+	await page.getByRole('link', { name: 'Dateien', exact: true }).click();
+	await page.getByRole('button', { name: 'Aktionen für Projekte' }).click();
+	await page.getByRole('menuitem', { name: 'Markieren' }).click();
+	await page.getByRole('button', { name: 'Aktionen für Projekte' }).click();
+	await expect(page.getByRole('menuitem', { name: 'Markierung entfernen' })).toBeVisible();
+	await page.keyboard.press('Escape');
+
 	// The start page suggests what was opened, and says why.
 	await page.getByRole('link', { name: 'Start', exact: true }).first().click();
 	await expect(page.getByRole('heading', { name: 'Vorgeschlagen' })).toBeVisible();
 	await expect(page.getByText(/Du hast das .* geöffnet|Oft geöffnet/).first()).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Markiert' })).toBeVisible();
+	await expect(page.getByRole('link', { name: 'Projekte', exact: true })).toBeVisible();
 }
 
 /** Data class of a folder: "Nur lokal" until allowed on purpose; files inside and the administration show it. */

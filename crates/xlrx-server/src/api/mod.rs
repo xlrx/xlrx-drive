@@ -11,6 +11,7 @@ pub mod notifications;
 pub mod search;
 pub mod setup;
 pub mod shares;
+pub mod stars;
 pub mod suggest;
 pub mod sync;
 pub mod uploads;
@@ -127,6 +128,8 @@ pub fn router(state: AppState) -> Router {
         .route("/activity", get(activity::activity))
         .route("/suggestions", get(suggest::suggestions))
         .route("/notifications", get(notifications::list))
+        .route("/starred", get(stars::list))
+        .route("/nodes/{id}/star", put(stars::star).delete(stars::unstar))
         .route("/notifications/read", post(notifications::read))
         .route("/suggestions/opened", post(suggest::suggestion_opened))
         .route("/nodes/{id}/opened", post(suggest::opened))

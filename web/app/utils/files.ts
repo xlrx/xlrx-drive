@@ -41,6 +41,8 @@ export interface NodeInfo {
 export interface ChildInfo extends NodeInfo {
 	/** A data class set on this folder itself. */
 	data_class?: DataClass;
+	/** Starred by me ("Markiert"). */
+	starred?: boolean;
 }
 
 /** "Nur lokal" or "Cloud erlaubt" (PLAN 7.4). */
@@ -76,6 +78,7 @@ export interface NodeDetail extends NodeInfo {
 	/** Seen through a share (not as owner or member of the whole root). */
 	shared: boolean;
 	data_class: DataClassInfo;
+	starred: boolean;
 }
 
 /** A person or group something is shared with. */

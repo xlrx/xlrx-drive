@@ -1201,6 +1201,8 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
     ankommen (je Link und Stunde zu einer Meldung gesammelt). Live über den bestehenden Ereignisstrom (`event: notification` mit der
     Zahl ungelesener), auch in anderen Fenstern; Öffnen der Liste markiert gelesen. Nur Meldungen zu Elementen, die man noch sehen darf.
   - Bilder, deren Vorschaubild nicht geht (beschädigt), zeigen überall das Dateisymbol statt eines kaputten Bildes.
+  - „Markiert“ (8.2): Sterne je Person, privat; in den Aktionen jeder Datei und jedes Ordners, als Abschnitt auf der Startseite; nur was
+    noch da ist und gesehen werden darf.
   - Noch nicht: E-Mail bei neuen Freigaben (SMTP, einstellbar je Person) und Push auf iOS/Mac (APNs, mit den Apps ab M5).
 
 **Nächster Schritt:** Inbetriebnahme auf dem DS918+ mit den Spike-Messungen (M0) und dem M1-Nachweis mit den echten Daten.

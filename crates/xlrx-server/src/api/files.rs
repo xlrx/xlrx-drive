@@ -158,6 +158,8 @@ pub struct NodeDetail {
     pub shared: bool,
     /// May its content leave the home network (PLAN 7.4)?
     pub data_class: DataClassInfo,
+    /// Starred by the person ("Markiert").
+    pub starred: bool,
 }
 
 #[derive(Serialize)]
@@ -234,6 +236,9 @@ pub async fn get_node(
         role: a.role,
         shared: !whole,
         data_class,
+        starred: !super::stars::starred(&st, me.id, &[a.node.id])
+            .await?
+            .is_empty(),
     }))
 }
 
@@ -244,6 +249,9 @@ pub struct ChildInfo {
     /// A data class set on this folder itself (badge "NUR LOKAL").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_class: Option<Class>,
+    /// Starred by the person.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub starred: bool,
 }
 
 pub async fn children(
@@ -264,11 +272,13 @@ pub async fn children(
     .await?;
     let ids: Vec<i64> = rows.iter().map(|n| n.id).collect();
     let classes = data_class::explicit(&st.db, &ids).await?;
+    let stars = super::stars::starred(&st, me.id, &ids).await?;
     Ok(Json(
         rows.iter()
             .map(|n| ChildInfo {
                 node: NodeInfo::from(n),
                 data_class: classes.get(&n.id).copied(),
+                starred: stars.contains(&n.id),
             })
             .collect(),
     ))

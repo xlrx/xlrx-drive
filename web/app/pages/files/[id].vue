@@ -245,6 +245,12 @@ async function newVersion(e: Event) {
 	});
 }
 
+/** "Markiert" – only for me. */
+const toggleStar = (id: number, starred: boolean) =>
+	act(async () => {
+		await api(starred ? 'DELETE' : 'PUT', `/nodes/${id}/star`);
+	});
+
 const meta = (c: NodeInfo) =>
 	c.kind === 'file' ? [formatShortDate(c.mtime), formatSize(c.size)].filter(Boolean).join(' · ') : formatShortDate(c.mtime) || 'Ordner';
 const extOf = (name: string) => {
@@ -302,7 +308,7 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 				<a class="button primary" :href="contentUrl(node.id)" download><Icon name="download" :size="18" />Herunterladen</a>
 				<a v-if="opensInBrowser(node.mime)" class="button" :href="contentUrl(node.id, true)" target="_blank" rel="noopener"><Icon name="openIn" :size="18" />In neuem Tab</a>
 				<span class="spacer"></span>
-				<RowMenu :node="node" here :can-edit="editable" @share="dialog = { kind: 'share', node }" @rename="dialog = { kind: 'rename', node }" @move="dialog = { kind: 'move', node }" @remove="dialog = { kind: 'remove', node }" />
+				<RowMenu :node="node" here :can-edit="editable" :starred="node.starred" @star="toggleStar(node.id, node.starred)" @share="dialog = { kind: 'share', node }" @rename="dialog = { kind: 'rename', node }" @move="dialog = { kind: 'move', node }" @remove="dialog = { kind: 'remove', node }" />
 			</div>
 		</template>
 
@@ -334,11 +340,11 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 					<NuxtLink :to="`/files/${c.id}`" class="open" :aria-describedby="`meta-${c.id}`">
 						<FileMark :node="c" />
 						<span class="text-col">
-							<span class="name">{{ c.name }}</span>
+							<span class="name">{{ c.name }}<Icon v-if="c.starred" name="star" :size="12" filled class="star" /></span>
 							<span :id="`meta-${c.id}`" class="sub" aria-hidden="true"><span v-if="c.data_class" class="tag klass"><Icon :name="c.data_class === 'local' ? 'lock' : 'cloud'" :size="10" :stroke="2" />{{ CLASS_LABEL[c.data_class] }}</span>{{ meta(c) }}</span>
 						</span>
 					</NuxtLink>
-					<RowMenu :node="c" :can-edit="editable" @share="dialog = { kind: 'share', node: c }" @rename="dialog = { kind: 'rename', node: c }" @move="dialog = { kind: 'move', node: c }" @remove="dialog = { kind: 'remove', node: c }" @data-class="dialog = { kind: 'class', id: c.id }" />
+					<RowMenu :node="c" :can-edit="editable" @share="dialog = { kind: 'share', node: c }" @rename="dialog = { kind: 'rename', node: c }" @move="dialog = { kind: 'move', node: c }" @remove="dialog = { kind: 'remove', node: c }" @data-class="dialog = { kind: 'class', id: c.id }" :starred="!!c.starred" @star="toggleStar(c.id, !!c.starred)" />
 				</li>
 			</ul>
 			<ul v-else-if="sorted.length" class="tiles">
@@ -350,7 +356,7 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 						</span>
 						<span class="name">{{ c.name }}</span>
 					</NuxtLink>
-					<span class="foot"><span class="sub"><span v-if="c.data_class" class="tag klass"><Icon :name="c.data_class === 'local' ? 'lock' : 'cloud'" :size="10" :stroke="2" />{{ CLASS_LABEL[c.data_class] }}</span>{{ meta(c) }}</span><RowMenu :node="c" :can-edit="editable" @share="dialog = { kind: 'share', node: c }" @rename="dialog = { kind: 'rename', node: c }" @move="dialog = { kind: 'move', node: c }" @remove="dialog = { kind: 'remove', node: c }" @data-class="dialog = { kind: 'class', id: c.id }" /></span>
+					<span class="foot"><span class="sub"><span v-if="c.data_class" class="tag klass"><Icon :name="c.data_class === 'local' ? 'lock' : 'cloud'" :size="10" :stroke="2" />{{ CLASS_LABEL[c.data_class] }}</span>{{ meta(c) }}</span><RowMenu :node="c" :can-edit="editable" @share="dialog = { kind: 'share', node: c }" @rename="dialog = { kind: 'rename', node: c }" @move="dialog = { kind: 'move', node: c }" @remove="dialog = { kind: 'remove', node: c }" @data-class="dialog = { kind: 'class', id: c.id }" :starred="!!c.starred" @star="toggleStar(c.id, !!c.starred)" /></span>
 				</li>
 			</ul>
 			<p v-else-if="!loading" class="muted empty">
@@ -458,6 +464,7 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 .meta { margin: 0; font-size: 13px; color: var(--muted); }
 .class-link { display: inline-flex; align-items: center; gap: 4px; min-height: 0; padding: 0; font-size: 13px; color: var(--ink-3); vertical-align: baseline; }
 .klass { margin-right: 6px; vertical-align: 1px; }
+.star { display: inline-block; margin-left: 6px; vertical-align: 0; color: var(--ink-3); }
 .tools { display: flex; gap: 8px; }
 .file-title { font-size: 23px; line-height: 1.2; letter-spacing: -0.02em; margin: 4px 0 6px; }
 .file-actions { margin: 14px 0 18px; }
