@@ -717,3 +717,57 @@ pub async fn update_space(
     .await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct DataClassEntry {
+    pub root: String,
+    pub node_id: i64,
+    pub path: String,
+    pub class: String,
+    pub set_by: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub set_at: OffsetDateTime,
+}
+
+#[derive(Serialize)]
+pub struct DataClassOverview {
+    /// For folders without any setting above them.
+    pub default: crate::files::data_class::Class,
+    pub entries: Vec<DataClassEntry>,
+}
+
+/// Where data may go (PLAN 7.4, "Verzeichnis der Verarbeitungstätigkeiten"): every folder with a
+/// setting of its own, and the default for all others.
+pub async fn data_classes(
+    State(st): State<AppState>,
+    me: CurrentUser,
+) -> ApiResult<Json<DataClassOverview>> {
+    me.require_admin()?;
+    let entries = sqlx::query_as(
+        "WITH RECURSIVE up AS (
+            SELECT d.node_id AS start, n.id, n.parent_id, n.name, 0 AS depth
+              FROM data_classes d JOIN nodes n ON n.id = d.node_id
+            UNION ALL
+            SELECT up.start, p.id, p.parent_id, p.name, up.depth + 1
+              FROM nodes p JOIN up ON p.id = up.parent_id WHERE up.depth < 1000
+         ), paths AS (
+            SELECT start,
+                   string_agg(name, '/' ORDER BY depth DESC) FILTER (WHERE parent_id IS NOT NULL) AS path
+              FROM up GROUP BY start
+         )
+         SELECT r.name AS root, d.node_id, coalesce(p.path, '') AS path, d.class,
+                u.display_name AS set_by, d.set_at
+           FROM data_classes d
+           JOIN nodes n ON n.id = d.node_id AND n.deleted_at IS NULL
+           JOIN roots r ON r.id = n.root_id
+           LEFT JOIN paths p ON p.start = d.node_id
+           LEFT JOIN users u ON u.id = d.set_by
+          ORDER BY r.name, path",
+    )
+    .fetch_all(&st.db)
+    .await?;
+    Ok(Json(DataClassOverview {
+        default: st.cfg.default_data_class,
+        entries,
+    }))
+}

@@ -37,6 +37,36 @@ export interface NodeInfo {
 	mime: string | null;
 }
 
+/** An entry of a folder listing. */
+export interface ChildInfo extends NodeInfo {
+	/** A data class set on this folder itself. */
+	data_class?: DataClass;
+}
+
+/** "Nur lokal" or "Cloud erlaubt" (PLAN 7.4). */
+export type DataClass = 'local' | 'cloud';
+
+export interface DataClassInfo {
+	class: DataClass;
+	/** Set on this folder itself. */
+	explicit: boolean;
+	/** Inherited from this folder (if I can see it). */
+	from: { id: number; name: string } | null;
+	/** Nothing set anywhere above: the server's default. */
+	default: boolean;
+	can_change: boolean;
+}
+
+export const CLASS_LABEL: Record<DataClass, string> = { local: 'Nur lokal', cloud: 'Cloud erlaubt' };
+
+/** Where the data class of a node comes from, in words. */
+export function classSource(d: DataClassInfo): string {
+	if (d.explicit) return 'für diesen Ordner festgelegt';
+	if (d.from) return `vererbt von „${d.from.name}“`;
+	if (d.default) return 'Voreinstellung des Servers';
+	return 'vererbt von einem Ordner darüber';
+}
+
 export interface NodeDetail extends NodeInfo {
 	/** From the highest folder I can see (root directory, or the shared folder) down to the node. */
 	path: { id: number; name: string }[];
@@ -45,6 +75,7 @@ export interface NodeDetail extends NodeInfo {
 	role: Role;
 	/** Seen through a share (not as owner or member of the whole root). */
 	shared: boolean;
+	data_class: DataClassInfo;
 }
 
 /** A person or group something is shared with. */
@@ -113,8 +144,9 @@ export function formatSize(bytes: number | null): string {
 	return `${sizeFormat.format(v)} ${units[i]}`;
 }
 
-export const contentUrl = (id: number, inline = false) =>
-	`/api/nodes/${id}/content${inline ? '?inline=true' : ''}`;
+/** `base`: `/api` when signed in, `/api/public/{token}` through a public link. */
+export const contentUrl = (id: number, inline = false, base = '/api') =>
+	`${base}/nodes/${id}/content${inline ? '?inline=true' : ''}`;
 
 export type PreviewKind = 'image' | 'video' | 'audio' | 'pdf' | 'text' | 'office' | null;
 
@@ -166,9 +198,13 @@ export function opensInBrowser(mime: string | null): boolean {
 const THUMB_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff']);
 
 /** Thumbnail address; with the revision, so the browser may keep it until the content changes. */
-export function thumbUrl(node: Pick<NodeInfo, 'id' | 'kind' | 'mime' | 'rev'>, size: 64 | 256 | 1024): string | null {
+export function thumbUrl(
+	node: Pick<NodeInfo, 'id' | 'kind' | 'mime' | 'rev'>,
+	size: 64 | 256 | 1024,
+	base = '/api'
+): string | null {
 	return node.kind === 'file' && node.mime && THUMB_TYPES.has(node.mime)
-		? `/api/nodes/${node.id}/thumbnail?s=${size}&v=${node.rev}`
+		? `${base}/nodes/${node.id}/thumbnail?s=${size}&v=${node.rev}`
 		: null;
 }
 
@@ -280,3 +316,51 @@ export const sameName = (a: string, b: string) =>
 
 /** Answer to "a file of that name exists already". */
 export type ConflictChoice = 'replace' | 'keep_both' | 'skip';
+
+/** Public links (PLAN 9.2). */
+export type LinkKind = 'view' | 'download' | 'upload' | 'edit';
+
+export const LINK_KIND_LABEL: Record<LinkKind, string> = {
+	view: 'Ansehen',
+	download: 'Herunterladen',
+	upload: 'Nur hochladen',
+	edit: 'Bearbeiten'
+};
+
+export const LINK_KIND_HINT: Record<LinkKind, string> = {
+	view: 'Wer den Link hat, kann ansehen – ohne Konto.',
+	download: 'Wer den Link hat, kann ansehen und herunterladen – ohne Konto.',
+	upload: 'Wer den Link hat, kann Dateien in diesen Ordner legen, sieht aber nicht, was darin ist.',
+	edit: 'Wer den Link hat, kann herunterladen, Dateien hinzufügen und neue Fassungen hochladen. Löschen und Umbenennen geht nicht; alte Fassungen bleiben als Versionen.'
+};
+
+export interface LinkInfo {
+	id: number;
+	url: string | null;
+	kind: LinkKind;
+	password: boolean;
+	expires_at: string | null;
+	expired: boolean;
+	max_downloads: number | null;
+	downloads: number;
+	created_by: string | null;
+	created_at: string;
+}
+
+/** What a public link shows to someone without an account. */
+export interface PublicInfo {
+	kind: LinkKind;
+	/** A password is needed first. */
+	locked: boolean;
+	node: NodeInfo | null;
+	owner: string | null;
+	expires_at: string | null;
+	can: { browse: boolean; download: boolean; upload: boolean; replace: boolean };
+	max_upload: number;
+	downloads_left: number | null;
+}
+
+export interface PublicNode extends NodeInfo {
+	/** From the link's item down to this one. */
+	path: { id: number; name: string }[];
+}

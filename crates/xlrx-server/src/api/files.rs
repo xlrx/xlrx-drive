@@ -12,10 +12,11 @@ use time::OffsetDateTime;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
 
-use crate::auth::session::CurrentUser;
+use crate::auth::session::{ClientInfo, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::files::access::{self, Role, Scope};
 use crate::files::content::{self as file_content, Target, VersionInfo};
+use crate::files::data_class::{self, Class};
 use crate::files::db::{self, NODE_COLS, NodeRow, RootRow};
 use crate::files::ops::{self, TrashItem};
 use crate::files::{roots, thumbs};
@@ -155,6 +156,21 @@ pub struct NodeDetail {
     pub role: Role,
     /// Seen through a share, not as owner or member of the whole root.
     pub shared: bool,
+    /// May its content leave the home network (PLAN 7.4)?
+    pub data_class: DataClassInfo,
+}
+
+#[derive(Serialize)]
+pub struct DataClassInfo {
+    pub class: Class,
+    /// Set on this item itself.
+    pub explicit: bool,
+    /// The folder it is inherited from, if the person can see that folder.
+    pub from: Option<Crumb>,
+    /// No folder says anything: the server's default applies.
+    pub default: bool,
+    /// May the person change it (folders they manage)?
+    pub can_change: bool,
 }
 
 #[derive(Serialize)]
@@ -178,7 +194,7 @@ pub async fn get_node(
         .await?
         .remove(&a.node.id)
         .unwrap_or_default();
-    let path = chain
+    let path: Vec<Crumb> = chain
         .into_iter()
         .enumerate()
         .map(|(i, (id, name))| Crumb {
@@ -191,20 +207,50 @@ pub async fn get_node(
             },
         })
         .collect();
+    let eff = data_class::effective(&st.db, st.cfg.default_data_class, &[a.node.id])
+        .await?
+        .remove(&a.node.id)
+        .unwrap_or(data_class::Effective {
+            class: st.cfg.default_data_class,
+            from: None,
+        });
+    let data_class = DataClassInfo {
+        class: eff.class,
+        explicit: eff.from == Some(a.node.id),
+        // Only a folder the person can see is named; a setting further up stays anonymous.
+        from: eff.from.and_then(|f| {
+            path.iter().find(|c| c.id == f).map(|c| Crumb {
+                id: c.id,
+                name: c.name.clone(),
+            })
+        }),
+        default: eff.from.is_none(),
+        can_change: a.node.is_dir() && a.role >= Role::Manager,
+    };
     Ok(Json(NodeDetail {
         node: NodeInfo::from(&a.node),
         path,
         root_id: a.root.id,
         role: a.role,
         shared: !whole,
+        data_class,
     }))
+}
+
+#[derive(Serialize)]
+pub struct ChildInfo {
+    #[serde(flatten)]
+    pub node: NodeInfo,
+    /// A data class set on this folder itself (badge "NUR LOKAL").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_class: Option<Class>,
 }
 
 pub async fn children(
     State(st): State<AppState>,
     me: CurrentUser,
     Path(id): Path<i64>,
-) -> ApiResult<Json<Vec<NodeInfo>>> {
+) -> ApiResult<Json<Vec<ChildInfo>>> {
     let (node, _) = visible(&st, &me, id).await?;
     if !node.is_dir() {
         return Err(ApiError::bad("Kein Ordner."));
@@ -216,7 +262,16 @@ pub async fn children(
     .bind(node.id)
     .fetch_all(&st.db)
     .await?;
-    Ok(Json(rows.iter().map(NodeInfo::from).collect()))
+    let ids: Vec<i64> = rows.iter().map(|n| n.id).collect();
+    let classes = data_class::explicit(&st.db, &ids).await?;
+    Ok(Json(
+        rows.iter()
+            .map(|n| ChildInfo {
+                node: NodeInfo::from(n),
+                data_class: classes.get(&n.id).copied(),
+            })
+            .collect(),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -724,4 +779,56 @@ pub async fn restore_version(
 ) -> ApiResult<Json<NodeInfo>> {
     let node = file_content::restore_version(&st, me.id, id).await?;
     Ok(Json(NodeInfo::from(&node)))
+}
+
+#[derive(Deserialize)]
+pub struct DataClassReq {
+    /// "cloud", "local", or "inherit" (as the folder above).
+    pub class: String,
+}
+
+/// Sets the data class of a folder: whoever manages it, with a fresh second factor (PLAN 16.1).
+pub async fn set_data_class(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    client: ClientInfo,
+    Path(id): Path<i64>,
+    Json(req): Json<DataClassReq>,
+) -> ApiResult<Json<NodeDetail>> {
+    let a = access::require(&st.db, me.id, id, Role::Manager).await?;
+    if a.node.deleted_at.is_some() {
+        return Err(ApiError::NotFound);
+    }
+    if !a.node.is_dir() {
+        return Err(ApiError::bad(
+            "Die Datenklasse gilt für Ordner und alles darin.",
+        ));
+    }
+    me.require_step_up()?;
+    let class = match req.class.as_str() {
+        "inherit" => None,
+        c => Some(Class::parse(c).ok_or_else(|| ApiError::bad("Unbekannte Datenklasse."))?),
+    };
+    let default = st.cfg.default_data_class;
+    let before = data_class::effective(&st.db, default, &[id])
+        .await?
+        .get(&id)
+        .map(|e| e.class);
+    data_class::set(&st.db, id, class, me.id).await?;
+    let after = data_class::effective(&st.db, default, &[id])
+        .await?
+        .get(&id)
+        .map(|e| e.class);
+    // Becoming "local" will also have to remove what cloud services produced for it (M4:
+    // vectors, image descriptions, outside cache); the log keeps the change either way.
+    crate::audit::log(
+        &st.db,
+        Some(me.id),
+        None,
+        "data_class_changed",
+        Some(&client.ip),
+        serde_json::json!({ "node": id, "set": class, "before": before, "after": after }),
+    )
+    .await?;
+    get_node(State(st), me, Path(id)).await
 }

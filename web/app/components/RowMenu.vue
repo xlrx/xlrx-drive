@@ -5,7 +5,7 @@ const props = withDefaults(defineProps<{ node: NodeInfo; here?: boolean; canEdit
 	here: false,
 	canEdit: true
 });
-const emit = defineEmits<{ rename: []; move: []; remove: []; share: [] }>();
+const emit = defineEmits<{ rename: []; move: []; remove: []; share: []; dataClass: [] }>();
 const open = ref(false);
 const button = ref<HTMLButtonElement | null>(null);
 const panel = ref<HTMLElement | null>(null);
@@ -35,11 +35,12 @@ function close() {
 	open.value = false;
 	button.value?.focus();
 }
-function pick(what: 'rename' | 'move' | 'remove' | 'share') {
+function pick(what: 'rename' | 'move' | 'remove' | 'share' | 'dataClass') {
 	open.value = false;
 	if (what === 'rename') emit('rename');
 	else if (what === 'move') emit('move');
 	else if (what === 'share') emit('share');
+	else if (what === 'dataClass') emit('dataClass');
 	else emit('remove');
 }
 function onKey(e: KeyboardEvent) {
@@ -110,6 +111,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
 				</NuxtLink>
 				<button role="menuitem" type="button" class="item" @click="pick('share')">
 					<Icon name="shared" /><span>Teilen</span>
+				</button>
+				<button v-if="!isFile" role="menuitem" type="button" class="item" @click="pick('dataClass')">
+					<Icon name="lock" /><span>Datenklasse</span>
 				</button>
 				<button v-if="canEdit" role="menuitem" type="button" class="item" @click="pick('rename')">
 					<Icon name="edit" /><span>Umbenennen</span>

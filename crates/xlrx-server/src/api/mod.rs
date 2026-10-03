@@ -98,6 +98,7 @@ pub fn router(state: AppState) -> Router {
             get(admin::list_spaces).post(admin::create_space),
         )
         .route("/admin/spaces/{id}", put(admin::update_space))
+        .route("/admin/data-classes", get(admin::data_classes))
         .route("/admin/jobs/retry", post(admin::retry_jobs))
         .layer(middleware::from_fn(browser_only));
 
@@ -116,6 +117,7 @@ pub fn router(state: AppState) -> Router {
                 .delete(files::delete_node),
         )
         .route("/nodes/{id}/children", get(files::children))
+        .route("/nodes/{id}/data-class", put(files::set_data_class))
         .route("/nodes/{id}/thumbnail", get(files::thumbnail))
         .route("/recent", get(files::recent))
         .route("/people", get(shares::people))

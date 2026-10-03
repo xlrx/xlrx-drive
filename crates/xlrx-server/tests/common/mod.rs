@@ -107,6 +107,7 @@ pub fn config() -> Config {
         tesseract: "tesseract".into(),
         ocr_langs: "deu+eng".into(),
         extract_workers: 1,
+        default_data_class: xlrx_server::files::data_class::Class::Local,
     }
 }
 

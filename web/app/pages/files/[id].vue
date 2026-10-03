@@ -8,7 +8,7 @@ const folder = useFolder();
 const uploads = useUploads();
 
 const node = ref<NodeDetail | null>(null);
-const children = ref<NodeInfo[]>([]);
+const children = ref<ChildInfo[]>([]);
 const versions = ref<VersionInfo[]>([]);
 const root = ref<RootInfo | null>(null);
 const loading = ref(true);
@@ -25,7 +25,8 @@ type Dialog =
 	| { kind: 'rename'; node: NodeInfo }
 	| { kind: 'move'; node: NodeInfo }
 	| { kind: 'remove'; node: NodeInfo }
-	| { kind: 'share'; node: NodeInfo };
+	| { kind: 'share'; node: NodeInfo }
+	| { kind: 'class'; id: number };
 const dialog = ref<Dialog | null>(null);
 
 const title = computed(() => node.value?.path.at(-1)?.name ?? '');
@@ -75,7 +76,7 @@ async function load() {
 	try {
 		const n = await apiGet<NodeDetail>(`/nodes/${id.value}`);
 		const [kids, vers, roots, acc] = await Promise.all([
-			n.kind === 'dir' ? apiGet<NodeInfo[]>(`/nodes/${n.id}/children`) : Promise.resolve([]),
+			n.kind === 'dir' ? apiGet<ChildInfo[]>(`/nodes/${n.id}/children`) : Promise.resolve([]),
 			n.kind === 'file' ? apiGet<VersionInfo[]>(`/nodes/${n.id}/versions`) : Promise.resolve([]),
 			apiGet<RootInfo[]>('/roots'),
 			apiGet<AccessInfo>(`/nodes/${n.id}/shares`).catch(() => null)
@@ -260,6 +261,10 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 						<template v-else-if="access?.owner"> · von {{ access.owner }}</template>
 						<template v-if="sharedWith.length"> · geteilt mit {{ sharedWith.join(', ') }}</template>
 						<template v-if="!editable"> · nur ansehen</template>
+						·
+						<button type="button" class="link class-link" :aria-label="`Datenklasse: ${CLASS_LABEL[node.data_class.class]}`" @click="dialog = { kind: 'class', id: node.id }">
+							<Icon :name="node.data_class.class === 'local' ? 'lock' : 'cloud'" :size="13" :stroke="1.8" />{{ CLASS_LABEL[node.data_class.class] }}
+						</button>
 					</p>
 				</div>
 				<div class="tools">
@@ -312,10 +317,10 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 						<FileMark :node="c" />
 						<span class="text-col">
 							<span class="name">{{ c.name }}</span>
-							<span :id="`meta-${c.id}`" class="sub" aria-hidden="true">{{ meta(c) }}</span>
+							<span :id="`meta-${c.id}`" class="sub" aria-hidden="true"><span v-if="c.data_class" class="tag klass"><Icon :name="c.data_class === 'local' ? 'lock' : 'cloud'" :size="10" :stroke="2" />{{ CLASS_LABEL[c.data_class] }}</span>{{ meta(c) }}</span>
 						</span>
 					</NuxtLink>
-					<RowMenu :node="c" :can-edit="editable" @share="dialog = { kind: 'share', node: c }" @rename="dialog = { kind: 'rename', node: c }" @move="dialog = { kind: 'move', node: c }" @remove="dialog = { kind: 'remove', node: c }" />
+					<RowMenu :node="c" :can-edit="editable" @share="dialog = { kind: 'share', node: c }" @rename="dialog = { kind: 'rename', node: c }" @move="dialog = { kind: 'move', node: c }" @remove="dialog = { kind: 'remove', node: c }" @data-class="dialog = { kind: 'class', id: c.id }" />
 				</li>
 			</ul>
 			<ul v-else-if="sorted.length" class="tiles">
@@ -327,7 +332,7 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 						</span>
 						<span class="name">{{ c.name }}</span>
 					</NuxtLink>
-					<span class="foot"><span class="sub">{{ meta(c) }}</span><RowMenu :node="c" :can-edit="editable" @share="dialog = { kind: 'share', node: c }" @rename="dialog = { kind: 'rename', node: c }" @move="dialog = { kind: 'move', node: c }" @remove="dialog = { kind: 'remove', node: c }" /></span>
+					<span class="foot"><span class="sub"><span v-if="c.data_class" class="tag klass"><Icon :name="c.data_class === 'local' ? 'lock' : 'cloud'" :size="10" :stroke="2" />{{ CLASS_LABEL[c.data_class] }}</span>{{ meta(c) }}</span><RowMenu :node="c" :can-edit="editable" @share="dialog = { kind: 'share', node: c }" @rename="dialog = { kind: 'rename', node: c }" @move="dialog = { kind: 'move', node: c }" @remove="dialog = { kind: 'remove', node: c }" @data-class="dialog = { kind: 'class', id: c.id }" /></span>
 				</li>
 			</ul>
 			<p v-else-if="!loading" class="muted empty">
@@ -350,6 +355,10 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 				<div class="kv"><span>Geändert</span><span>{{ formatDate(node.mtime) }}</span></div>
 				<div class="kv"><span>Größe</span><span>{{ formatSize(node.size) }}</span></div>
 				<div class="kv"><span>Typ</span><span>{{ node.mime ?? '–' }}</span></div>
+				<div class="kv">
+					<span>Cloud-Analyse</span>
+					<span>{{ node.data_class.class === 'cloud' ? 'Erlaubt' : 'Nicht erlaubt' }} ({{ CLASS_LABEL[node.data_class.class] }}, {{ classSource(node.data_class) }})</span>
+				</div>
 			</section>
 			<section v-else-if="tab === 'zugriff'" class="access" role="tabpanel" aria-label="Zugriff">
 				<div class="kv"><span>Deine Rolle</span><span>{{ ROLE_LABEL[node.role] }}</span></div>
@@ -403,6 +412,7 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 			@cancel="dialog = null"
 		/>
 		<ShareDialog v-else-if="dialog?.kind === 'share'" :node="dialog.node" @close="dialog = null" @changed="load" />
+		<DataClassDialog v-else-if="dialog?.kind === 'class'" :node-id="dialog.id" @close="dialog = null" @changed="load" />
 		<ConfirmDialog
 			v-else-if="dialog?.kind === 'remove'"
 			title="In den Papierkorb verschieben?"
@@ -423,6 +433,8 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 .titles { flex: 1; min-width: 12rem; }
 .titles h1 { margin: 0 0 8px; }
 .meta { margin: 0; font-size: 13px; color: var(--muted); }
+.class-link { display: inline-flex; align-items: center; gap: 4px; min-height: 0; padding: 0; font-size: 13px; color: var(--ink-3); vertical-align: baseline; }
+.klass { margin-right: 6px; vertical-align: 1px; }
 .tools { display: flex; gap: 8px; }
 .file-title { font-size: 23px; line-height: 1.2; letter-spacing: -0.02em; margin: 4px 0 6px; }
 .file-actions { margin: 14px 0 18px; }

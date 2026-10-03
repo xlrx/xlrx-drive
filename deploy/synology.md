@@ -124,7 +124,19 @@ Ein zweiter Durchlauf parallel: `XLRX_EXTRACT_WORKERS=2` in `.env` (mehr nicht, 
 Den Index neu aufbauen (z. B. nach einem Plattenfehler): Server stoppen, `/volume1/xlrx-state/index`
 löschen, Server starten. Gelesene Texte liegen in der Datenbank und werden nicht noch einmal gelesen.
 
-## 11. DSM-Reverse-Proxy ablösen
+## 11. Datenklassen
+
+Jeder Ordner ist **„Nur lokal“** oder **„Cloud erlaubt“**; die Einstellung gilt für alles darin, bis ein
+Ordner weiter unten etwas anderes sagt. Ohne Einstellung gilt `XLRX_DEFAULT_DATA_CLASS` aus `.env`
+(Standard `local`). Das so lassen und einzelne Ordner in der Web-Oberfläche freigeben: im Ordner auf
+„Nur lokal“ tippen oder in den Aktionen eines Ordners „Datenklasse“ wählen. Ändern darf nur, wer den Ordner
+verwaltet, mit erneuter Bestätigung (Code oder Passkey); jede Änderung steht im Protokoll.
+
+Solange es keine Cloud-Funktionen gibt (KI-Suche ab M4, Außen-Cache ab M3b), verlässt ohnehin nichts das
+NAS. Die **Verwaltung** zeigt unter „Datenklassen“ jeden Ordner mit eigener Einstellung – das Verzeichnis,
+welche Daten wohin dürfen.
+
+## 12. DSM-Reverse-Proxy ablösen
 
 1. Bestehende Regeln (Systemsteuerung → Anmeldeportal → Erweitert → Reverse Proxy) als Blöcke in `Caddyfile` übernehmen.
 2. Caddy läuft parallel; über die Caddy-IP testen (`curl --resolve fotos.example.de:443:192.168.1.20 https://fotos.example.de`).

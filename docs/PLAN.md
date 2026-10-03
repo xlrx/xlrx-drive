@@ -1152,7 +1152,7 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
   - Textextraktion auf dem NAS (siehe 6.6) mit Fortschritt in der Verwaltung.
   - Web: Suche mit Vorschlägen (Dateinamen, Suchfilter, zuletzt gesucht – nur im Browser gespeichert), Ergebnisse mit Bildern als Kacheln und Textausschnitten, Suche in einem Ordner.
   - Offen für später: `von:`, `ist:`, `dokument:`, `ort:` und die Facetten Besitzer und Ort (M3/M4); Messung p95 mit echtem Bestand auf dem DS918+.
-- **M3 begonnen – Teilen erledigt (lokal getestet):**
+- **M3 begonnen – Teilen und Datenklassen erledigt (lokal getestet):**
   - Eine Rechteprüfung für alles (Durchsuchen, Inhalte, Vorschaubilder, Versionen, Uploads, Änderungen, Papierkorb, Sync, Suche, Live-Ereignisse).
     Rolle = höchste aus Besitz der eigenen Ablage, Mitgliedschaft in einer Geteilten Ablage, Freigabe auf dem Element oder einem Ordner darüber
     (an die Person oder eine ihrer Gruppen, nicht abgelaufen). Ohne Rolle gibt es das Element nicht – auch für Admins.
@@ -1165,6 +1165,12 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
     der Pfad muss ein echter Ordner unter dem Datenverzeichnis sein und darf keine andere Ablage überschneiden. Alles im Audit-Log.
   - Web: Bereich „Geteilt“, „Teilen“ in den Aktionen, Tab „Zugriff“, „geteilt mit …“ im Ordner; wer nur ansehen darf, sieht keine Änderungs-Aktionen.
   - Noch nicht: Verknüpfung geteilter Elemente in „Meine Ablage“ für den Mac-Client (kommt mit M5).
+  - Datenklassen (7.4): jeder Ordner „Nur lokal“ oder „Cloud erlaubt“, vererbt bis zur nächsten eigenen Einstellung; auch für eine ganze
+    Ablage. Ohne Einstellung gilt `XLRX_DEFAULT_DATA_CLASS` (Standard „Nur lokal“). Ändern nur mit Verwalten-Recht, erneuter Bestätigung
+    und Eintrag im Audit-Log (vorher, nachher). Wer nur eine Freigabe hat, erfährt nicht, aus welchem Ordner darüber die Einstellung kommt.
+    `data_class::allows_cloud` ist die eine Prüfung, die jeder spätere Cloud-Weg (M3b, M4, Backup) vor dem Versand aufrufen muss.
+  - Web: Datenklasse im Ordner und in den Aktionen, Kennzeichnung in der Liste, „Cloud-Analyse“ in den Details einer Datei,
+    Verzeichnis aller Einstellungen in der Verwaltung (als Tabelle zu sichern).
 
 **Nächster Schritt:** Inbetriebnahme auf dem DS918+ mit den Spike-Messungen (M0) und dem M1-Nachweis mit den echten Daten.
 

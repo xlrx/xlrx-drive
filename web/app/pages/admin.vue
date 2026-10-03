@@ -33,6 +33,10 @@ type SearchStatus = {
 type GroupOut = { id: number; name: string; members: { id: number; name: string }[] };
 type Member = { type: 'user' | 'group'; id: number; name?: string; role: 'viewer' | 'editor' | 'manager' };
 type SpaceOut = { id: number; name: string; path: string; scanned_at: string | null; members: Member[] };
+type DataClasses = {
+	default: DataClass;
+	entries: { root: string; node_id: number; path: string; class: DataClass; set_by: string | null; set_at: string }[];
+};
 
 const { me } = useSession();
 const g = useGuard();
@@ -41,6 +45,7 @@ const spaces = ref<SpaceOut[]>([]);
 const groupForm = ref<{ id: number | null; name: string; members: number[] }>({ id: null, name: '', members: [] });
 const spaceForm = ref<{ id: number | null; name: string; path: string; members: Member[] } | null>(null);
 const search = ref<SearchStatus | null>(null);
+const classes = ref<DataClasses | null>(null);
 const users = ref<User[]>([]);
 const audit = ref<Audit[]>([]);
 const form = ref({ username: '', display_name: '', email: '', is_admin: false });
@@ -52,6 +57,26 @@ async function refresh() {
 	search.value = await apiGet<SearchStatus>('/admin/search');
 	groups.value = await apiGet<GroupOut[]>('/admin/groups');
 	spaces.value = await apiGet<SpaceOut[]>('/admin/spaces');
+	classes.value = await apiGet<DataClasses>('/admin/data-classes');
+}
+
+/** The record of where data may go, as a table for Numbers or Excel. */
+function exportClasses() {
+	const c = classes.value;
+	if (!c) return;
+	// Quoted; a leading = + - @ would be run as a formula by spreadsheets.
+	const cell = (v: string) => `"${(/^[=+\-@]/.test(v) ? `'${v}` : v).replaceAll('"', '""')}"`;
+	const rows = [
+		['Ablage', 'Ordner', 'Datenklasse', 'Festgelegt von', 'Am'],
+		...c.entries.map((e) => [e.root, e.path || '(ganze Ablage)', CLASS_LABEL[e.class], e.set_by ?? '', formatDate(e.set_at)]),
+		['(alle anderen Ordner)', '', CLASS_LABEL[c.default], 'Voreinstellung des Servers', '']
+	];
+	const csv = '\uFEFF' + rows.map((r) => r.map(cell).join(';')).join('\r\n');
+	const a = document.createElement('a');
+	a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+	a.download = `xlrx-datenklassen-${new Date().toISOString().slice(0, 10)}.csv`;
+	a.click();
+	URL.revokeObjectURL(a.href);
 }
 
 const saveGroup = () =>
@@ -299,6 +324,26 @@ const copy = () => link.value && navigator.clipboard.writeText(link.value.url);
 					</div>
 				</form>
 				<button v-else type="button" @click="newSpace">Ablage einbinden</button>
+			</section>
+
+			<section v-if="classes" class="card">
+				<h2 style="margin-top: 0">Datenklassen</h2>
+				<p class="muted">
+					Was „Cloud erlaubt“ ist, darf später für die KI-Suche an einen Dienst in der EU – alles andere bleibt auf dem NAS.
+					Ohne eigene Einstellung gilt <strong>{{ CLASS_LABEL[classes.default] }}</strong> (<code>XLRX_DEFAULT_DATA_CLASS</code>).
+					Festlegen kann es, wer einen Ordner verwaltet – im Ordner über die Datenklasse.
+				</p>
+				<ul v-if="classes.entries.length" class="plain">
+					<li v-for="e in classes.entries" :key="e.node_id">
+						<span class="grow">
+							<strong>{{ e.root }}{{ e.path ? ` › ${e.path.replaceAll('/', ' › ')}` : '' }}</strong>
+							<span class="muted"> · {{ e.set_by ?? '–' }}, {{ formatDate(e.set_at) }}</span>
+						</span>
+						<span class="tag"><Icon :name="e.class === 'local' ? 'lock' : 'cloud'" :size="10" :stroke="2" />{{ CLASS_LABEL[e.class] }}</span>
+					</li>
+				</ul>
+				<p v-else class="muted">Noch keine Ordner mit eigener Einstellung.</p>
+				<button type="button" @click="exportClasses"><Icon name="download" :size="16" />Als Tabelle sichern</button>
 			</section>
 
 			<section class="card">

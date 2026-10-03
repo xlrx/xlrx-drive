@@ -431,6 +431,28 @@ async function shareFiles(page: Page, browser: Browser, bertSetup: string) {
 	await bert.context().close();
 }
 
+/** Data class of a folder: "Nur lokal" until allowed on purpose; files inside and the administration show it. */
+async function classifyFolder(page: Page) {
+	const link = (name: string) => page.getByRole('link', { name, exact: true });
+	await page.getByRole('link', { name: 'Dateien', exact: true }).click();
+	await link('Projekte').click();
+	await page.getByRole('button', { name: 'Datenklasse: Nur lokal' }).click();
+	const sheet = page.getByRole('dialog', { name: 'Datenklasse von „Projekte“' });
+	await expect(sheet.getByText('Voreinstellung des Servers')).toBeVisible();
+	await sheet.getByRole('radio', { name: /^Cloud erlaubt/ }).check();
+	await sheet.getByRole('button', { name: 'Speichern' }).click();
+	await expect(page.getByRole('button', { name: 'Datenklasse: Cloud erlaubt' })).toBeVisible();
+	// A file inside follows the folder.
+	await link('Plan.txt').click();
+	await expect(page.getByText('Erlaubt (Cloud erlaubt, vererbt von „Projekte“)')).toBeVisible();
+	// The folder above marks it.
+	await page.getByRole('navigation', { name: 'Pfad' }).getByRole('link', { name: 'Meine Ablage' }).click();
+	await expect(page.locator('.klass', { hasText: 'Cloud erlaubt' })).toBeVisible();
+	// And the administration lists it.
+	await page.getByRole('link', { name: 'Verwaltung' }).click();
+	await expect(page.getByText('Meine Ablage › Projekte')).toBeVisible();
+}
+
 test('Einrichtung, Anmeldung, Verwaltung und Dateien', async ({ page, browser }) => {
 	const setupUrl = process.env.XLRX_SETUP_URL;
 	test.skip(!setupUrl, 'XLRX_SETUP_URL fehlt (e2e/run.sh verwenden)');
@@ -491,6 +513,7 @@ test('Einrichtung, Anmeldung, Verwaltung und Dateien', async ({ page, browser })
 		await changeFiles(page, data);
 		await searchFiles(page, data);
 		await shareFiles(page, browser, bertSetup);
+		await classifyFolder(page);
 		await uploadLarge(page, data);
 	}
 	await connectDevice(page);

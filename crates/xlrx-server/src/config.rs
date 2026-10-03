@@ -55,6 +55,9 @@ pub struct Config {
     pub ocr_langs: String,
     /// Parallel text extractions (`XLRX_EXTRACT_WORKERS`, default 1; 0 turns extraction off).
     pub extract_workers: u32,
+    /// Data class of folders without a setting (`XLRX_DEFAULT_DATA_CLASS`: `local` or `cloud`,
+    /// default `local`: nothing leaves the house until allowed per folder, PLAN 7.4).
+    pub default_data_class: crate::files::data_class::Class,
 }
 
 /// Parameters for argon2id. Calibrate on the DS918+ (J3455) so that one check takes ~250 ms
@@ -213,6 +216,12 @@ impl Config {
                 .into(),
             ocr_langs: var("XLRX_OCR_LANGS").unwrap_or_else(|| "deu+eng".into()),
             extract_workers: num("XLRX_EXTRACT_WORKERS", 1)?,
+            default_data_class: match var("XLRX_DEFAULT_DATA_CLASS").as_deref() {
+                None | Some("") => crate::files::data_class::Class::Local,
+                Some(v) => crate::files::data_class::Class::parse(v.trim()).ok_or(
+                    "XLRX_DEFAULT_DATA_CLASS: „local“ (Nur lokal) oder „cloud“ (Cloud erlaubt)",
+                )?,
+            },
         })
     }
 

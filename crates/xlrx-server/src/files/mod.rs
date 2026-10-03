@@ -2,6 +2,7 @@
 
 pub mod access;
 pub mod content;
+pub mod data_class;
 pub mod db;
 pub mod fs;
 pub mod live;
