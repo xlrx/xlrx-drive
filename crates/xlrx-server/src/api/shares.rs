@@ -374,6 +374,15 @@ pub async fn create(
         json!({ "to": info.to.name, "role": role }),
     )
     .await?;
+    crate::bell::shared(
+        &st,
+        me.id,
+        a.node.id,
+        req.to.user(),
+        req.to.group(),
+        json!({ "role": role, "group": matches!(req.to, Principal::Group(_)).then(|| info.to.name.clone()) }),
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(info)))
 }
 

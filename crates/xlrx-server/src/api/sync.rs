@@ -125,12 +125,30 @@ pub async fn notify(
     me: CurrentUser,
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
     let rx = live::subscribe(&st).await?;
+    let bell = st.bell.subscribe();
     let last = *rx.borrow();
     let user = me.id;
-    let stream =
-        futures_util::stream::unfold((st, rx, last), move |(st, mut rx, mut last)| async move {
+    let stream = futures_util::stream::unfold(
+        (st, rx, bell, last),
+        move |(st, mut rx, mut bell, mut last)| async move {
             loop {
-                rx.changed().await.ok()?;
+                tokio::select! {
+                    r = rx.changed() => r.ok()?,
+                    b = bell.recv() => {
+                        match b {
+                            Ok(u) if u != user => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                            // Mine, or missed some: tell the current count.
+                            _ => {}
+                        }
+                        let unread = crate::bell::unread(&st.db, user).await.ok()?;
+                        let event = Event::default()
+                            .event("notification")
+                            .json_data(serde_json::json!({ "unread": unread }))
+                            .unwrap_or_default();
+                        return Some((Ok(event), (st, rx, bell, last)));
+                    }
+                }
                 let now = *rx.borrow_and_update();
                 // Looked up each time: a root created (or shared) after connecting counts too.
                 let scope = access::scope(&st.db, user).await.ok()?;
@@ -181,9 +199,10 @@ pub async fn notify(
                     .event("change")
                     .json_data(data)
                     .unwrap_or_default();
-                return Some((Ok(event), (st, rx, last)));
+                return Some((Ok(event), (st, rx, bell, last)));
             }
-        });
+        },
+    );
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 

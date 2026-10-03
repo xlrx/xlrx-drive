@@ -20,6 +20,8 @@ const undo = ref<NodeInfo | null>(null);
 const dragging = ref(false);
 let poll: ReturnType<typeof setTimeout> | undefined;
 let noted = 0;
+/** Pictures whose thumbnail failed (damaged files) show their mark instead. */
+const broken = ref(new Set<number>());
 
 type Dialog =
 	| { kind: 'folder' }
@@ -343,7 +345,7 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 				<li v-for="c in sorted" :key="c.id">
 					<NuxtLink :to="`/files/${c.id}`" class="open">
 						<span class="pic">
-							<img v-if="thumbUrl(c, 256)" :src="thumbUrl(c, 256)!" alt="" loading="lazy" />
+							<img v-if="thumbUrl(c, 256) && !broken.has(c.id)" :src="thumbUrl(c, 256)!" alt="" loading="lazy" @error="broken = new Set(broken).add(c.id)" />
 							<FileMark v-else :node="c" big />
 						</span>
 						<span class="name">{{ c.name }}</span>

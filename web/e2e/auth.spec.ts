@@ -405,6 +405,12 @@ async function shareFiles(page: Page, browser: Browser, bertSetup: string) {
 	await sheet.getByRole('button', { name: 'Schließen' }).click();
 	await link(page, 'Projekte').click();
 	await expect(page.getByText(/geteilt mit Bert/)).toBeVisible();
+	// Bert's bell rings without reloading.
+	await expect(bert.getByRole('button', { name: 'Benachrichtigungen, 1 neu' })).toBeVisible();
+	await bert.getByRole('button', { name: 'Benachrichtigungen, 1 neu' }).click();
+	await expect(bert.getByRole('dialog', { name: 'Benachrichtigungen' }).getByText(/hat „Projekte“ mit dir zum Bearbeiten geteilt/)).toBeVisible();
+	await bert.getByRole('dialog', { name: 'Benachrichtigungen' }).getByRole('button', { name: 'Schließen' }).click();
+	await expect(bert.getByRole('button', { name: 'Benachrichtigungen', exact: true })).toBeVisible();
 
 	// Bert finds it under "Geteilt", sees only it and may add to it.
 	await bert.reload();

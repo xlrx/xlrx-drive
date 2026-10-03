@@ -7,6 +7,7 @@ pub mod devices;
 pub mod files;
 pub mod links;
 pub mod me;
+pub mod notifications;
 pub mod search;
 pub mod setup;
 pub mod shares;
@@ -125,6 +126,8 @@ pub fn router(state: AppState) -> Router {
         .route("/recent", get(files::recent))
         .route("/activity", get(activity::activity))
         .route("/suggestions", get(suggest::suggestions))
+        .route("/notifications", get(notifications::list))
+        .route("/notifications/read", post(notifications::read))
         .route("/suggestions/opened", post(suggest::suggestion_opened))
         .route("/nodes/{id}/opened", post(suggest::opened))
         .route("/people", get(shares::people))

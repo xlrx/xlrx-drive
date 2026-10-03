@@ -6,6 +6,7 @@
 pub mod api;
 pub mod audit;
 pub mod auth;
+pub mod bell;
 pub mod config;
 pub mod error;
 pub mod events;

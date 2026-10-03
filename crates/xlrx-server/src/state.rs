@@ -46,6 +46,8 @@ pub struct Inner {
     pub extract: std::sync::OnceLock<crate::extract::Running>,
     /// Full-text search, once started (see [`crate::search::start`]).
     pub search: std::sync::OnceLock<crate::search::Search>,
+    /// Notifications: the id of a person whose bell changed (see [`crate::bell`]).
+    pub bell: tokio::sync::broadcast::Sender<i64>,
     /// Requests per address on public links (see [`crate::files::links`]).
     pub public_limit: crate::files::links::RateLimit,
     /// Running watchers per root (dropping one stops it).
@@ -90,6 +92,7 @@ impl AppState {
             jobs_wake: Default::default(),
             extract: Default::default(),
             public_limit: Default::default(),
+            bell: tokio::sync::broadcast::channel(256).0,
             db,
             secrets: SecretBox::new(&cfg.secret_key),
             cfg,

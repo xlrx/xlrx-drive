@@ -1152,7 +1152,7 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
   - Textextraktion auf dem NAS (siehe 6.6) mit Fortschritt in der Verwaltung.
   - Web: Suche mit Vorschlägen (Dateinamen, Suchfilter, zuletzt gesucht – nur im Browser gespeichert), Ergebnisse mit Bildern als Kacheln und Textausschnitten, Suche in einem Ordner.
   - Offen für später: `von:`, `ist:`, `dokument:`, `ort:` und die Facetten Besitzer und Ort (M3/M4); Messung p95 mit echtem Bestand auf dem DS918+.
-- **M3 begonnen – Teilen, Datenklassen und öffentliche Links erledigt (lokal getestet):**
+- **M3 erledigt (lokal getestet) – Teilen, Datenklassen, öffentliche Links, Aktivität, Vorschläge, Glocke:**
   - Eine Rechteprüfung für alles (Durchsuchen, Inhalte, Vorschaubilder, Versionen, Uploads, Änderungen, Papierkorb, Sync, Suche, Live-Ereignisse).
     Rolle = höchste aus Besitz der eigenen Ablage, Mitgliedschaft in einer Geteilten Ablage, Freigabe auf dem Element oder einem Ordner darüber
     (an die Person oder eine ihrer Gruppen, nicht abgelaufen). Ohne Rolle gibt es das Element nicht – auch für Admins.
@@ -1197,6 +1197,11 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
     NAS) seit dem eigenen letzten Öffnen, neu Freigegebenes; feste Gewichte, die Begründung ist der stärkste Anteil („Anna hat das vor
     2 Std. geändert“, „Öffnest du meist montags“). Nur was noch da ist und gesehen werden darf. Angezeigte und geöffnete Vorschläge
     werden protokolliert (`suggestion_log`), um die Gewichte später anzupassen.
+  - Glocke (8.4): Benachrichtigung, wenn jemand etwas mit dir (oder deiner Gruppe) teilt und wenn Dateien über deine Dateianfrage
+    ankommen (je Link und Stunde zu einer Meldung gesammelt). Live über den bestehenden Ereignisstrom (`event: notification` mit der
+    Zahl ungelesener), auch in anderen Fenstern; Öffnen der Liste markiert gelesen. Nur Meldungen zu Elementen, die man noch sehen darf.
+  - Bilder, deren Vorschaubild nicht geht (beschädigt), zeigen überall das Dateisymbol statt eines kaputten Bildes.
+  - Noch nicht: E-Mail bei neuen Freigaben (SMTP, einstellbar je Person) und Push auf iOS/Mac (APNs, mit den Apps ab M5).
 
 **Nächster Schritt:** Inbetriebnahme auf dem DS918+ mit den Spike-Messungen (M0) und dem M1-Nachweis mit den echten Daten.
 

@@ -119,6 +119,8 @@ const error = ref('');
 const folderName = ref('');
 
 const hits = computed(() => [...(result.value?.hits ?? []), ...more.value]);
+/** Pictures whose thumbnail failed (damaged files) show their mark instead. */
+const broken = ref(new Set<number>());
 const pictures = computed(() => (typ.value || !hits.value.length ? [] : hits.value.filter((h) => thumbUrl(h, 256))));
 const others = computed(() => (pictures.value.length ? hits.value.filter((h) => !thumbUrl(h, 256)) : hits.value));
 const facets = computed(() => {
@@ -321,7 +323,8 @@ const plural = (n: number) => (n === 1 ? '1 Treffer' : `${n.toLocaleString('de-D
 					<ul class="tiles">
 						<li v-for="p in pictures" :key="p.id">
 							<NuxtLink :to="`/files/${p.id}`" :aria-label="`${p.name}, ${folderTrail(p.folder)}`">
-								<img :src="thumbUrl(p, 256)!" alt="" loading="lazy" />
+								<img v-if="!broken.has(p.id)" :src="thumbUrl(p, 256)!" alt="" loading="lazy" @error="broken = new Set(broken).add(p.id)" />
+								<FileMark v-else :node="p" big />
 								<span class="tag" aria-hidden="true">{{ monthYear(p.mtime) }}</span>
 							</NuxtLink>
 						</li>
@@ -408,6 +411,7 @@ h2 { margin: 0; font-size: 13px; font-weight: 400; color: var(--muted); padding:
 .tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; padding: 0 0 6px; }
 .tiles a { position: relative; display: block; height: 126px; background: var(--paper-hi); overflow: hidden; }
 .tiles img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.tiles a :deep(.mark) { position: absolute; inset: 0; margin: auto; }
 .tiles .tag {
 	position: absolute; left: 5px; bottom: 5px; font-size: 9.5px; padding: 1px 4px; border-radius: 2px; text-transform: none;
 	background: var(--paper); border: 1px solid var(--line-strong); color: var(--ink);

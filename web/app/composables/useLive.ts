@@ -10,10 +10,19 @@ let source: EventSource | null = null;
 
 export function useLive() {
 	const change = useState<LiveChange[] | null>('live-change', () => null);
+	/** Unread notifications (the bell), pushed by the server whenever they change. */
+	const unread = useState<number>('live-unread', () => 0);
 
 	function connect() {
 		if (source || !import.meta.client) return;
 		source = new EventSource('/api/sync/notify');
+		source.addEventListener('notification', (e) => {
+			try {
+				unread.value = (JSON.parse((e as MessageEvent<string>).data) as { unread: number }).unread;
+			} catch {
+				// ignore malformed events
+			}
+		});
 		source.addEventListener('change', (e) => {
 			try {
 				change.value = JSON.parse((e as MessageEvent<string>).data) as LiveChange[];
@@ -51,5 +60,5 @@ export function useLive() {
 		onBeforeUnmount(() => clearTimeout(timer));
 	}
 
-	return { change, connect, disconnect, onRootChange, onAnyChange };
+	return { change, unread, connect, disconnect, onRootChange, onAnyChange };
 }

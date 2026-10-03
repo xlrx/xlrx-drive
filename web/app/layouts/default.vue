@@ -45,6 +45,7 @@ const current = (s: { to: string; exact?: boolean }) =>
 			</nav>
 			<span class="spacer"></span>
 			<button type="button" class="primary new" @click="showNew = true"><Icon name="plus" :size="18" :stroke="1.7" />Neu</button>
+			<Bell />
 			<NuxtLink to="/settings/security" class="icon account" aria-label="Konto und Einstellungen">
 				<span class="avatar">{{ initial }}</span>
 			</NuxtLink>
@@ -88,7 +89,8 @@ const current = (s: { to: string; exact?: boolean }) =>
 .sections a:hover { background: var(--fill); color: var(--ink); }
 .sections a[aria-current='page'] { background: var(--accent); color: var(--accent-text); }
 .new { min-height: 40px; padding: 0 16px 0 12px; font-size: 14px; }
-.account { margin-left: -12px; }
+.account { margin-left: -18px; }
+.top :deep(.bell) { margin-left: -12px; }
 
 .dock { display: none; }
 @media (max-width: 47.99rem) {

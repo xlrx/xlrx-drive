@@ -569,6 +569,7 @@ pub async fn public_upload(
         json!({ "kind": o.kind }),
     )
     .await?;
+    crate::bell::link_upload(&st, o.link.created_by, o.link.id, folder.id, &node.name).await?;
     if o.kind.browse() {
         Ok((StatusCode::CREATED, Json(NodeInfo::from(&node))).into_response())
     } else {

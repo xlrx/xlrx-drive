@@ -5,7 +5,9 @@ const props = withDefaults(defineProps<{ groups: ActivityGroup[]; showFolder?: b
 
 const initial = (g: ActivityGroup) => (g.actor?.name ?? '?').trim().charAt(0).toUpperCase() || '?';
 const icon = (g: ActivityGroup) => (g.via === 'link' ? 'link' : g.via === 'nas' ? 'sync' : null);
-const pictures = (g: ActivityGroup) => g.items.filter((i) => !i.deleted && thumbUrl(i, 64));
+/** Pictures whose thumbnail failed (damaged files) are left out of the strip. */
+const broken = ref(new Set<number>());
+const pictures = (g: ActivityGroup) => g.items.filter((i) => !i.deleted && !broken.value.has(i.id) && thumbUrl(i, 64));
 const place = (g: ActivityGroup) => (g.folder ?? '').split('/').join(' › ');
 const linkable = (g: ActivityGroup) => g.count === 1 && g.items[0] && !g.items[0].deleted;
 const groups = computed(() => props.groups.map((g) => ({ g, s: activitySentence(g), pics: pictures(g) })));
@@ -32,7 +34,7 @@ const groups = computed(() => props.groups.map((g) => ({ g, s: activitySentence(
 				</p>
 				<div v-if="pics.length > 1 || (pics.length === 1 && g.count > 1)" class="strip">
 					<NuxtLink v-for="p in pics.slice(0, 6)" :key="p.id" :to="`/files/${p.id}`" :aria-label="p.name">
-						<img :src="thumbUrl(p, 64)!" alt="" loading="lazy" />
+						<img :src="thumbUrl(p, 64)!" alt="" loading="lazy" @error="broken = new Set(broken).add(p.id)" />
 					</NuxtLink>
 					<span v-if="g.count > Math.min(pics.length, 6)" class="more">+{{ g.count - Math.min(pics.length, 6) }}</span>
 				</div>

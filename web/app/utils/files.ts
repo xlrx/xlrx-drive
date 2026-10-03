@@ -484,3 +484,32 @@ export function suggestionReason(r: SuggestionReason): string {
 			return r.by ? `${r.by} hat das ${when(r.at)} mit dir geteilt` : 'Neu für dich freigegeben';
 	}
 }
+
+/** The bell (PLAN 8.4). */
+export interface BellItem {
+	id: number;
+	kind: 'shared' | 'link_upload';
+	actor: string | null;
+	node: NodeInfo;
+	folder: string;
+	details: { role?: Role; group?: string | null; count?: number; names?: string[] };
+	at: string;
+	read: boolean;
+}
+
+export interface BellList {
+	unread: number;
+	items: BellItem[];
+}
+
+export function bellText(n: BellItem): string {
+	if (n.kind === 'shared') {
+		const role = n.details.role ? ` ${ROLE_WORD[n.details.role] ?? ''}`.trimEnd() : '';
+		const group = n.details.group ? ` (Gruppe „${n.details.group}“)` : '';
+		return `${n.actor ?? 'Jemand'} hat „${n.node.name}“ mit dir${group}${role} geteilt`;
+	}
+	const count = n.details.count ?? 1;
+	return count === 1
+		? `„${n.details.names?.[0] ?? 'Eine Datei'}“ kam über deinen Link in „${n.node.name}“`
+		: `${count} Dateien kamen über deinen Link in „${n.node.name}“`;
+}

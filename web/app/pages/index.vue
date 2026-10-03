@@ -35,6 +35,11 @@ onMounted(() => {
 watch(() => uploads.finished.value, load);
 useLive().onAnyChange(load);
 
+/** Pictures without a thumbnail (damaged, or not a picture after all) show the sheet instead. */
+const broken = ref(new Set<number>());
+const thumb = (n: NodeInfo) => (broken.value.has(n.id) ? null : thumbUrl(n, 256));
+const failed = (n: NodeInfo) => (broken.value = new Set(broken.value).add(n.id));
+
 /** Opening a suggestion is noted, to tune them later. */
 const picked = (s: StartSuggestion) => apiPost('/suggestions/opened', { node_id: s.id }).catch(() => {});
 
@@ -57,7 +62,7 @@ const ext = (name: string) => {
 					<li v-for="s in suggested" :key="s.id">
 						<NuxtLink :to="`/files/${s.id}`" class="card-link" :aria-describedby="`reason-${s.id}`" @click="picked(s)">
 							<span class="preview">
-								<img v-if="thumbUrl(s, 256)" :src="thumbUrl(s, 256)!" alt="" loading="lazy" />
+								<img v-if="thumb(s)" :src="thumb(s)!" alt="" loading="lazy" @error="failed(s)" />
 								<span v-else-if="s.kind === 'dir'" class="folder-mark" aria-hidden="true"><Icon name="folder" :size="40" :stroke="1.1" /></span>
 								<span v-else class="doc" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></span>
 								<span v-if="s.kind === 'file' && ext(s.name)" class="tag ext" aria-hidden="true">{{ ext(s.name) }}</span>
@@ -80,7 +85,7 @@ const ext = (name: string) => {
 				<li v-for="r in recent" :key="r.id">
 					<NuxtLink :to="`/files/${r.id}`" class="card-link" :aria-describedby="`why-${r.id}`">
 						<span class="preview">
-							<img v-if="thumbUrl(r, 256)" :src="thumbUrl(r, 256)!" alt="" loading="lazy" />
+							<img v-if="thumb(r)" :src="thumb(r)!" alt="" loading="lazy" @error="failed(r)" />
 							<span v-else class="doc" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></span>
 							<span v-if="ext(r.name)" class="tag ext" aria-hidden="true">{{ ext(r.name) }}</span>
 						</span>
