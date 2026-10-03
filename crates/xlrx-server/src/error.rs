@@ -15,6 +15,8 @@ pub enum ApiError {
     Forbidden(String),
     NotFound,
     Conflict(String),
+    /// Existed, but no more (an expired link).
+    Gone(String),
     /// A precondition of a change does not hold: sync clients get the reason, people the message.
     Rejected(xlrx_sync::Reject, String),
     TooManyRequests,
@@ -45,6 +47,7 @@ impl IntoResponse for ApiError {
             Self::Forbidden(m) => (StatusCode::FORBIDDEN, m),
             Self::NotFound => (StatusCode::NOT_FOUND, "Nicht gefunden".into()),
             Self::Conflict(m) => (StatusCode::CONFLICT, m),
+            Self::Gone(m) => (StatusCode::GONE, m),
             Self::Unauthenticated(reason, m) => {
                 return (
                     StatusCode::UNAUTHORIZED,

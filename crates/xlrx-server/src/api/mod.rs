@@ -4,6 +4,7 @@ pub mod admin;
 pub mod auth;
 pub mod devices;
 pub mod files;
+pub mod links;
 pub mod me;
 pub mod search;
 pub mod setup;
@@ -127,6 +128,8 @@ pub fn router(state: AppState) -> Router {
             get(shares::node_access).post(shares::create),
         )
         .route("/shares/{id}", patch(shares::update).delete(shares::remove))
+        .route("/nodes/{id}/links", get(links::list).post(links::create))
+        .route("/links/{id}", delete(links::remove))
         .route("/search", get(search::search))
         .route("/search/suggest", get(search::suggest))
         .route(
@@ -154,8 +157,31 @@ pub fn router(state: AppState) -> Router {
             get(sync::content_available).put(sync::put_content),
         );
 
+    // Public links: no account, no cookie of a session; rate-limited and locked out per address.
+    let public = Router::new()
+        .route("/public/{token}", get(links::public_info))
+        .route("/public/{token}/unlock", post(links::unlock))
+        .route("/public/{token}/nodes/{id}", get(links::public_node))
+        .route(
+            "/public/{token}/nodes/{id}/children",
+            get(links::public_children),
+        )
+        .route(
+            "/public/{token}/nodes/{id}/content",
+            get(links::public_content).put(links::public_replace),
+        )
+        .route(
+            "/public/{token}/nodes/{id}/thumbnail",
+            get(links::public_thumbnail),
+        )
+        .route(
+            "/public/{token}/nodes/{id}/files",
+            post(links::public_upload),
+        );
+
     let api = browser
         .merge(shared)
+        .merge(public)
         .fallback(|| async { ApiError::NotFound })
         .layer(middleware::from_fn_with_state(state.clone(), check_origin))
         // Called by apps (no browser, no cookie): proves itself with a PKCE verifier or a

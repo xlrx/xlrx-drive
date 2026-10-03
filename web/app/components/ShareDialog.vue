@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // "Teilen" (as the "Zugriff" list in the design's details): who has access – owner or members of
 // the shared root, and the people and groups it is shared with, also through a folder above.
-// Whoever manages it changes roles, ends shares and adds people or groups, optionally until a day.
+// Whoever manages it changes roles, ends shares and adds people or groups, optionally until a day,
+// and hands out public links (PLAN 9.2) – creating one needs a fresh second factor.
 const props = defineProps<{ node: Pick<NodeInfo, 'id' | 'name' | 'kind'> }>();
 const emit = defineEmits<{ close: []; changed: [] }>();
 const { me } = useSession();
@@ -13,11 +14,21 @@ const busy = ref(false);
 const pick = ref('');
 const role = ref<'viewer' | 'editor' | 'manager'>('viewer');
 const until = ref('');
+const links = ref<LinkInfo[]>([]);
+const g = useGuard();
+const linkKind = ref<LinkKind>('view');
+const linkPassword = ref('');
+const linkUntil = ref('');
+const linkMax = ref<number | ''>('');
+/** The link just created, to copy right away. */
+const fresh = ref<LinkInfo | null>(null);
+const copied = ref<number | null>(null);
 
 async function load() {
 	try {
 		info.value = await apiGet<AccessInfo>(`/nodes/${props.node.id}/shares`);
 		if (info.value.can_share && !people.value) people.value = await apiGet<People>('/people');
+		if (info.value.can_share) links.value = await apiGet<LinkInfo[]>(`/nodes/${props.node.id}/links`);
 	} catch (e) {
 		error.value = errorMessage(e);
 	}
@@ -54,6 +65,48 @@ const add = () =>
 	});
 const change = (s: ShareInfo, r: string) => run(() => apiPatch(`/shares/${s.id}`, { role: r, keep_expiry: true }));
 const end = (s: ShareInfo) => run(() => apiDelete(`/shares/${s.id}`));
+
+const kinds = computed(() =>
+	(Object.keys(LINK_KIND_LABEL) as LinkKind[]).filter((k) => k !== 'upload' || props.node.kind === 'dir')
+);
+const counts = computed(() => linkKind.value === 'download' || linkKind.value === 'edit');
+const addLink = () =>
+	g.run(async () => {
+		fresh.value = await apiPost<LinkInfo>(`/nodes/${props.node.id}/links`, {
+			kind: linkKind.value,
+			password: linkPassword.value || null,
+			expires_at: linkUntil.value ? new Date(`${linkUntil.value}T23:59:59`).toISOString() : null,
+			max_downloads: counts.value && linkMax.value ? Number(linkMax.value) : null
+		});
+		linkPassword.value = '';
+		linkUntil.value = '';
+		linkMax.value = '';
+		await load();
+		emit('changed');
+	});
+const endLink = (l: LinkInfo) =>
+	run(async () => {
+		await apiDelete(`/links/${l.id}`);
+		if (fresh.value?.id === l.id) fresh.value = null;
+	});
+async function copy(l: LinkInfo) {
+	if (!l.url) return;
+	try {
+		await navigator.clipboard.writeText(l.url);
+		copied.value = l.id;
+		setTimeout(() => (copied.value = copied.value === l.id ? null : copied.value), 2000);
+	} catch {
+		error.value = 'Kopieren ging nicht – bitte den Link markieren und kopieren.';
+	}
+}
+const linkLine = (l: LinkInfo) =>
+	[
+		l.password ? 'mit Passwort' : 'ohne Passwort',
+		l.expired ? 'abgelaufen' : l.expires_at ? `bis ${day(l.expires_at)}` : '',
+		l.max_downloads ? `${l.downloads} von ${l.max_downloads} Downloads` : l.downloads ? `${l.downloads} Downloads` : ''
+	]
+		.filter(Boolean)
+		.join(' · ');
 
 const initial = (name: string) => name.trim().charAt(0).toUpperCase() || '?';
 const day = (s: string) => new Date(s).toLocaleDateString('de-DE', { day: 'numeric', month: 'short', year: 'numeric' });
@@ -132,8 +185,52 @@ const shared = computed(() => new Set((info.value?.shares ?? []).filter((s) => !
 				<button class="primary full" :disabled="busy || !pick">Teilen</button>
 			</form>
 			<p v-else-if="!info.can_share" class="muted small">Teilen kann nur, wer das verwaltet.</p>
+
+			<section v-if="info.can_share" class="links-part">
+				<h3 class="label">Link</h3>
+				<ul v-if="links.length" class="people">
+					<li v-for="l in links" :key="l.id" :class="{ expired: l.expired }">
+						<span class="avatar" aria-hidden="true"><Icon name="link" :size="16" /></span>
+						<span class="who">
+							<span>{{ LINK_KIND_LABEL[l.kind] }}</span>
+							<span class="sub">{{ linkLine(l) }}</span>
+						</span>
+						<button v-if="l.url" type="button" class="icon" :aria-label="`Link „${LINK_KIND_LABEL[l.kind]}“ kopieren`" @click="copy(l)">
+							<Icon :name="copied === l.id ? 'check' : 'copy'" :size="15" :stroke="1.8" />
+						</button>
+						<button type="button" class="icon" :aria-label="`Link „${LINK_KIND_LABEL[l.kind]}“ beenden`" :disabled="busy" @click="endLink(l)">
+							<Icon name="x" :size="15" :stroke="1.8" />
+						</button>
+					</li>
+				</ul>
+				<div v-if="fresh?.url" class="note fresh" role="status">
+					<strong>Link erstellt</strong>
+					<div class="copy-row">
+						<input :value="fresh.url" readonly aria-label="Neuer Link" @focus="($event.target as HTMLInputElement).select()" />
+						<button type="button" @click="copy(fresh)">{{ copied === fresh.id ? 'Kopiert' : 'Kopieren' }}</button>
+					</div>
+					<p>Wer diesen Link hat, braucht kein Konto.{{ fresh.password ? ' Das Passwort schickst du am besten auf einem anderen Weg.' : '' }}</p>
+				</div>
+				<form class="add" @submit.prevent="addLink">
+					<div class="fields link-fields">
+						<select v-model="linkKind" aria-label="Art des Links">
+							<option v-for="k in kinds" :key="k" :value="k">{{ LINK_KIND_LABEL[k] }}</option>
+						</select>
+						<input v-model="linkPassword" type="password" autocomplete="new-password" placeholder="Passwort (optional)" aria-label="Passwort für den Link" minlength="8" />
+						<label class="until">
+							<span>Bis (optional)</span>
+							<input v-model="linkUntil" type="date" :min="today" aria-label="Link gilt bis" />
+						</label>
+						<input v-if="counts" v-model="linkMax" type="number" min="1" inputmode="numeric" placeholder="Downloads (optional)" aria-label="Höchstens so viele Downloads" />
+					</div>
+					<p class="muted small">{{ LINK_KIND_HINT[linkKind] }}</p>
+					<p v-if="g.error.value" class="error" role="alert">{{ g.error.value }}</p>
+					<button class="full" :disabled="g.busy.value">Link erstellen</button>
+				</form>
+			</section>
 		</template>
 		<p v-else-if="!error" class="muted">Lädt …</p>
+		<StepUpDialog v-if="g.pending.value" @done="g.confirmed" @cancel="g.cancel" />
 	</Modal>
 </template>
 
@@ -152,8 +249,13 @@ const shared = computed(() => new Set((info.value?.shares ?? []).filter((s) => !
 .fields { display: grid; grid-template-columns: 1fr; gap: 8px; }
 .until { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--muted); }
 .small { font-size: 13px; }
-.add .primary { margin-top: 10px; }
+.add .primary, .add .full { margin-top: 10px; }
+.links-part { margin-top: 26px; }
+.fresh { margin: 10px 0; }
+.copy-row { display: flex; gap: 8px; margin-top: 8px; }
+.copy-row input { flex: 1; min-width: 0; font-family: var(--mono); font-size: 12.5px; }
 @media (min-width: 48rem) {
 	.fields { grid-template-columns: 2fr 1fr 1fr; align-items: end; }
+	.link-fields { grid-template-columns: 1fr 1fr; }
 }
 </style>

@@ -5,6 +5,7 @@ pub mod content;
 pub mod data_class;
 pub mod db;
 pub mod fs;
+pub mod links;
 pub mod live;
 pub mod ops;
 pub mod roots;

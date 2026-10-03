@@ -3,6 +3,8 @@
 const PUBLIC = ['/login', '/setup'];
 
 export default defineNuxtRouteMiddleware(async (to) => {
+	// Public links are for people without an account: no session at all.
+	if (to.path.startsWith('/s/')) return;
 	const { me, loaded, load } = useSession();
 	if (!loaded.value) await load();
 	const path = to.path.replace(/\/+$/, '') || '/';

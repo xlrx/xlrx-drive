@@ -431,6 +431,64 @@ async function shareFiles(page: Page, browser: Browser, bertSetup: string) {
 	await bert.context().close();
 }
 
+/** Public links: with a password to download, and a file request; anonymous, then ended. */
+async function publicLinks(page: Page, browser: Browser) {
+	await page.getByRole('link', { name: 'Dateien', exact: true }).click();
+	await page.getByRole('button', { name: 'Aktionen für Projekte' }).click();
+	await page.getByRole('menuitem', { name: 'Teilen' }).click();
+	const sheet = page.getByRole('dialog', { name: '„Projekte“ teilen' });
+	await sheet.getByLabel('Art des Links').selectOption('download');
+	await sheet.getByLabel('Passwort für den Link').fill('Gartenzaun 42');
+	await sheet.getByRole('button', { name: 'Link erstellen' }).click();
+	const url = await sheet.getByLabel('Neuer Link').inputValue();
+	expect(url).toMatch(/\/s\/[A-Za-z0-9_-]{22}$/);
+	await sheet.getByLabel('Art des Links').selectOption('upload');
+	await sheet.getByRole('button', { name: 'Link erstellen' }).click();
+	await expect(sheet.getByRole('button', { name: 'Link „Nur hochladen“ beenden' })).toBeVisible();
+	const requestUrl = await sheet.getByLabel('Neuer Link').inputValue();
+	expect(requestUrl).not.toBe(url);
+	await sheet.getByRole('button', { name: 'Schließen' }).click();
+
+	// Someone without an account: password first, then browse and download.
+	const ctx = await browser.newContext();
+	const anon = await ctx.newPage();
+	await anon.goto(url);
+	await expect(anon.getByRole('heading', { name: 'Geschützter Link' })).toBeVisible();
+	await anon.getByLabel('Passwort').fill('falsch');
+	await anon.getByRole('button', { name: 'Öffnen' }).click();
+	await expect(anon.getByText('Falsches Passwort.')).toBeVisible();
+	await anon.getByLabel('Passwort').fill('Gartenzaun 42');
+	await anon.getByRole('button', { name: 'Öffnen' }).click();
+	await expect(anon.getByRole('heading', { name: 'Projekte' })).toBeVisible();
+	await expect(anon.getByText(/Geteilt von/)).toBeVisible();
+	const [download] = await Promise.all([
+		anon.waitForEvent('download'),
+		anon.getByRole('link', { name: 'Plan.txt herunterladen' }).click()
+	]);
+	expect(download.suggestedFilename()).toBe('Plan.txt');
+	await anon.getByRole('link', { name: 'Plan.txt', exact: true }).click();
+	await expect(anon.getByRole('heading', { name: 'Plan.txt' })).toBeVisible();
+	await expect(anon.getByRole('link', { name: 'Herunterladen' })).toBeVisible();
+
+	// A file request: drop a file without seeing the folder; the owner sees it arrive.
+	await anon.goto(requestUrl);
+	await expect(anon.getByRole('heading', { name: /Dateien an .* senden/ })).toBeVisible();
+	await expect(anon.getByRole('link', { name: 'Plan.txt', exact: true })).toHaveCount(0);
+	await anon.getByTestId('link-upload').setInputFiles({ name: 'Von draußen.txt', mimeType: 'text/plain', buffer: Buffer.from('Hallo') });
+	await expect(anon.getByText('1 Datei gesendet.')).toBeVisible();
+	await page.getByRole('link', { name: 'Projekte', exact: true }).click();
+	await expect(page.getByRole('link', { name: 'Von draußen.txt', exact: true })).toBeVisible();
+
+	// Ended: the link is gone.
+	await page.getByRole('button', { name: 'Teilen' }).first().click();
+	await page.getByRole('dialog').getByRole('button', { name: 'Link „Herunterladen“ beenden' }).click();
+	await expect(page.getByRole('dialog').getByRole('button', { name: 'Link „Herunterladen“ beenden' })).toHaveCount(0);
+	await page.getByRole('dialog').getByRole('button', { name: 'Schließen' }).click();
+	await anon.goto(url);
+	await expect(anon.getByText(/Diesen Link gibt es nicht/)).toBeVisible();
+	await ctx.close();
+}
+
 /** Data class of a folder: "Nur lokal" until allowed on purpose; files inside and the administration show it. */
 async function classifyFolder(page: Page) {
 	const link = (name: string) => page.getByRole('link', { name, exact: true });
@@ -514,6 +572,7 @@ test('Einrichtung, Anmeldung, Verwaltung und Dateien', async ({ page, browser })
 		await searchFiles(page, data);
 		await shareFiles(page, browser, bertSetup);
 		await classifyFolder(page);
+		await publicLinks(page, browser);
 		await uploadLarge(page, data);
 	}
 	await connectDevice(page);

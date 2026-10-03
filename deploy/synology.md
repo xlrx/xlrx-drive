@@ -136,7 +136,23 @@ Solange es keine Cloud-Funktionen gibt (KI-Suche ab M4, Außen-Cache ab M3b), ve
 NAS. Die **Verwaltung** zeigt unter „Datenklassen“ jeden Ordner mit eigener Einstellung – das Verzeichnis,
 welche Daten wohin dürfen.
 
-## 12. DSM-Reverse-Proxy ablösen
+## 12. Öffentliche Links
+
+Wer ein Element verwaltet, kann im Teilen-Dialog einen Link anlegen: zum **Ansehen**, **Herunterladen**,
+**Nur hochladen** (Dateianfrage: andere legen Dateien in einen Ordner, ohne zu sehen, was darin ist) oder
+**Bearbeiten**. Die Linkseite (`https://drive.example.de/s/…`) braucht kein Konto. Optional mit Passwort,
+Ablaufdatum und einer Höchstzahl an Downloads; beenden geht jederzeit und wirkt sofort.
+
+- Über einen Link wird nie etwas gelöscht, umbenannt oder überschrieben: Gibt es einen Namen schon, bekommt die
+  neue Datei einen freien („Name (1).pdf“); eine neue Fassung über einen Bearbeiten-Link lässt die alte als Version.
+- Ein Link kann nie mehr als die Person, die ihn angelegt hat. Verliert sie die Rechte oder wird ihr Konto gesperrt,
+  funktioniert der Link nicht mehr.
+- Wer Passwörter oder Links rät, wird gesperrt (je Link und je Adresse). Alles steht im Protokoll der Verwaltung.
+- Größte Datei über einen Link: `XLRX_LINK_UPLOAD_MAX_MB` in `.env` (Standard 10 240 MB).
+- Links laufen über den Heimanschluss. Der Außen-Beschleuniger für große Dateien (S3) kommt mit M3b;
+  „Nur lokal“-Inhalte gehen auch dann nie über S3.
+
+## 13. DSM-Reverse-Proxy ablösen
 
 1. Bestehende Regeln (Systemsteuerung → Anmeldeportal → Erweitert → Reverse Proxy) als Blöcke in `Caddyfile` übernehmen.
 2. Caddy läuft parallel; über die Caddy-IP testen (`curl --resolve fotos.example.de:443:192.168.1.20 https://fotos.example.de`).

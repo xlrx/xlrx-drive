@@ -46,6 +46,8 @@ pub struct Inner {
     pub extract: std::sync::OnceLock<crate::extract::Running>,
     /// Full-text search, once started (see [`crate::search::start`]).
     pub search: std::sync::OnceLock<crate::search::Search>,
+    /// Requests per address on public links (see [`crate::files::links`]).
+    pub public_limit: crate::files::links::RateLimit,
     /// Running watchers per root (dropping one stops it).
     watchers: std::sync::Mutex<std::collections::HashMap<i64, notify::RecommendedWatcher>>,
 }
@@ -87,6 +89,7 @@ impl AppState {
             search: Default::default(),
             jobs_wake: Default::default(),
             extract: Default::default(),
+            public_limit: Default::default(),
             db,
             secrets: SecretBox::new(&cfg.secret_key),
             cfg,

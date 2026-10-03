@@ -2,15 +2,15 @@
 // What stands for a file in lists (as in the design): a folder outline, a thumbnail of a picture,
 // or a small sheet of paper with the file's extension.
 const props = withDefaults(
-	defineProps<{ node: Pick<NodeInfo, 'id' | 'kind' | 'name' | 'mime' | 'rev'>; big?: boolean }>(),
-	{ big: false }
+	defineProps<{ node: Pick<NodeInfo, 'id' | 'kind' | 'name' | 'mime' | 'rev'>; big?: boolean; base?: string }>(),
+	{ big: false, base: '/api' }
 );
 const failed = ref(false);
 watch(
 	() => props.node.rev,
 	() => (failed.value = false)
 );
-const thumb = computed(() => (failed.value ? null : thumbUrl(props.node, props.big ? 256 : 64)));
+const thumb = computed(() => (failed.value ? null : thumbUrl(props.node, props.big ? 256 : 64, props.base)));
 const ext = computed(() => {
 	const dot = props.node.name.lastIndexOf('.');
 	return dot > 0 ? props.node.name.slice(dot + 1, dot + 5).toUpperCase() : '';

@@ -58,6 +58,9 @@ pub struct Config {
     /// Data class of folders without a setting (`XLRX_DEFAULT_DATA_CLASS`: `local` or `cloud`,
     /// default `local`: nothing leaves the house until allowed per folder, PLAN 7.4).
     pub default_data_class: crate::files::data_class::Class,
+    /// Largest file accepted through a public link, in bytes (`XLRX_LINK_UPLOAD_MAX_MB`, default
+    /// 10 240 MB).
+    pub link_upload_max: u64,
 }
 
 /// Parameters for argon2id. Calibrate on the DS918+ (J3455) so that one check takes ~250 ms
@@ -222,6 +225,7 @@ impl Config {
                     "XLRX_DEFAULT_DATA_CLASS: „local“ (Nur lokal) oder „cloud“ (Cloud erlaubt)",
                 )?,
             },
+            link_upload_max: u64::from(num("XLRX_LINK_UPLOAD_MAX_MB", 10_240)?) * 1_000_000,
         })
     }
 

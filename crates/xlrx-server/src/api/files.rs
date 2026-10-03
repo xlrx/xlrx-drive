@@ -283,7 +283,7 @@ pub struct ContentQuery {
 
 /// Types the browser may display directly (the web app mirrors this in `opensInBrowser`). Everything else (HTML, SVG, scripts …) is only
 /// offered as a download.
-fn inline_allowed(mime: &str) -> bool {
+pub(crate) fn inline_allowed(mime: &str) -> bool {
     (mime.starts_with("image/") && mime != "image/svg+xml")
         || mime.starts_with("video/")
         || mime.starts_with("audio/")
@@ -335,17 +335,22 @@ pub async fn content(
     .await
 }
 
+/// The type a file is served as (from its name).
+pub(crate) fn mime_of(name: &str) -> String {
+    mime_guess::from_path(name)
+        .first_or_octet_stream()
+        .to_string()
+}
+
 /// Serves a file of a person with the safety headers for user content.
-async fn serve(
+pub(crate) async fn serve(
     req: Request,
     path: &std::path::Path,
     name: &str,
     inline: bool,
     hash: Option<&[u8]>,
 ) -> ApiResult<Response> {
-    let mime = mime_guess::from_path(name)
-        .first_or_octet_stream()
-        .to_string();
+    let mime = mime_of(name);
     let inline = inline && inline_allowed(&mime);
     let mut res = ServeFile::new(path)
         .oneshot(req)
@@ -574,10 +579,20 @@ pub async fn thumbnail(
     Path(id): Path<i64>,
     Query(q): Query<ThumbQuery>,
 ) -> ApiResult<Response> {
+    let (node, root) = visible(&st, &me, id).await?;
+    thumbnail_of(&st, &node, &root, &q).await
+}
+
+/// The thumbnail of a node already checked to be visible.
+pub(crate) async fn thumbnail_of(
+    st: &AppState,
+    node: &NodeRow,
+    root: &RootRow,
+    q: &ThumbQuery,
+) -> ApiResult<Response> {
     if !thumbs::SIZES.contains(&q.s) {
         return Err(ApiError::bad("Ungültige Größe."));
     }
-    let (node, root) = visible(&st, &me, id).await?;
     let mime = mime_guess::from_path(&node.name).first_or_octet_stream();
     if node.is_dir() || !thumbs::supported(mime.essence_str()) {
         return Err(ApiError::NotFound);
@@ -606,7 +621,7 @@ pub async fn thumbnail(
                 .acquire()
                 .await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
-            let path = roots::dir(&data_dir, &root).join(db::rel_path(&st.db, node.id).await?);
+            let path = roots::dir(&data_dir, root).join(db::rel_path(&st.db, node.id).await?);
             blocking(move || make_thumbnail(&path, &state_dir, size))
                 .await?
                 .map_err(io_err)?

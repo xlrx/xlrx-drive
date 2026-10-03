@@ -108,6 +108,7 @@ pub fn config() -> Config {
         ocr_langs: "deu+eng".into(),
         extract_workers: 1,
         default_data_class: xlrx_server::files::data_class::Class::Local,
+        link_upload_max: 10_000_000,
     }
 }
 

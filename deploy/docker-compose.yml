@@ -68,6 +68,8 @@ services:
       # Data class of folders without a setting of their own: local (never processed outside the
       # home network) or cloud (PLAN 7.4).
       XLRX_DEFAULT_DATA_CLASS: ${XLRX_DEFAULT_DATA_CLASS:-local}
+      # Largest file someone may send through a public link (MB).
+      XLRX_LINK_UPLOAD_MAX_MB: ${XLRX_LINK_UPLOAD_MAX_MB:-10240}
       # "My Drive" of account NAME: /volume1/homes/NAME/Drive (the Synology Drive folder).
       XLRX_DATA_DIR: /mnt/volume1
       # Text of Office, iWork and mail documents for the search (container below, internal only).

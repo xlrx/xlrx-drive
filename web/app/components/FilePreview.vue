@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // Preview of a single file. Content comes from the API with its own strict CSP; text is only
-// ever shown as text, never interpreted.
-const props = defineProps<{ node: NodeDetail }>();
+// ever shown as text, never interpreted. `base`: the API prefix (a public link has its own).
+const props = withDefaults(defineProps<{ node: NodeInfo; base?: string }>(), { base: '/api' });
 
 /** Text previews read at most this much (range request). */
 const TEXT_LIMIT = 256 * 1024;
@@ -19,7 +19,7 @@ watch(
 		failed.value = false;
 		if (kind.value !== 'text') return;
 		try {
-			const res = await fetch(contentUrl(props.node.id), {
+			const res = await fetch(contentUrl(props.node.id, opensInBrowser(props.node.mime), props.base), {
 				credentials: 'same-origin',
 				headers: { range: `bytes=0-${TEXT_LIMIT - 1}` }
 			});
@@ -46,25 +46,25 @@ const message = computed(() => {
 	<div class="preview" :class="kind">
 		<img
 			v-if="kind === 'image' && !failed"
-			:src="contentUrl(node.id, true)"
+			:src="contentUrl(node.id, true, base)"
 			:alt="node.name"
 			@error="failed = true"
 		/>
 		<video
 			v-else-if="kind === 'video' && !failed"
-			:src="contentUrl(node.id, true)"
+			:src="contentUrl(node.id, true, base)"
 			controls
 			preload="metadata"
 			@error="failed = true"
 		></video>
 		<audio
 			v-else-if="kind === 'audio' && !failed"
-			:src="contentUrl(node.id, true)"
+			:src="contentUrl(node.id, true, base)"
 			controls
 			preload="metadata"
 			@error="failed = true"
 		></audio>
-		<iframe v-else-if="kind === 'pdf'" :src="contentUrl(node.id, true)" :title="node.name"></iframe>
+		<iframe v-else-if="kind === 'pdf'" :src="contentUrl(node.id, true, base)" :title="node.name"></iframe>
 		<div v-else-if="kind === 'text' && text !== null" class="text">
 			<pre>{{ text }}</pre>
 			<p v-if="truncated" class="muted">Gekürzt – die ganze Datei gibt es per Download.</p>

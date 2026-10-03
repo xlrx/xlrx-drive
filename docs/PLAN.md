@@ -1152,7 +1152,7 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
   - Textextraktion auf dem NAS (siehe 6.6) mit Fortschritt in der Verwaltung.
   - Web: Suche mit Vorschlägen (Dateinamen, Suchfilter, zuletzt gesucht – nur im Browser gespeichert), Ergebnisse mit Bildern als Kacheln und Textausschnitten, Suche in einem Ordner.
   - Offen für später: `von:`, `ist:`, `dokument:`, `ort:` und die Facetten Besitzer und Ort (M3/M4); Messung p95 mit echtem Bestand auf dem DS918+.
-- **M3 begonnen – Teilen und Datenklassen erledigt (lokal getestet):**
+- **M3 begonnen – Teilen, Datenklassen und öffentliche Links erledigt (lokal getestet):**
   - Eine Rechteprüfung für alles (Durchsuchen, Inhalte, Vorschaubilder, Versionen, Uploads, Änderungen, Papierkorb, Sync, Suche, Live-Ereignisse).
     Rolle = höchste aus Besitz der eigenen Ablage, Mitgliedschaft in einer Geteilten Ablage, Freigabe auf dem Element oder einem Ordner darüber
     (an die Person oder eine ihrer Gruppen, nicht abgelaufen). Ohne Rolle gibt es das Element nicht – auch für Admins.
@@ -1171,6 +1171,19 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
     `data_class::allows_cloud` ist die eine Prüfung, die jeder spätere Cloud-Weg (M3b, M4, Backup) vor dem Versand aufrufen muss.
   - Web: Datenklasse im Ordner und in den Aktionen, Kennzeichnung in der Liste, „Cloud-Analyse“ in den Details einer Datei,
     Verzeichnis aller Einstellungen in der Verwaltung (als Tabelle zu sichern).
+  - Öffentliche Links (9.2): Ansehen, Herunterladen, Nur hochladen (Dateianfrage, sieht nichts vom Ordner), Bearbeiten (herunterladen,
+    Dateien hinzufügen, neue Fassungen – die alten bleiben als Versionen). Kein Link kann löschen, umbenennen, verschieben oder überschreiben:
+    ein belegter Name bekommt einen freien. Token mit 128 Bit; in der DB nur sein SHA-256 und das Token mit dem Serverschlüssel versiegelt
+    (zum erneuten Kopieren). Optional Passwort (argon2id; nach 5 Fehlversuchen Sperre je Link, nach 20 je Adresse; Freischaltung als
+    Cookie nur für diesen Link, an das aktuelle Passwort gebunden), Ablaufdatum, Höchstzahl Downloads (gezählt werden begonnene Downloads).
+    Anlegen nur mit Verwalten-Recht und erneuter Bestätigung; Beenden sofort. Ein Link gilt nie mehr als die Rechte seines Erstellers:
+    verliert der sie, ist gesperrt oder liegt das Element im Papierkorb, geht der Link nicht mehr. Unbekannte Tokens zählen als
+    Fehlversuch der Adresse; dazu höchstens 600 Anfragen je Adresse und Minute. Inhalte mit `Content-Disposition` und CSP `sandbox` wie
+    bisher. Uploads über Links höchstens `XLRX_LINK_UPLOAD_MAX_MB` (Standard 10 240). Audit-Log: angelegt, beendet, entsperrt,
+    Fehlversuch, heruntergeladen, hochgeladen, ersetzt.
+  - Web: Abschnitt „Link“ im Teilen-Dialog (Art, Passwort, Ablauf, Downloads; Kopieren, Beenden) und die Linkseite `/s/…` ohne Konto:
+    Passwort, Ordner mit Vorschaubildern, Vorschau, Herunterladen, Hochladen per Ziehen oder Auswahl.
+  - Noch nicht: Ordner als ZIP herunterladen; Link-Ereignisse im Aktivitätsstream (kommt mit dem Aktivitätsstream).
 
 **Nächster Schritt:** Inbetriebnahme auf dem DS918+ mit den Spike-Messungen (M0) und dem M1-Nachweis mit den echten Daten.
 
