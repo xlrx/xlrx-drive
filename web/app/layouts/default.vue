@@ -23,6 +23,7 @@ watch(
 const sections = computed(() => [
 	{ to: '/', label: 'Start', icon: 'home' as const, exact: true },
 	{ to: '/files', label: 'Dateien', icon: 'folder' as const },
+	{ to: '/search', label: 'Suche', icon: 'search' as const },
 	{ to: '/trash', label: 'Papierkorb', icon: 'trash' as const }
 ]);
 const current = (s: { to: string; exact?: boolean }) =>

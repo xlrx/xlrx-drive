@@ -305,6 +305,67 @@ async function changeFiles(page: Page, data: string) {
 	expect(readFileSync(join(drive, 'Belege/Rechnung.txt'), 'utf8')).toBe('Rechnung 1');
 }
 
+/** Search: content of a file put on the NAS, word stems, kinds, suggestions, recent, folder. */
+async function searchFiles(page: Page, data: string) {
+	const drive = join(data, 'homes/admin/Drive');
+	await mkdir(join(drive, 'Notizen'), { recursive: true });
+	await writeFile(join(drive, 'Notizen/Heizung.txt'), 'Die Wärmepumpe im Keller wurde gewartet.\n');
+	const field = page.getByRole('combobox', { name: 'Suchen', exact: true });
+	const link = (name: string) => page.getByRole('link', { name, exact: true });
+
+	await page.getByRole('link', { name: 'Suche', exact: true }).click();
+	await expect(field).toBeFocused();
+	// Found by its content once the watcher saw it and the text was read.
+	await expect(async () => {
+		await field.fill('Wärmepumpe');
+		await field.press('Enter');
+		await expect(link('Heizung.txt')).toBeVisible({ timeout: 1000 });
+	}).toPass({ timeout: 20_000 });
+	await expect(page).toHaveURL(/\/search\?q=W%C3%A4rmepumpe/);
+	await expect(page.locator('.hits mark')).toHaveText('Wärmepumpe');
+	await expect(page.getByText('Meine Ablage › Notizen')).toBeVisible();
+
+	// Word stems; counts per kind, and choosing one.
+	await field.fill('Rechnungen');
+	await field.press('Enter');
+	await expect(link('Rechnung.txt')).toBeVisible();
+	await expect(link('Quittung.txt')).toBeVisible();
+	const texts = page.getByRole('button', { name: /^Texte/ });
+	await texts.click();
+	await expect(texts).toHaveAttribute('aria-pressed', 'true');
+	await expect(page.getByText(/Treffer · Texte/)).toBeVisible();
+
+	// While typing: names, chosen with the keyboard.
+	await field.fill('Heiz');
+	const option = page.getByRole('listbox', { name: 'Dateinamen' }).getByRole('option', { name: /Heizung\.txt/ });
+	await expect(option).toBeVisible();
+	await expect(option.locator('strong')).toHaveText('Heiz');
+	await field.press('ArrowDown');
+	await expect(option).toHaveAttribute('aria-selected', 'true');
+	await field.press('Enter');
+	await expect(page.getByRole('heading', { name: 'Heizung.txt' })).toBeVisible();
+
+	// Recent searches stay in this browser.
+	await page.getByRole('link', { name: 'Suche', exact: true }).click();
+	await expect(page.getByRole('button', { name: 'Wärmepumpe' })).toBeVisible();
+	await page.getByRole('button', { name: 'Löschen' }).click();
+	await expect(page.getByRole('button', { name: 'Wärmepumpe' })).toHaveCount(0);
+
+	// Only within a folder.
+	await page.getByRole('link', { name: 'Dateien', exact: true }).click();
+	await link('Projekte').click();
+	await page.getByRole('link', { name: 'In diesem Ordner suchen' }).click();
+	await expect(page.getByText('In „Projekte“')).toBeVisible();
+	await field.fill('Zeile');
+	await field.press('Enter');
+	await expect(link('Plan.txt')).toBeVisible();
+	await field.fill('Wärmepumpe');
+	await field.press('Enter');
+	await expect(page.getByText('Nichts gefunden.')).toBeVisible();
+	await page.getByRole('button', { name: 'Überall suchen' }).click();
+	await expect(link('Heizung.txt')).toBeVisible();
+}
+
 test('Einrichtung, Anmeldung, Verwaltung und Dateien', async ({ page }) => {
 	const setupUrl = process.env.XLRX_SETUP_URL;
 	test.skip(!setupUrl, 'XLRX_SETUP_URL fehlt (e2e/run.sh verwenden)');
@@ -362,6 +423,7 @@ test('Einrichtung, Anmeldung, Verwaltung und Dateien', async ({ page }) => {
 	if (data) {
 		await browseFiles(page, data);
 		await changeFiles(page, data);
+		await searchFiles(page, data);
 		await uploadLarge(page, data);
 	}
 	await connectDevice(page);

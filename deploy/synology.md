@@ -107,7 +107,24 @@ sudo docker compose exec server xlrx-server bench-argon2 32768 2 1
 Werte wählen, die ~250 ms ergeben, in `.env` eintragen (`XLRX_ARGON2_M_KIB`, `XLRX_ARGON2_T`), `docker compose up -d`.
 Bestehende Passwörter bleiben gültig; sie tragen ihre Parameter in sich.
 
-## 10. DSM-Reverse-Proxy ablösen
+## 10. Suche
+
+Die Suche baut ihren Index beim ersten Start selbst auf und liest danach den Text der Dateien:
+PDFs und gescannte Dokumente (Texterkennung mit Tesseract, Deutsch und Englisch) im Server-Container,
+Word, Excel, PowerPoint, Pages, Numbers, Keynote, OpenDocument und Mails im Container `tika`.
+Beide laufen nur im internen Netz ohne Internetzugang. Der Server schickt Dokumente ausschließlich an
+Adressen im Heimnetz (`XLRX_TIKA_URL`); eine Adresse außerhalb lehnt er beim Start ab. Darum dürfen auch
+„Nur lokal“-Ordner gelesen werden.
+
+Den Fortschritt zeigt die **Verwaltung** unter „Suche“: wie weit der Index ist, wie viele Inhalte gelesen
+sind und was noch wartet. Beim ersten Durchlauf über alle Dateien braucht vor allem die Texterkennung
+Zeit (einige Sekunden je Seite, höchstens 30 Seiten je Dokument). Was zuletzt geändert wurde, kommt zuerst.
+Ein zweiter Durchlauf parallel: `XLRX_EXTRACT_WORKERS=2` in `.env` (mehr nicht, sonst wird das NAS träge).
+
+Den Index neu aufbauen (z. B. nach einem Plattenfehler): Server stoppen, `/volume1/xlrx-state/index`
+löschen, Server starten. Gelesene Texte liegen in der Datenbank und werden nicht noch einmal gelesen.
+
+## 11. DSM-Reverse-Proxy ablösen
 
 1. Bestehende Regeln (Systemsteuerung → Anmeldeportal → Erweitert → Reverse Proxy) als Blöcke in `Caddyfile` übernehmen.
 2. Caddy läuft parallel; über die Caddy-IP testen (`curl --resolve fotos.example.de:443:192.168.1.20 https://fotos.example.de`).

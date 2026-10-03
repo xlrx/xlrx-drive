@@ -408,8 +408,8 @@ Sonderports und kein eigenes Protokoll. Durch jede Firewall, die Web-Surfen erla
 | Quelle | Wie |
 |---|---|
 | Dateiname, Pfad | Tantivy, Edge-N-Gramme für Suche während der Eingabe |
-| Text aus PDF/Office/Pages/Numbers/Keynote/EML/MSG/TXT/MD/Code | Apache Tika im Worker. PDFs ohne Textebene gehen zur OCR. |
-| Gescannte PDFs & Bilder mit Text | OCR per Vision-Modell (Cloud) oder Tesseract `deu+eng` lokal (Fallback bzw. sensible Ordner) |
+| Text aus PDF/Office/Pages/Numbers/Keynote/EML/MSG/TXT/MD/Code | Text-Dateien direkt, PDFs mit `pdftotext` (Poppler) im Server, Office/iWork/Mails mit Apache Tika (Container im internen Netz). PDFs ohne Textebene gehen zur OCR. |
+| Gescannte PDFs & Bilder mit Text | Tesseract `deu+eng` lokal (seit M2: gescannte PDFs bis 30 Seiten, TIFF-Scans); ab M4 für Fotos zusätzlich OCR per Vision-Modell (nur „Cloud erlaubt“) |
 | Bildinhalt | „Cloud erlaubt“: Vision-Modell erzeugt Beschreibung, Tags, erkannten Text und Dokumenttyp (siehe 7.2). „Nur lokal“: **CLIP-Bildvektoren** auf dem NAS (siehe 7.5) |
 | EXIF / Medien-Metadaten | Aufnahmedatum, Kamera, **Ort** (Offline-Reverse-Geocoding mit GeoNames: „Kroatien 2024“ findet Urlaubsfotos) |
 | Metadaten | Typ, Größe, Besitzer, Änderungsdatum, „bearbeitet von“, Freigabestatus, markiert |
@@ -454,6 +454,12 @@ keine erneute Analyse aus, nur die Pfadfelder im Index werden aktualisiert.
 
 ### 6.6 Verarbeitungs-Pipeline
 Job-Queue in Postgres (`FOR UPDATE SKIP LOCKED`), Retries mit Backoff, Dead-Letter-Liste und Admin-Ansicht.
+
+**Umgesetzt in M2:** Der Suchindex folgt dem Journal und den gelesenen Texten (Cursor in seinen eigenen Commits) und
+legt für jeden Inhalt ohne Text einen Auftrag `extract` an. Ein Worker liest eine gegen den Hash geprüfte Kopie der
+Datei, so landet ein Text nie beim falschen Inhalt. Fehlt ein Programm (Tika, Tesseract), wartet der Auftrag
+(`waiting`) und läuft beim nächsten Start mit dem Programm. Unlesbare Dateien (verschlüsselt, kaputt) bekommen einen
+leeren Text und werden nicht wiederholt. Alles läuft auf dem NAS.
 
 ```
 Änderung ─► hash/chunk ─► metadaten (MIME-Sniffing, EXIF, Geo)
@@ -811,7 +817,7 @@ access_events(user_id, node_id, at, source)                 -- privat, partition
 user_item_stats(user_id, node_id, frecency, last_access, weekday_hour_hist, …)
 notifications(id, user_id, event_id, read_at)
 
-content_text(hash, lang, source[extract|ocr|vision], text)  -- komprimiert (TOAST/lz4)
+content_text(hash, lang, source[plain|pdf|ocr|tika|vision], text, truncated, seq)  -- komprimiert (lz4)
 content_vision(hash, model, caption, tags, doc_type, detected_date, raw jsonb)
 content_embeddings(hash, chunk_no, model, vec halfvec(1024))
 search_vectors_cloud(node_id, chunk_no, model, ancestor_ids, vec halfvec(1024))
@@ -823,7 +829,7 @@ search_vectors_clip(node_id, model, ancestor_ids, vec halfvec(512))
 data_class(node_id, class[cloud|local])                     -- Datenklasse pro Ordner, vererbt
 s3_cache(content_hash, bucket_key, size, reason[link|remote], expires_at, last_hit)
       -- Außen-Cache (15.2), nur für Inhalte der Klasse „cloud“
-jobs(id, kind, key, priority, state, attempts, run_after, last_error, …)
+jobs(id, kind, key, priority, state[queued|waiting|failed], attempts, run_after, last_error, …)
 ai_usage(day, provider, model, tokens_in, tokens_out, cost)
 ```
 
@@ -1119,7 +1125,7 @@ Zwei parallele Stränge: **A – Server/Web/Suche** liefert früh Nutzen, währe
 Größen: S ≈ Tage, M ≈ 1–3 Wochen, L ≈ 3–6 Wochen, XL ≈ 6+ Wochen fokussierte Arbeit. Das sind grobe Richtwerte.
 Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
 
-**Stand 2026-10-02:**
+**Stand 2026-10-03:**
 - **B1 erledigt:** Chunker, Sync-Engine (inkrementell), Simulator; nach einem adversarialen Review 1 Mio. Seeds ohne Befund (ADR 0001).
 - **M0 im Code erledigt:** Server mit Konten und Anmeldung (Passwort + TOTP oder Passkey, Wiederherstellungscodes, Step-up, Verwaltung, Audit-Log), Web-App dazu, Docker-Image, compose mit Caddy (macvlan, HTTP/3), CI inkl. Browser-Test und Prüfung ohne AVX.
 - **Offen für M0:** Inbetriebnahme auf dem DS918+ (`deploy/synology.md`) und die Messungen aus `spikes/ds918/`.
@@ -1135,6 +1141,16 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
     „Dekompressionsbomben“. PDF-, HEIC- und Video-Vorschauen kommen mit dem Worker (M2).
   - Web-App mit Durchsuchen, Vorschau, Hochladen, Versionen, Papierkorb und Live-Aktualisierung; Startseite mit Begrüßung und Berglandschaft nach Tageszeit aus dem App-Entwurf.
 - **M1 im Code fertig.** Offen bleibt der Nachweis auf dem NAS (echte Daten aus Synology Drive, Änderungen per SMB).
+- **M2 im Code erledigt (lokal getestet, ohne NAS):**
+  - Suchindex (Tantivy) im Zustandsverzeichnis, gespeist aus dem Journal: Umbenennen, Verschieben, Löschen und Wiederherstellen kommen sofort an;
+    beim Verschieben eines Ordners in einen anderen wird der ganze Teilbaum neu eingetragen (das Journal merkt sich, ob sich der Elternordner geändert hat).
+    Der Index speichert seinen Stand in den eigenen Commits, setzt nach einem Neustart dort fort und baut sich aus der Datenbank neu auf, wenn er fehlt oder kaputt ist.
+  - Deutsch und Englisch mit Wortstamm („Rechnungen“ findet „Rechnung“), Umlaute und ß gefaltet, Wortanfänge in Namen beim Tippen, ähnliche Schreibweisen,
+    wenn nichts genau passt. Syntax: Wörter, „Phrasen“, `-ausschluss`, `typ:`, `in:`, `nach:`, `vor:`; Treffer je Dateityp; Textausschnitte mit Markierung.
+  - Rechte doppelt geprüft: der Index sieht nur lesbare Ablagen, jeder Treffer wird in Postgres noch einmal geprüft. Eine Suche wartet kurz, bis eigene Änderungen im Index sind.
+  - Textextraktion auf dem NAS (siehe 6.6) mit Fortschritt in der Verwaltung.
+  - Web: Suche mit Vorschlägen (Dateinamen, Suchfilter, zuletzt gesucht – nur im Browser gespeichert), Ergebnisse mit Bildern als Kacheln und Textausschnitten, Suche in einem Ordner.
+  - Offen für später: `von:`, `ist:`, `dokument:`, `ort:` und die Facetten Besitzer und Ort (M3/M4); Messung p95 mit echtem Bestand auf dem DS918+.
 
 **Nächster Schritt:** Inbetriebnahme auf dem DS918+ mit den Spike-Messungen (M0) und dem M1-Nachweis mit den echten Daten.
 

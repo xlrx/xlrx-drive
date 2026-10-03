@@ -281,6 +281,7 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 				<button type="button" class="text rescan" :disabled="busy" @click="rescan">
 					<Icon name="sync" :size="15" :stroke="1.6" />{{ busy ? 'Bitte warten …' : 'Neu einlesen' }}
 				</button>
+				<NuxtLink :to="{ path: '/search', query: { folder: node.id } }" class="icon" aria-label="In diesem Ordner suchen"><Icon name="search" :size="18" :stroke="1.6" /></NuxtLink>
 				<button type="button" class="icon" aria-label="Listenansicht" :aria-pressed="view.layout === 'list'" @click="view.layout = 'list'"><Icon name="list" :size="18" :stroke="1.6" /></button>
 				<button type="button" class="icon" aria-label="Rasteransicht" :aria-pressed="view.layout === 'grid'" @click="view.layout = 'grid'"><Icon name="grid" :size="18" :stroke="1.6" /></button>
 			</div>

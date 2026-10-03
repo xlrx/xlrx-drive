@@ -20,8 +20,19 @@ type Audit = {
 	ip: string | null;
 };
 
+type SearchStatus = {
+	running: boolean;
+	journal: number;
+	indexed: number;
+	texts: number;
+	jobs: { queued: number; waiting: number; failed: number };
+	extract: { workers: number; pdf: boolean; ocr: boolean; tika: boolean } | null;
+	problems: { state: 'failed' | 'waiting'; error: string | null; n: number }[];
+};
+
 const { me } = useSession();
 const g = useGuard();
+const search = ref<SearchStatus | null>(null);
 const users = ref<User[]>([]);
 const audit = ref<Audit[]>([]);
 const form = ref({ username: '', display_name: '', email: '', is_admin: false });
@@ -30,7 +41,31 @@ const link = ref<null | { who: string; url: string }>(null);
 async function refresh() {
 	users.value = await apiGet<User[]>('/admin/users');
 	audit.value = await apiGet<Audit[]>('/admin/audit?limit=50');
+	search.value = await apiGet<SearchStatus>('/admin/search');
 }
+
+const retryJobs = () =>
+	g.run(async () => {
+		await apiPost('/admin/jobs/retry');
+		await refresh();
+	});
+
+const num = (n: number) => n.toLocaleString('de-DE');
+const indexState = computed(() => {
+	const s = search.value;
+	if (!s?.running) return 'läuft nicht';
+	const behind = s.journal - s.indexed;
+	return behind > 0 ? `holt ${num(behind)} Änderungen nach` : 'aktuell';
+});
+const readers = computed(() => {
+	const e = search.value?.extract;
+	if (!e) return 'Textextraktion ausgeschaltet';
+	return [
+		`PDF ${e.pdf ? '✓' : 'fehlt'}`,
+		`Texterkennung ${e.ocr ? '✓' : 'fehlt'}`,
+		`Office (Tika) ${e.tika ? '✓' : 'nicht eingerichtet'}`
+	].join(' · ');
+});
 onMounted(() => {
 	if (me.value?.is_admin) g.run(refresh);
 });
@@ -129,6 +164,25 @@ const copy = () => link.value && navigator.clipboard.writeText(link.value.url);
 				</form>
 			</section>
 
+			<section v-if="search" class="card">
+				<h2 style="margin-top: 0">Suche</h2>
+				<div class="kv"><span>Suchindex</span><span>{{ indexState }}</span></div>
+				<div class="kv"><span>Gelesene Inhalte</span><span>{{ num(search.texts) }}</span></div>
+				<div class="kv">
+					<span>Warteschlange</span>
+					<span>{{ num(search.jobs.queued) }} offen · {{ num(search.jobs.waiting) }} warten · {{ num(search.jobs.failed) }} fehlgeschlagen</span>
+				</div>
+				<div class="kv"><span>Liest</span><span>{{ readers }}</span></div>
+				<ul v-if="search.problems.length" class="problems">
+					<li v-for="(p, i) in search.problems" :key="i">
+						{{ num(p.n) }} × {{ p.state === 'failed' ? 'fehlgeschlagen' : 'wartet' }}: {{ p.error ?? 'ohne Angabe' }}
+					</li>
+				</ul>
+				<button v-if="search.jobs.failed" type="button" :disabled="g.busy.value" @click="retryJobs">
+					Fehlgeschlagene erneut versuchen
+				</button>
+			</section>
+
 			<section class="card">
 				<h2 style="margin-top: 0">Protokoll</h2>
 				<table>
@@ -152,5 +206,6 @@ const copy = () => link.value && navigator.clipboard.writeText(link.value.url);
 </template>
 
 <style scoped>
+.problems { margin: 12px 0; padding-left: 1.1rem; font-size: 13.5px; color: var(--ink-3); }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 0 1rem; }
 </style>
