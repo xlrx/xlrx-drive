@@ -154,7 +154,7 @@ jobs:
           docker run --rm --entrypoint hashdir "$IMAGE:latest" /srv/web
       - name: compose-Datei prüfen
         run: |
-          for s in pg_password database_url xlrx_secret_key; do echo test > deploy/secrets/$s; done
+          for s in pg_password database_url xlrx_secret_key s3_access_key s3_secret_key; do echo test > deploy/secrets/$s; done
           docker compose --env-file deploy/.env.example -f deploy/docker-compose.yml config -q
       - name: Veröffentlichen (nur main)
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
