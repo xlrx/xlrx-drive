@@ -16,6 +16,7 @@ pub mod chunk;
 pub mod images;
 pub mod pipeline;
 pub mod provider;
+pub mod search;
 pub mod vectors;
 
 use std::collections::{HashMap, HashSet};
@@ -107,6 +108,8 @@ pub struct Ai {
     /// The last error per side, for the administration.
     pub(crate) errors: Mutex<HashMap<Side, String>>,
     pub(crate) running: std::sync::OnceLock<pipeline::Running>,
+    /// Query vectors (see [`search`]).
+    pub(crate) queries: search::Cache,
 }
 
 impl Ai {
@@ -119,6 +122,7 @@ impl Ai {
             sweep_now: AtomicBool::new(false),
             errors: Default::default(),
             running: Default::default(),
+            queries: Default::default(),
         })
     }
 

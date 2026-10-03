@@ -119,8 +119,22 @@ impl Drop for FakeAi {
     }
 }
 
+/// Words meaning the same for the test model (what a real model learns).
+const SYNONYMS: &[(&str, &str)] = &[
+    ("therme", "heizung"),
+    ("heizkessel", "heizung"),
+    ("ferien", "urlaub"),
+    ("doktor", "arzt"),
+    ("welpe", "hund"),
+    ("vierbeiner", "hund"),
+    ("küste", "strand"),
+];
+
 fn stem(w: &str) -> String {
     let w = w.to_lowercase();
+    if let Some((_, to)) = SYNONYMS.iter().find(|(from, _)| *from == w) {
+        return (*to).to_owned();
+    }
     for suffix in ["en", "er", "es", "e", "n", "s"] {
         if w.chars().count() > 4
             && let Some(s) = w.strip_suffix(suffix)
@@ -349,6 +363,7 @@ pub fn configure(cfg: &mut xlrx_server::config::Config, fake: &FakeAi) {
             vision_in: 0.25,
             vision_out: 0.50,
         },
+        max_distance: 0.9,
     });
     cfg.ai.local = Some(xlrx_server::config::LocalAi {
         url: fake.url.clone(),
@@ -356,6 +371,8 @@ pub fn configure(cfg: &mut xlrx_server::config::Config, fake: &FakeAi) {
         embed_dim: LOCAL_DIM as u32,
         clip_model: Some(CLIP_MODEL.into()),
         clip_dim: LOCAL_DIM as u32,
+        max_distance: 0.9,
+        clip_max_distance: 0.9,
     });
 }
 

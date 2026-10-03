@@ -322,10 +322,11 @@ const plural = (n: number) => (n === 1 ? '1 Treffer' : `${n.toLocaleString('de-D
 					</div>
 					<ul class="tiles">
 						<li v-for="p in pictures" :key="p.id">
-							<NuxtLink :to="`/files/${p.id}`" :aria-label="`${p.name}, ${folderTrail(p.folder)}`">
+							<NuxtLink :to="`/files/${p.id}`" :aria-label="`${p.name}, ${folderTrail(p.folder)}${p.by ? `, ${byLabel(p.by)}` : ''}`">
 								<img v-if="!broken.has(p.id)" :src="thumbUrl(p, 256)!" alt="" loading="lazy" @error="broken = new Set(broken).add(p.id)" />
 								<FileMark v-else :node="p" big />
 								<span class="tag" aria-hidden="true">{{ monthYear(p.mtime) }}</span>
+								<span v-if="p.by" class="by-tile" :title="byLabel(p.by)" aria-hidden="true">≈</span>
 							</NuxtLink>
 						</li>
 					</ul>
@@ -338,6 +339,7 @@ const plural = (n: number) => (n === 1 ? '1 Treffer' : `${n.toLocaleString('de-D
 								<FileMark :node="h" />
 								<span class="what">
 									<span class="name">{{ h.name }}</span>
+									<span v-if="h.by" class="by">{{ byLabel(h.by) }}</span>
 									<span v-if="h.snippet" class="snippet" aria-hidden="true">… <template v-for="(p, j) in h.snippet" :key="j"><mark v-if="p.hit">{{ p.text }}</mark><template v-else>{{ p.text }}</template></template> …</span>
 									<span :id="`wo-${h.id}`" class="where" aria-hidden="true">{{ folderTrail(h.folder) }}</span>
 								</span>
@@ -420,6 +422,11 @@ h2 { margin: 0; font-size: 13px; font-weight: 400; color: var(--muted); padding:
 .hits .what { gap: 4px; }
 .snippet { font-size: 13px; line-height: 1.45; color: var(--ink-3); overflow-wrap: anywhere; }
 .snippet mark { background: var(--highlight); color: var(--on-highlight); padding: 0 2px; }
+.by { align-self: flex-start; font-size: 11px; padding: 1px 6px; border-radius: 8px; background: var(--fill); color: var(--ink-2); }
+.by-tile {
+	position: absolute; right: 5px; top: 5px; font-size: 11px; line-height: 1; padding: 2px 4px; border-radius: 2px;
+	background: var(--paper); border: 1px solid var(--line-strong); color: var(--ink);
+}
 .empty { padding: 18px 24px; }
 .error { margin: 16px 24px; }
 .more { margin: 16px 24px; }

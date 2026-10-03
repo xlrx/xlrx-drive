@@ -105,6 +105,7 @@ pub async fn start(st: &AppState) -> Result<(), String> {
 }
 
 /// What a search looks for, with rights and folder names already resolved.
+#[derive(Clone, Debug)]
 pub struct Request {
     pub parsed: Parsed,
     /// Roots the person may read as a whole.
@@ -120,6 +121,17 @@ pub struct Request {
     pub limit: usize,
     /// Also similar spellings (when nothing matched exactly).
     pub fuzzy: bool,
+}
+
+/// Nodes found by meaning, checked (see [`Search::check`]).
+#[derive(Debug, Default)]
+pub struct Checked {
+    /// Those matching everything else the request asks for (with `typ:`).
+    pub ids: std::collections::HashSet<i64>,
+    /// Of the candidates, those the words match as well (the lexical search counts them).
+    pub lexical: std::collections::HashSet<i64>,
+    /// Counts per kind (without `typ:`) of the candidates only meaning found.
+    pub facets: Vec<(Category, u64)>,
 }
 
 /// What snippets of a hit can come from: its text (language, text) and what the AI saw in it.
@@ -143,6 +155,10 @@ struct Built {
     query: Box<dyn Query>,
     /// The same without the `typ:` filter (for the counts per kind).
     without_types: Box<dyn Query>,
+    /// Everything but the words ("in:", "typ:", dates, rights, exclusions), except phrases in
+    /// quotes: what a hit found by meaning must match as well.
+    semantic: Box<dyn Query>,
+    semantic_without_types: Box<dyn Query>,
     /// Has words to rank by; otherwise only filters (newest first).
     scored: bool,
 }
@@ -274,9 +290,13 @@ impl Search {
             return None;
         }
         let mut words = Vec::new();
+        let mut quoted = Vec::new();
         for c in &r.parsed.clauses {
             // A clause without searchable characters ("!!!") is left out rather than failing.
             if let Some(q) = self.clause(c, r.fuzzy) {
+                if c.quoted {
+                    quoted.push(q.box_clone());
+                }
                 words.push(q);
             }
         }
@@ -327,7 +347,7 @@ impl Search {
         }
         let types = (!r.parsed.types.is_empty()).then(|| self.types(&r.parsed.types));
 
-        let compose = |with_types: bool| -> Box<dyn Query> {
+        let compose = |with_types: bool, words: &[Box<dyn Query>]| -> Box<dyn Query> {
             let mut all: Vec<(Occur, Box<dyn Query>)> = Vec::new();
             all.extend(words.iter().map(|q| (Occur::Must, q.box_clone())));
             // Filters decide what matches, not how well.
@@ -342,8 +362,10 @@ impl Search {
             Box::new(BooleanQuery::new(all))
         };
         Some(Built {
-            query: compose(true),
-            without_types: compose(false),
+            query: compose(true, &words),
+            without_types: compose(false, &words),
+            semantic: compose(true, &quoted),
+            semantic_without_types: compose(false, &quoted),
             scored,
         })
     }
@@ -394,6 +416,7 @@ impl Search {
             query,
             without_types,
             scored,
+            ..
         }) = self.build(r)
         else {
             return Ok(None);
@@ -430,29 +453,8 @@ impl Search {
                 .search(without_types.as_ref(), &CategoryCounts)
                 .map_err(err)?
         };
-        let mut id_columns = HashMap::new();
-        let mut ids = Vec::with_capacity(addrs.len());
-        for a in addrs {
-            let col = match id_columns.entry(a.segment_ord) {
-                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-                std::collections::hash_map::Entry::Vacant(e) => e.insert(
-                    searcher
-                        .segment_reader(a.segment_ord)
-                        .fast_fields()
-                        .u64("id")
-                        .map_err(err)?,
-                ),
-            };
-            if let Some(id) = col.first(a.doc_id) {
-                ids.push(id as i64);
-            }
-        }
-        let facets = Category::ALL
-            .iter()
-            .zip(counts)
-            .filter(|(_, n)| *n > 0)
-            .map(|(c, n)| (*c, n))
-            .collect();
+        let ids = ids_of(&searcher, addrs)?;
+        let facets = facets(counts);
         Ok(Some(Found {
             ids,
             total,
@@ -460,6 +462,65 @@ impl Search {
             searcher,
             query,
         }))
+    }
+
+    /// Checks nodes found by meaning (PLAN 6.4) against everything else the request asks for:
+    /// rights, `in:`, `typ:`, dates, `dokument:`, exclusions and phrases in quotes (blocking).
+    pub fn check(&self, r: &Request, candidates: &[i64]) -> Result<Checked, String> {
+        let mut out = Checked::default();
+        if candidates.is_empty() {
+            return Ok(out);
+        }
+        let Some(built) = self.build(r) else {
+            return Ok(out);
+        };
+        let f = &self.shared.fields;
+        let set: Box<dyn Query> = Box::new(TermSetQuery::new(
+            candidates
+                .iter()
+                .map(|&i| Term::from_field_u64(f.id, i as u64)),
+        ));
+        let within = |q: &dyn Query, set: &dyn Query| -> Box<dyn Query> {
+            Box::new(BooleanQuery::new(vec![
+                (Occur::Must, q.box_clone()),
+                (Occur::Must, set.box_clone()),
+            ]))
+        };
+        let searcher = self.shared.reader.searcher();
+        let err = |e: tantivy::TantivyError| format!("Suche: {e}");
+        let all = |q: Box<dyn Query>| -> Result<Vec<i64>, String> {
+            let top = TopDocs::with_limit(candidates.len()).order_by_u64_field("id", Order::Asc);
+            let hits = searcher.search(q.as_ref(), &top).map_err(err)?;
+            ids_of(&searcher, hits.into_iter().map(|h| h.1).collect())
+        };
+        out.ids = all(within(built.semantic.as_ref(), set.as_ref()))?
+            .into_iter()
+            .collect();
+        out.lexical = all(within(built.query.as_ref(), set.as_ref()))?
+            .into_iter()
+            .collect();
+        // The kinds of what only meaning found (the words found the others: already counted).
+        let words_any_kind: std::collections::HashSet<i64> =
+            all(within(built.without_types.as_ref(), set.as_ref()))?
+                .into_iter()
+                .collect();
+        let only: Vec<i64> = all(within(built.semantic_without_types.as_ref(), set.as_ref()))?
+            .into_iter()
+            .filter(|i| !words_any_kind.contains(i))
+            .collect();
+        if !only.is_empty() {
+            let set: Box<dyn Query> = Box::new(TermSetQuery::new(
+                only.iter().map(|&i| Term::from_field_u64(f.id, i as u64)),
+            ));
+            let counts = searcher
+                .search(
+                    within(built.semantic_without_types.as_ref(), set.as_ref()).as_ref(),
+                    &CategoryCounts,
+                )
+                .map_err(err)?;
+            out.facets = facets(counts);
+        }
+        Ok(out)
     }
 
     /// Snippets of the given texts showing where the query matched (blocking).
@@ -736,6 +797,37 @@ impl SegmentCollector for SegmentCounts {
     fn harvest(self) -> Counts {
         self.counts
     }
+}
+
+/// Node ids of documents, in order.
+fn ids_of(searcher: &Searcher, addrs: Vec<DocAddress>) -> Result<Vec<i64>, String> {
+    let mut id_columns = HashMap::new();
+    let mut ids = Vec::with_capacity(addrs.len());
+    for a in addrs {
+        let col = match id_columns.entry(a.segment_ord) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => e.insert(
+                searcher
+                    .segment_reader(a.segment_ord)
+                    .fast_fields()
+                    .u64("id")
+                    .map_err(|e| format!("Suche: {e}"))?,
+            ),
+        };
+        if let Some(id) = col.first(a.doc_id) {
+            ids.push(id as i64);
+        }
+    }
+    Ok(ids)
+}
+
+fn facets(counts: Counts) -> Vec<(Category, u64)> {
+    Category::ALL
+        .iter()
+        .zip(counts)
+        .filter(|(_, n)| *n > 0)
+        .map(|(c, n)| (*c, n))
+        .collect()
 }
 
 #[cfg(test)]

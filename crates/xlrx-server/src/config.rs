@@ -112,6 +112,9 @@ pub struct CloudAi {
     /// Picture analysis (`XLRX_AI_VISION_MODEL`, default `gemma-4-26b-a4b-it`; `off`: none).
     pub vision_model: Option<String>,
     pub prices: Prices,
+    /// Hits by meaning farther than this (cosine distance) are left out
+    /// (`XLRX_AI_MAX_DISTANCE`; default depends on the model).
+    pub max_distance: f64,
 }
 
 /// Euros per million tokens (`XLRX_AI_PRICE_EMBED`, `XLRX_AI_PRICE_VISION_IN`,
@@ -134,6 +137,10 @@ pub struct LocalAi {
     /// dimensions in `XLRX_LOCAL_CLIP_DIM`; `off`: none).
     pub clip_model: Option<String>,
     pub clip_dim: u32,
+    /// Cosine distances up to which a hit counts (`XLRX_LOCAL_MAX_DISTANCE`,
+    /// `XLRX_LOCAL_CLIP_MAX_DISTANCE`; defaults depend on the model).
+    pub max_distance: f64,
+    pub clip_max_distance: f64,
 }
 
 /// What the outside cache may hold and how fast it fills.
@@ -246,13 +253,18 @@ impl AiConfig {
                     .parse()
                     .map_err(|e| format!("XLRX_AI_URL: {e}"))?;
                 crate::ai::provider::check_cloud_url(&url)?;
+                let embed_model = model_name(
+                    "XLRX_AI_EMBED_MODEL",
+                    &var("XLRX_AI_EMBED_MODEL").unwrap_or_else(|| "qwen3-embedding-8b".into()),
+                )?;
                 Some(CloudAi {
                     url,
                     key: secret("XLRX_AI_KEY")?,
-                    embed_model: model_name(
-                        "XLRX_AI_EMBED_MODEL",
-                        &var("XLRX_AI_EMBED_MODEL").unwrap_or_else(|| "qwen3-embedding-8b".into()),
+                    max_distance: float(
+                        "XLRX_AI_MAX_DISTANCE",
+                        crate::ai::search::default_max_distance(&embed_model),
                     )?,
+                    embed_model,
                     embed_dim: dimension("XLRX_AI_EMBED_DIM", 1024)?,
                     vision_model: optional_model("XLRX_AI_VISION_MODEL", "gemma-4-26b-a4b-it")?,
                     prices: Prices {
@@ -271,18 +283,28 @@ impl AiConfig {
                     .parse()
                     .map_err(|e| format!("XLRX_LOCAL_AI_URL: {e}"))?;
                 crate::ai::provider::check_home_url("XLRX_LOCAL_AI_URL", &url)?;
+                let embed_model = model_name(
+                    "XLRX_LOCAL_EMBED_MODEL",
+                    &var("XLRX_LOCAL_EMBED_MODEL")
+                        .unwrap_or_else(|| "multilingual-e5-small".into()),
+                )?;
+                let clip_model =
+                    optional_model("XLRX_LOCAL_CLIP_MODEL", "clip-ViT-B-32-multilingual-v1")?;
                 Some(LocalAi {
                     url,
-                    embed_model: model_name(
-                        "XLRX_LOCAL_EMBED_MODEL",
-                        &var("XLRX_LOCAL_EMBED_MODEL")
-                            .unwrap_or_else(|| "multilingual-e5-small".into()),
+                    max_distance: float(
+                        "XLRX_LOCAL_MAX_DISTANCE",
+                        crate::ai::search::default_max_distance(&embed_model),
                     )?,
+                    clip_max_distance: float(
+                        "XLRX_LOCAL_CLIP_MAX_DISTANCE",
+                        crate::ai::search::default_max_distance(
+                            clip_model.as_deref().unwrap_or("clip"),
+                        ),
+                    )?,
+                    embed_model,
                     embed_dim: dimension("XLRX_LOCAL_EMBED_DIM", 384)?,
-                    clip_model: optional_model(
-                        "XLRX_LOCAL_CLIP_MODEL",
-                        "clip-ViT-B-32-multilingual-v1",
-                    )?,
+                    clip_model,
                     clip_dim: dimension("XLRX_LOCAL_CLIP_DIM", 512)?,
                 })
             }

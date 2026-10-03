@@ -1,7 +1,7 @@
 //! Search (PLAN 6.5): `GET /api/search?q=…` with filters, counts per kind and text snippets;
 //! `GET /api/search/suggest?q=…` for names while typing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use axum::Json;
@@ -9,11 +9,13 @@ use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
 
 use super::files::{self, NodeInfo};
+use crate::ai::{self, Space};
 use crate::auth::session::CurrentUser;
 use crate::error::{ApiError, ApiResult};
 use crate::files::access;
 use crate::files::db::{self, NODE_COLS, NodeRow};
 use crate::search::query::{self, Parsed};
+use crate::search::schema::Category;
 use crate::search::{Found, Part, Request, Search, Sources};
 use crate::state::AppState;
 
@@ -54,6 +56,9 @@ pub struct Hit {
     pub folder: String,
     /// Where the words occur in the text, if they do.
     pub snippet: Option<Vec<Part>>,
+    /// Found by meaning only (no word matches): `bedeutung` (a text) or `bild` (a picture).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub by: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -112,6 +117,14 @@ pub async fn search(
         Some(folder_ids(&st, me.id, &parsed.folders).await?)
     };
     let not_folders = folder_ids(&st, me.id, &parsed.not_folders).await?;
+    let offset = q.offset.unwrap_or(0).min(10_000);
+    let limit = q.limit.unwrap_or(30).clamp(1, 100);
+    // With search by meaning, the lexical list is merged from its start (PLAN 6.4).
+    let meaning = if st.ai.configured() {
+        meaning_of(&parsed)
+    } else {
+        None
+    };
     let request = Request {
         parsed,
         roots: scope.roots.clone(),
@@ -119,16 +132,29 @@ pub async fn search(
         within,
         folders,
         not_folders,
-        offset: q.offset.unwrap_or(0).min(10_000),
-        limit: q.limit.unwrap_or(30).clamp(1, 100),
+        offset: if meaning.is_some() { 0 } else { offset },
+        limit: if meaning.is_some() {
+            offset + limit + MERGE_EXTRA
+        } else {
+            limit
+        },
         fuzzy: false,
     };
-    let (mut request, mut found) = run(&st, request).await?;
+    let by_meaning = async {
+        match &meaning {
+            Some(text) => ai::search::lists(&st, text).await,
+            None => Vec::new(),
+        }
+    };
+    let (lexical, lists) = tokio::join!(run(&st, request), by_meaning);
+    let (mut request, mut found) = lexical?;
+    let merged = merge_meaning(&st, &request, lists).await?;
     // Nothing at all: perhaps a typo. Try similar spellings once.
     let mut fuzzy = false;
     if found.as_ref().is_some_and(|f| f.total == 0)
+        && merged.ids.is_empty()
         && !request.parsed.clauses.is_empty()
-        && request.offset == 0
+        && offset == 0
     {
         request.fuzzy = true;
         (request, found) = run(&st, request).await?;
@@ -140,10 +166,24 @@ pub async fn search(
             ..Default::default()
         }));
     };
+    let (page, total, facets) = if meaning.is_some() {
+        let order = merged.order(&found.ids);
+        let page: Vec<i64> = order.into_iter().skip(offset).take(limit).collect();
+        let only = merged.ids.difference(&merged.lexical).count();
+        let mut facets: HashMap<Category, u64> = found.facets.iter().copied().collect();
+        for (c, n) in &merged.facets {
+            *facets.entry(*c).or_default() += n;
+        }
+        let mut facets: Vec<(Category, u64)> = facets.into_iter().collect();
+        facets.sort();
+        (page, found.total + only, facets)
+    } else {
+        (found.ids.clone(), found.total, found.facets.clone())
+    };
 
     // Defense in depth: every hit is checked against the database again (live, and the person
     // has a role on it now).
-    let rows = checked(&st, me.id, &found.ids).await?;
+    let rows = checked(&st, me.id, &page).await?;
     let folders = files::folder_names(&st, &scope, &rows).await?;
 
     let texts = if request.parsed.clauses.is_empty() {
@@ -151,9 +191,7 @@ pub async fn search(
     } else {
         texts(&st, &rows).await?
     };
-    let total = found.total;
-    let facets = found
-        .facets
+    let facets = facets
         .iter()
         .map(|(c, n)| Facet {
             typ: c.key(),
@@ -161,13 +199,23 @@ pub async fn search(
         })
         .collect();
     let snippets = blocking(&st, move |s| Ok(s.snippets(&found, &texts))).await?;
+    let pieces = merged.pieces(&st, &rows).await?;
     let hits = rows
         .iter()
         .zip(snippets)
-        .map(|(n, snippet)| Hit {
-            node: NodeInfo::from(n),
-            folder: folders.get(&n.id).cloned().unwrap_or_default(),
-            snippet,
+        .map(|(n, snippet)| {
+            let only_meaning = merged.ids.contains(&n.id) && !merged.lexical.contains(&n.id);
+            let (by, piece) = match merged.best.get(&n.id) {
+                Some(b) if only_meaning => (Some(b.how()), pieces.get(&n.id).cloned()),
+                _ => (None, None),
+            };
+            Hit {
+                node: NodeInfo::from(n),
+                folder: folders.get(&n.id).cloned().unwrap_or_default(),
+                // Where the words are; for a hit found by meaning, the piece that matched.
+                snippet: snippet.or_else(|| piece.map(|text| vec![Part { text, hit: false }])),
+                by,
+            }
         })
         .collect();
     Ok(Json(SearchResult {
@@ -177,6 +225,180 @@ pub async fn search(
         fuzzy,
         pending,
     }))
+}
+
+/// Lexical hits looked at beyond the requested page when merging with hits by meaning.
+const MERGE_EXTRA: usize = 50;
+/// Reciprocal Rank Fusion: a list's first place counts 1/(K+1) (PLAN 6.4).
+const RRF_K: f64 = 60.0;
+/// Characters of a matching piece shown for a hit found by meaning.
+const PIECE_CHARS: i32 = 220;
+
+/// The words to search by meaning: those of the query (phrases included, without exclusions
+/// and filters), if there is something to understand.
+fn meaning_of(p: &Parsed) -> Option<String> {
+    let text = p
+        .clauses
+        .iter()
+        .map(|c| c.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (text.chars().filter(|c| c.is_alphanumeric()).count() >= 3).then_some(text)
+}
+
+/// Hits found by meaning, checked against the request.
+#[derive(Default)]
+struct Merged {
+    /// Per space: node ids, best first (duplicates of a content share its place).
+    lists: Vec<Vec<Vec<i64>>>,
+    /// Those matching the request.
+    ids: HashSet<i64>,
+    /// Of those, the ones the words match too.
+    lexical: HashSet<i64>,
+    /// Counts per kind of those only meaning found.
+    facets: Vec<(Category, u64)>,
+    /// The best matching piece per node.
+    best: HashMap<i64, (Space, ai::search::Hit)>,
+}
+
+trait How {
+    fn how(&self) -> &'static str;
+}
+
+impl How for (Space, ai::search::Hit) {
+    /// How the hit was found: by what a text means or by what a picture shows.
+    fn how(&self) -> &'static str {
+        match self.1.source.as_str() {
+            "text" => "bedeutung",
+            _ => "bild",
+        }
+    }
+}
+
+impl Merged {
+    /// All hits in merged order: Reciprocal Rank Fusion of the lexical list and the lists by
+    /// meaning; ties keep the lexical order.
+    fn order(&self, lexical: &[i64]) -> Vec<i64> {
+        let mut score: HashMap<i64, f64> = HashMap::new();
+        let mut first: HashMap<i64, usize> = HashMap::new();
+        for (rank, id) in lexical.iter().enumerate() {
+            *score.entry(*id).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
+            first.entry(*id).or_insert(rank);
+        }
+        for list in &self.lists {
+            let mut rank = 0;
+            for ids in list {
+                let ids: Vec<i64> = ids
+                    .iter()
+                    .copied()
+                    .filter(|i| self.ids.contains(i))
+                    .collect();
+                if ids.is_empty() {
+                    continue;
+                }
+                for id in ids {
+                    *score.entry(id).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
+                    first.entry(id).or_insert(usize::MAX);
+                }
+                rank += 1;
+            }
+        }
+        let mut all: Vec<(i64, f64, usize)> = score
+            .into_iter()
+            .map(|(id, s)| (id, s, first[&id]))
+            .collect();
+        all.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.2.cmp(&b.2)).then(a.0.cmp(&b.0)));
+        all.into_iter().map(|(id, _, _)| id).collect()
+    }
+
+    /// The matching piece of text (or picture description) per node found by meaning.
+    async fn pieces(&self, st: &AppState, rows: &[NodeRow]) -> ApiResult<HashMap<i64, String>> {
+        let mut out = HashMap::new();
+        for n in rows {
+            let Some((_, hit)) = self.best.get(&n.id) else {
+                continue;
+            };
+            let text: Option<String> = match hit.source.as_str() {
+                "text" => sqlx::query_scalar(
+                    "SELECT substr(text, $2 + 1, least($3, $4)) FROM content_text WHERE hash = $1",
+                )
+                .bind(&hit.hash)
+                .bind(hit.start)
+                .bind(hit.len)
+                .bind(PIECE_CHARS)
+                .fetch_optional(&st.db)
+                .await?,
+                "description" => {
+                    sqlx::query_scalar("SELECT description FROM ai_vision WHERE content_hash = $1")
+                        .bind(&hit.hash)
+                        .fetch_optional(&st.db)
+                        .await?
+                }
+                _ => None,
+            };
+            if let Some(t) = text {
+                let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !t.is_empty() {
+                    out.insert(n.id, t);
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Turns the lists by meaning (contents) into nodes and checks them against the request.
+async fn merge_meaning(
+    st: &AppState,
+    request: &Request,
+    lists: Vec<ai::search::List>,
+) -> ApiResult<Merged> {
+    let mut merged = Merged::default();
+    let hashes: Vec<Vec<u8>> = lists
+        .iter()
+        .flat_map(|l| l.hits.iter().map(|h| h.hash.clone()))
+        .collect();
+    if hashes.is_empty() {
+        return Ok(merged);
+    }
+    let nodes: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+        "SELECT id, content_hash FROM nodes
+          WHERE content_hash = ANY($1) AND deleted_at IS NULL AND kind = 'file'",
+    )
+    .bind(&hashes)
+    .fetch_all(&st.db)
+    .await?;
+    let mut by_hash: HashMap<Vec<u8>, Vec<i64>> = HashMap::new();
+    for (id, h) in nodes {
+        by_hash.entry(h).or_default().push(id);
+    }
+    let candidates: Vec<i64> = by_hash.values().flatten().copied().collect();
+    let checked = {
+        let request = request.clone();
+        blocking(st, move |s| s.check(&request, &candidates)).await?
+    };
+    for l in lists {
+        let mut list = Vec::new();
+        for hit in l.hits {
+            let ids = by_hash.get(&hit.hash).cloned().unwrap_or_default();
+            for id in &ids {
+                if checked.ids.contains(id) {
+                    // The best piece: lists come in order, the first is kept… unless a closer
+                    // one comes from another space.
+                    let better = merged.best.get(id).is_none_or(|(_, b)| hit.dist < b.dist);
+                    if better {
+                        merged.best.insert(*id, (l.space, hit.clone()));
+                    }
+                }
+            }
+            list.push(ids);
+        }
+        merged.lists.push(list);
+    }
+    merged.ids = checked.ids;
+    merged.lexical = checked.lexical;
+    merged.facets = checked.facets;
+    Ok(merged)
 }
 
 async fn run(st: &AppState, request: Request) -> ApiResult<(Request, Option<Found>)> {

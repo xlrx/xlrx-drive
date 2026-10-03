@@ -10,7 +10,13 @@ export interface SearchHit extends NodeInfo {
 	/** The folder it is in, e.g. "Meine Ablage/Belege". */
 	folder: string;
 	snippet: Part[] | null;
+	/** Found by meaning only (no word matches): a text that fits, or a picture that shows it. */
+	by?: 'bedeutung' | 'bild';
 }
+
+/** What the mark of a hit found by meaning says. */
+export const byLabel = (by: SearchHit['by']) =>
+	by === 'bild' ? 'Passt zum Bildinhalt' : by === 'bedeutung' ? 'Passt inhaltlich' : '';
 
 export interface SearchResult {
 	total: number;
@@ -51,6 +57,7 @@ export const OPERATORS: { key: string; example: string; hint: string }[] = [
 	{ key: 'in:', example: 'Ordner', hint: 'Nur in Ordnern dieses Namens' },
 	{ key: 'nach:', example: '2025-01-01', hint: 'Geändert ab diesem Tag (oder Monat, Jahr)' },
 	{ key: 'vor:', example: '2026', hint: 'Geändert vor diesem Tag (oder Monat, Jahr)' },
+	{ key: 'dokument:', example: 'rechnung', hint: 'In Bildern erkannte Dokumentart, z. B. rechnung, vertrag' },
 	{ key: '"', example: 'genau so"', hint: 'Genau diese Wortfolge' },
 	{ key: '-', example: 'ohne', hint: 'Treffer mit diesem Wort weglassen' }
 ];

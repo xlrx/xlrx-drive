@@ -233,10 +233,16 @@ async fn bilder_in_der_cloud_beschrieben_im_heimnetz_als_clip() {
     assert_eq!(near[0].content_hash, privat);
 
     // The full-text search finds pictures by what they show, by the text in them and by kind.
-    eventually(&mut klaus, "Strand", &["IMG_0001.jpg"]).await;
+    // (The picture from "Privat" joins by its CLIP vector.)
+    eventually(&mut klaus, "Strand", &["IMG_0001.jpg", "IMG_0003.jpg"]).await;
     eventually(&mut klaus, "Heizungswartung", &["Scan_0002.jpg"]).await;
     eventually(&mut klaus, "dokument:rechnung", &["Scan_0002.jpg"]).await;
-    eventually(&mut klaus, "-dokument:rechnung Hund", &["IMG_0001.jpg"]).await;
+    eventually(
+        &mut klaus,
+        "-dokument:rechnung Hund",
+        &["IMG_0001.jpg", "IMG_0003.jpg"],
+    )
+    .await;
     let r = klaus.get("/api/search?q=Strand").await.ok().clone();
     let snippet: String = r["hits"][0]["snippet"]
         .as_array()
