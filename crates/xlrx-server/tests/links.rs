@@ -723,7 +723,14 @@ async fn hochladen_ohne_ueberschreiben() {
             b"c",
         )
         .await;
-    assert_eq!(a.status, 400);
+    // Refused for its size before anything is received.
+    assert_eq!(
+        (a.status, a.json()["error"].as_str()),
+        (
+            StatusCode::BAD_REQUEST,
+            Some("Über einen Link gehen Dateien bis 10 MB.")
+        )
+    );
     let a = v
         .send(
             "POST",
