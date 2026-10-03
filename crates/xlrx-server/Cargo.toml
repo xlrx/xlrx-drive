@@ -17,7 +17,9 @@ hmac = "0.13"
 # HTTP client for Apache Tika (on the NAS, see extract::tika).
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+# HTTPS to the S3 cache (PLAN 15.2): rustls with the Mozilla roots, no system store needed.
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12", "webpki-roots"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
 # Thumbnails: common photo and image formats only, pure Rust (SIMD chosen at runtime, fine without AVX).
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
 mime_guess = "2"
@@ -25,6 +27,7 @@ notify = { version = "8", default-features = false }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 rand = "0.10"
 rayon.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustix = { version = "1.1", features = ["fs"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -51,6 +54,10 @@ xlrx-proto.workspace = true
 xlrx-sync.workspace = true
 
 [dev-dependencies]
+# An S3 server on a temporary directory, checking signatures itself (tests of the S3 cache).
+hyper-util = { version = "0.1", features = ["server-auto", "tokio", "http1"] }
+s3s = "0.17"
+s3s-fs = "0.17"
 tempfile.workspace = true
 webauthn-authenticator-rs = { version = "0.5", features = ["softpasskey"] }
 

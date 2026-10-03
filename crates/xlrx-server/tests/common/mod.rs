@@ -8,6 +8,7 @@
 #![allow(dead_code)]
 
 pub mod files;
+pub mod s3;
 
 use axum::Router;
 use axum::body::Body;

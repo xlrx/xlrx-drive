@@ -13,6 +13,7 @@ pub mod events;
 pub mod extract;
 pub mod files;
 pub mod jobs;
+pub mod s3;
 pub mod search;
 pub mod state;
 pub mod users;
