@@ -6,6 +6,7 @@ const loading = ref(true);
 const busy = ref(false);
 const error = ref('');
 const notice = ref('');
+const purging = ref<TrashItem | null>(null);
 useHead({ title: 'Papierkorb – xlrx drive' });
 
 async function load() {
@@ -44,61 +45,63 @@ const restore = (t: TrashItem) =>
 
 const purge = (t: TrashItem) =>
 	act(async () => {
-		if (!confirm(`„${t.name}“ endgültig löschen? Das lässt sich nicht rückgängig machen.`)) return;
+		purging.value = null;
 		await apiDelete(`/trash/${t.id}`);
 		notice.value = `„${t.name}“ ist endgültig gelöscht.`;
 	});
+
+const daysLeft = (t: TrashItem) =>
+	Math.max(0, Math.ceil((new Date(t.deleted_at).getTime() + 30 * 86_400_000 - Date.now()) / 86_400_000));
+const mark = (t: TrashItem) => ({ id: t.id, kind: t.kind, name: t.name, mime: null, rev: 0 });
 </script>
 
 <template>
 	<main class="page">
 		<h1>Papierkorb</h1>
-		<p class="muted">Gelöschtes bleibt 30 Tage hier und lässt sich bis dahin wiederherstellen.</p>
+		<p class="meta">Gelöschtes bleibt 30 Tage hier und lässt sich bis dahin wiederherstellen.</p>
 		<p v-if="error" class="error" role="alert">{{ error }}</p>
-		<p v-if="notice" role="status">{{ notice }}</p>
-		<div class="card list">
-			<table v-if="items.length">
-				<thead>
-					<tr>
-						<th>Name</th>
-						<th class="from">Gelöscht aus</th>
-						<th class="when">Gelöscht am</th>
-						<th class="act"><span class="sr-only">Aktionen</span></th>
-					</tr>
-				</thead>
-				<tbody>
-					<tr v-for="t in items" :key="t.id">
-						<td>
-							<span class="name"><FileIcon :kind="iconKind({ kind: t.kind, mime: null })" />{{ t.name }}</span>
-						</td>
-						<td class="from muted">{{ t.from }}</td>
-						<td class="when muted">{{ formatShortDate(t.deleted_at) }}</td>
-						<td class="act">
-							<button type="button" :disabled="busy" @click="restore(t)">Wiederherstellen</button>
-							<button type="button" class="danger" :disabled="busy" @click="purge(t)">
-								Endgültig löschen
-							</button>
-						</td>
-					</tr>
-				</tbody>
-			</table>
-			<p v-else-if="!loading" class="muted empty">Der Papierkorb ist leer.</p>
-		</div>
+		<p v-if="notice" class="notice" role="status"><Icon name="check" :size="16" :stroke="2" />{{ notice }}</p>
+		<hr />
+		<ul v-if="items.length" class="rows">
+			<li v-for="t in items" :key="t.id">
+				<FileMark :node="mark(t)" />
+				<span class="text-col">
+					<span class="name">{{ t.name }}</span>
+					<span class="sub">aus {{ t.from }} · gelöscht {{ formatShortDate(t.deleted_at) }} · noch {{ daysLeft(t) }} {{ daysLeft(t) === 1 ? 'Tag' : 'Tage' }}</span>
+				</span>
+				<span class="acts">
+					<button type="button" class="link" :disabled="busy" @click="restore(t)">Wiederherstellen</button>
+					<button type="button" class="link danger" :disabled="busy" @click="purging = t">Endgültig löschen</button>
+				</span>
+			</li>
+		</ul>
+		<p v-else-if="!loading" class="muted empty">Der Papierkorb ist leer.</p>
+		<ConfirmDialog
+			v-if="purging"
+			title="Endgültig löschen?"
+			:text="`„${purging.name}“ wird sofort gelöscht. Das lässt sich nicht rückgängig machen.`"
+			action="Endgültig löschen"
+			:node="mark(purging)"
+			danger
+			@confirm="purging && purge(purging)"
+			@cancel="purging = null"
+		/>
 	</main>
 </template>
 
 <style scoped>
-.list { padding: 0.25rem 0; margin-top: 1rem; }
-.list table td, .list table th { padding-left: 1rem; padding-right: 1rem; vertical-align: middle; }
-.list tbody tr:last-child td { border-bottom: 0; }
-.name { display: flex; align-items: center; gap: 0.6rem; overflow-wrap: anywhere; }
-.when { white-space: nowrap; }
-.act { text-align: right; white-space: nowrap; }
-.act button { padding: 0.35rem 0.7rem; font-size: 0.9rem; margin-left: 0.3rem; }
-.empty { padding: 1.5rem 1rem; margin: 0; }
+.meta { margin: -6px 0 18px; font-size: 13px; color: var(--muted); }
+.notice { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.rows { border-top: 0; }
+.rows li { gap: 14px; padding: 6px 0; }
+.text-col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.name { font-size: 15px; overflow-wrap: anywhere; }
+.sub { font-size: 12px; color: var(--muted); }
+.acts { display: flex; gap: 14px; flex-wrap: wrap; justify-content: flex-end; font-size: 13px; }
+.acts .link { font-size: 13px; min-height: 32px; }
+.empty { padding: 1.5rem 0; margin: 0; }
 @media (max-width: 40rem) {
-	.from, .when { display: none; }
-	.act { white-space: normal; }
-	.act button { margin: 0.15rem 0; }
+	.rows li { flex-wrap: wrap; }
+	.acts { width: 100%; justify-content: flex-start; padding-left: 52px; }
 }
 </style>

@@ -1,8 +1,11 @@
 <script setup lang="ts">
-// A folder (contents, upload, new folder) or a file (preview, download, versions). Rename, move
-// and delete for both; deleted items go to the trash and can be brought back.
+// A folder (contents, upload, new folder) or a file (preview, info, versions), as in the design
+// screens "Ablage", "Vorschau" and "Details". Rename, move and delete for both; deleted items go to
+// the trash and can be brought back.
 const route = useRoute();
 const id = computed(() => Number(route.params.id));
+const folder = useFolder();
+const uploads = useUploads();
 
 const node = ref<NodeDetail | null>(null);
 const children = ref<NodeInfo[]>([]);
@@ -20,11 +23,41 @@ let poll: ReturnType<typeof setTimeout> | undefined;
 type Dialog =
 	| { kind: 'folder' }
 	| { kind: 'rename'; node: NodeInfo }
-	| { kind: 'move'; node: NodeInfo };
+	| { kind: 'move'; node: NodeInfo }
+	| { kind: 'remove'; node: NodeInfo };
 const dialog = ref<Dialog | null>(null);
 
 const title = computed(() => node.value?.path.at(-1)?.name ?? '');
 useHead({ title: computed(() => (title.value ? `${title.value} – xlrx drive` : 'xlrx drive')) });
+
+// How folders are shown (kept in this browser).
+type View = { sort: 'name' | 'mtime'; layout: 'list' | 'grid' };
+const view = ref<View>({ sort: 'name', layout: 'list' });
+onMounted(() => {
+	try {
+		view.value = { ...view.value, ...JSON.parse(localStorage.getItem('xlrx-folder-view') ?? '{}') };
+	} catch {
+		// keep the defaults
+	}
+});
+watch(view, (v) => {
+	try {
+		localStorage.setItem('xlrx-folder-view', JSON.stringify(v));
+	} catch {
+		// storage blocked
+	}
+}, { deep: true });
+const collator = new Intl.Collator('de', { numeric: true, sensitivity: 'base' });
+const sorted = computed(() => {
+	const list = [...children.value];
+	if (view.value.sort === 'mtime') return list.sort((a, b) => (b.mtime ?? '').localeCompare(a.mtime ?? ''));
+	return list.sort((a, b) => (a.kind === b.kind ? collator.compare(a.name, b.name) : a.kind === 'dir' ? -1 : 1));
+});
+const count = computed(() => (children.value.length === 1 ? '1 Element' : `${children.value.length} Elemente`));
+
+// File view: tabs (the actions menu links to the versions directly).
+const tab = ref<'info' | 'versionen'>(route.query.tab === 'versionen' ? 'versionen' : 'info');
+watch(id, () => (tab.value = route.query.tab === 'versionen' ? 'versionen' : 'info'));
 
 async function load() {
 	clearTimeout(poll);
@@ -39,6 +72,9 @@ async function load() {
 		children.value = kids;
 		versions.value = vers;
 		root.value = roots.find((r) => r.id === n.root_id) ?? null;
+		// Target of "Neu": this folder, or the folder of this file.
+		const where = n.kind === 'dir' ? n.path.at(-1) : n.path.at(-2);
+		folder.value = where ? { id: where.id, name: where.name } : null;
 		// First import still running: show what is there and look again shortly.
 		if (root.value && !root.value.scanned_at) poll = setTimeout(load, 1500);
 	} catch (e) {
@@ -62,14 +98,18 @@ watch(
 	},
 	{ immediate: true }
 );
-onBeforeUnmount(() => clearTimeout(poll));
-// Changes elsewhere (other devices, SMB, the watcher): show them right away.
+onBeforeUnmount(() => {
+	clearTimeout(poll);
+	folder.value = null;
+});
+// Changes elsewhere (other devices, SMB, the watcher) and finished uploads: show them right away.
 useLive().onRootChange(
 	() => node.value?.root_id,
 	() => {
 		if (!busy.value) load();
 	}
 );
+watch(() => uploads.finished.value, () => !busy.value && load());
 
 /** Runs a change; on failure shows the reason and reloads (the server may have rescanned). */
 async function act(fn: () => Promise<void>) {
@@ -112,6 +152,7 @@ const move = (n: NodeInfo, parentId: number) =>
 	});
 
 async function remove(n: NodeInfo) {
+	dialog.value = null;
 	const viewing = n.id === node.value?.id;
 	const parent = n.parent_id;
 	await act(async () => {
@@ -138,9 +179,6 @@ const restoreVersion = (v: VersionInfo) =>
 	});
 
 // Uploads into the folder shown, or a new version of the file shown.
-const uploads = useUploads(() => load());
-/** Images whose thumbnail failed: the icon instead. */
-const noThumb = reactive(new Set<number>());
 const picker = ref<HTMLInputElement | null>(null);
 const versionPicker = ref<HTMLInputElement | null>(null);
 
@@ -174,6 +212,14 @@ async function newVersion(e: Event) {
 		notice.value = 'Neue Fassung gespeichert; die bisherige bleibt als Version erhalten.';
 	});
 }
+
+const meta = (c: NodeInfo) =>
+	c.kind === 'file' ? [formatShortDate(c.mtime), formatSize(c.size)].filter(Boolean).join(' · ') : formatShortDate(c.mtime) || 'Ordner';
+const extOf = (name: string) => {
+	const dot = name.lastIndexOf('.');
+	return dot > 0 ? name.slice(dot + 1).toUpperCase() : 'Datei';
+};
+const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).join(' › ') ?? '');
 </script>
 
 <template>
@@ -185,154 +231,133 @@ async function newVersion(e: Event) {
 	>
 		<nav v-if="node && node.path.length > 1" class="crumbs" aria-label="Pfad">
 			<template v-for="(c, i) in node.path.slice(0, -1)" :key="c.id">
-				<span v-if="i" aria-hidden="true">›</span>
+				<Icon v-if="i" name="chevR" :size="14" :stroke="1.8" />
 				<NuxtLink :to="`/files/${c.id}`">{{ c.name }}</NuxtLink>
 			</template>
 		</nav>
-		<div class="row head">
-			<h1>{{ title }}</h1>
-			<span class="spacer"></span>
-			<template v-if="node?.kind === 'dir'">
-				<button :disabled="busy" @click="dialog = { kind: 'folder' }">Neuer Ordner</button>
-				<button class="primary" :disabled="busy" @click="picker?.click()">Hochladen</button>
-				<input ref="picker" type="file" multiple hidden data-testid="upload-input" @change="picked" />
-				<button :disabled="busy" @click="rescan">{{ busy ? 'Bitte warten …' : 'Neu einlesen' }}</button>
-			</template>
-			<template v-else-if="node">
-				<a
-					v-if="opensInBrowser(node.mime)"
-					class="button"
-					:href="contentUrl(node.id, true)"
-					target="_blank"
-					rel="noopener"
-					>In neuem Tab</a
-				>
-				<a class="button primary" :href="contentUrl(node.id)" download>Herunterladen</a>
-				<RowMenu
-					:label="node.name"
-					@rename="dialog = { kind: 'rename', node }"
-					@move="dialog = { kind: 'move', node }"
-					@remove="remove(node)"
-				/>
-			</template>
-		</div>
-		<p v-if="node?.kind === 'file'" class="muted meta">
-			{{ formatSize(node.size) }} · geändert {{ formatDate(node.mtime) }}
-		</p>
+
+		<!-- Folder -->
+		<template v-if="node?.kind === 'dir'">
+			<div class="title-row">
+				<div class="titles">
+					<h1>{{ title }}</h1>
+					<p class="meta">{{ count }}<template v-if="root"> · {{ root.name }}</template></p>
+				</div>
+				<div class="tools">
+					<button :disabled="busy" class="desktop" @click="dialog = { kind: 'folder' }"><Icon name="folderPlus" :size="18" />Neuer Ordner</button>
+					<button class="primary desktop" :disabled="busy" @click="picker?.click()"><Icon name="upload" :size="18" />Hochladen</button>
+					<input ref="picker" type="file" multiple hidden data-testid="upload-input" @change="picked" />
+				</div>
+			</div>
+		</template>
+
+		<!-- File -->
+		<template v-else-if="node">
+			<h1 class="file-title">{{ title }}</h1>
+			<p class="label">{{ extOf(node.name) }} · {{ formatSize(node.size) }} · geändert {{ formatShortDate(node.mtime) }}</p>
+			<div class="row file-actions">
+				<a class="button primary" :href="contentUrl(node.id)" download><Icon name="download" :size="18" />Herunterladen</a>
+				<a v-if="opensInBrowser(node.mime)" class="button" :href="contentUrl(node.id, true)" target="_blank" rel="noopener"><Icon name="openIn" :size="18" />In neuem Tab</a>
+				<span class="spacer"></span>
+				<RowMenu :node="node" here @rename="dialog = { kind: 'rename', node }" @move="dialog = { kind: 'move', node }" @remove="dialog = { kind: 'remove', node }" />
+			</div>
+		</template>
+
 		<p v-if="error" class="error" role="alert">{{ error }}</p>
 		<p v-if="notice" class="notice" role="status">
-			{{ notice }}
+			<Icon name="check" :size="16" :stroke="2" />{{ notice }}
 			<button v-if="undo" class="link" type="button" @click="restoreDeleted">Rückgängig</button>
 		</p>
 		<p v-if="root && !root.scanned_at" class="muted" role="status">
 			Die Ablage wird zum ersten Mal eingelesen – Inhalte erscheinen nach und nach.
 		</p>
 
-		<div v-if="node?.kind === 'dir'" class="card list" :class="{ dragging }">
-			<table v-if="children.length">
-				<thead>
-					<tr>
-						<th>Name</th>
-						<th class="when">Geändert</th>
-						<th class="size">Größe</th>
-						<th class="act"><span class="sr-only">Aktionen</span></th>
-					</tr>
-				</thead>
-				<tbody>
-					<tr v-for="c in children" :key="c.id">
-						<td>
-							<NuxtLink :to="`/files/${c.id}`" class="name">
-								<img
-									v-if="thumbUrl(c, 64) && !noThumb.has(c.id)"
-									class="thumb"
-									:src="thumbUrl(c, 64)!"
-									alt=""
-									loading="lazy"
-									@error="noThumb.add(c.id)"
-								/>
-								<FileIcon v-else :kind="iconKind(c)" />
-								<span>{{ c.name }}</span>
-							</NuxtLink>
-						</td>
-						<td class="when muted">{{ formatShortDate(c.mtime) }}</td>
-						<td class="size muted">{{ c.kind === 'file' ? formatSize(c.size) : '' }}</td>
-						<td class="act">
-							<a
-								v-if="c.kind === 'file'"
-								class="download"
-								:href="contentUrl(c.id)"
-								download
-								:aria-label="`${c.name} herunterladen`"
-								title="Herunterladen"
-								>↓</a
-							>
-							<RowMenu
-								:label="c.name"
-								@rename="dialog = { kind: 'rename', node: c }"
-								@move="dialog = { kind: 'move', node: c }"
-								@remove="remove(c)"
-							/>
-						</td>
-					</tr>
-				</tbody>
-			</table>
+		<section v-if="node?.kind === 'dir'" class="folder" :class="{ dragging }">
+			<div class="toolbar">
+				<button type="button" class="text sort" @click="view.sort = view.sort === 'name' ? 'mtime' : 'name'">
+					<Icon name="sort" :size="15" :stroke="1.6" />{{ view.sort === 'name' ? 'Name' : 'Zuletzt geändert' }}
+				</button>
+				<span class="spacer"></span>
+				<button type="button" class="text rescan" :disabled="busy" @click="rescan">
+					<Icon name="sync" :size="15" :stroke="1.6" />{{ busy ? 'Bitte warten …' : 'Neu einlesen' }}
+				</button>
+				<button type="button" class="icon" aria-label="Listenansicht" :aria-pressed="view.layout === 'list'" @click="view.layout = 'list'"><Icon name="list" :size="18" :stroke="1.6" /></button>
+				<button type="button" class="icon" aria-label="Rasteransicht" :aria-pressed="view.layout === 'grid'" @click="view.layout = 'grid'"><Icon name="grid" :size="18" :stroke="1.6" /></button>
+			</div>
+			<ul v-if="sorted.length && view.layout === 'list'" class="rows">
+				<li v-for="c in sorted" :key="c.id">
+					<NuxtLink :to="`/files/${c.id}`" class="open" :aria-describedby="`meta-${c.id}`">
+						<FileMark :node="c" />
+						<span class="text-col">
+							<span class="name">{{ c.name }}</span>
+							<span :id="`meta-${c.id}`" class="sub" aria-hidden="true">{{ meta(c) }}</span>
+						</span>
+					</NuxtLink>
+					<RowMenu :node="c" @rename="dialog = { kind: 'rename', node: c }" @move="dialog = { kind: 'move', node: c }" @remove="dialog = { kind: 'remove', node: c }" />
+				</li>
+			</ul>
+			<ul v-else-if="sorted.length" class="tiles">
+				<li v-for="c in sorted" :key="c.id">
+					<NuxtLink :to="`/files/${c.id}`" class="open">
+						<span class="pic">
+							<img v-if="thumbUrl(c, 256)" :src="thumbUrl(c, 256)!" alt="" loading="lazy" />
+							<FileMark v-else :node="c" big />
+						</span>
+						<span class="name">{{ c.name }}</span>
+					</NuxtLink>
+					<span class="foot"><span class="sub">{{ meta(c) }}</span><RowMenu :node="c" @rename="dialog = { kind: 'rename', node: c }" @move="dialog = { kind: 'move', node: c }" @remove="dialog = { kind: 'remove', node: c }" /></span>
+				</li>
+			</ul>
 			<p v-else-if="!loading" class="muted empty">
 				Dieser Ordner ist leer. Dateien hierher ziehen oder „Hochladen“ wählen.
 			</p>
 			<p v-if="dragging" class="drop">Loslassen zum Hochladen</p>
-		</div>
+		</section>
 
 		<template v-else-if="node">
 			<FilePreview :node="node" />
-			<section class="versions">
-				<div class="row">
-					<h2>Versionen</h2>
-					<span class="spacer"></span>
-					<button :disabled="busy" @click="versionPicker?.click()">Neue Fassung hochladen</button>
-					<input ref="versionPicker" type="file" hidden data-testid="version-input" @change="newVersion" />
-				</div>
-				<div class="card list">
-					<table v-if="versions.length">
-						<thead>
-							<tr>
-								<th>Fassung vom</th>
-								<th class="size">Größe</th>
-								<th>Ersetzt von</th>
-								<th class="act"><span class="sr-only">Aktionen</span></th>
-							</tr>
-						</thead>
-						<tbody>
-							<tr v-for="v in versions" :key="v.id">
-								<td>{{ formatDate(v.mtime ?? v.created_at) }}</td>
-								<td class="size muted">{{ formatSize(v.size) }}</td>
-								<td class="muted">{{ v.created_by ?? 'außerhalb von xlrx' }}</td>
-								<td class="act wide">
-									<a :href="`/api/versions/${v.id}/content`" download>Herunterladen</a>
-									<button class="link" type="button" :disabled="busy" @click="restoreVersion(v)">
-										Wiederherstellen
-									</button>
-								</td>
-							</tr>
-						</tbody>
-					</table>
-					<p v-else class="muted empty">
-						Noch keine früheren Fassungen. Wird die Datei über xlrx ersetzt, bleibt die bisherige hier erhalten.
-					</p>
-				</div>
+			<div class="tabs" role="tablist" aria-label="Details">
+				<button role="tab" type="button" :aria-selected="tab === 'info'" @click="tab = 'info'">Info</button>
+				<button role="tab" type="button" :aria-selected="tab === 'versionen'" @click="tab = 'versionen'">
+					Versionen{{ versions.length ? ` (${versions.length})` : '' }}
+				</button>
+			</div>
+			<section v-if="tab === 'info'" class="info" role="tabpanel" aria-label="Info">
+				<div class="kv"><span>Speicherort</span><span>{{ place }}</span></div>
+				<div class="kv"><span>Geändert</span><span>{{ formatDate(node.mtime) }}</span></div>
+				<div class="kv"><span>Größe</span><span>{{ formatSize(node.size) }}</span></div>
+				<div class="kv"><span>Typ</span><span>{{ node.mime ?? '–' }}</span></div>
+			</section>
+			<section v-else class="versions" role="tabpanel" aria-label="Versionen">
+				<ul class="rows">
+					<li class="current">
+						<Icon name="history" :size="18" class="muted" />
+						<span class="text-col"><span class="name">{{ formatDate(node.mtime) }}</span><span class="sub">{{ formatSize(node.size) }}</span></span>
+						<span class="tag">Aktuell</span>
+					</li>
+					<li v-for="v in versions" :key="v.id" class="old">
+						<Icon name="history" :size="18" class="muted" />
+						<span class="text-col">
+							<span class="name">{{ formatDate(v.mtime ?? v.created_at) }}</span>
+							<span class="sub">{{ formatSize(v.size) }} · ersetzt von {{ v.created_by ?? 'außerhalb von xlrx' }}</span>
+						</span>
+						<a class="small-link" :href="`/api/versions/${v.id}/content`" download>Herunterladen</a>
+						<button class="link small-link" type="button" :disabled="busy" @click="restoreVersion(v)">Wiederherstellen</button>
+					</li>
+				</ul>
+				<p v-if="!versions.length" class="muted small">
+					Noch keine früheren Fassungen. Wird die Datei über xlrx ersetzt, bleibt die bisherige hier erhalten.
+				</p>
+				<button class="new-version" :disabled="busy" @click="versionPicker?.click()"><Icon name="upload" :size="18" />Neue Fassung hochladen</button>
+				<input ref="versionPicker" type="file" hidden data-testid="version-input" @change="newVersion" />
 			</section>
 		</template>
 
-		<NameDialog
-			v-if="dialog?.kind === 'folder'"
-			title="Neuer Ordner"
-			action="Anlegen"
-			@submit="newFolder"
-			@cancel="dialog = null"
-		/>
+		<NameDialog v-if="dialog?.kind === 'folder'" title="Neuer Ordner" action="Anlegen" @submit="newFolder" @cancel="dialog = null" />
 		<NameDialog
 			v-else-if="dialog?.kind === 'rename'"
 			title="Umbenennen"
-			action="Umbenennen"
+			action="Fertig"
 			:initial="dialog.node.name"
 			@submit="(name) => dialog?.kind === 'rename' && rename(dialog.node, name)"
 			@cancel="dialog = null"
@@ -344,51 +369,60 @@ async function newVersion(e: Event) {
 			@move="(p) => dialog?.kind === 'move' && move(dialog.node, p)"
 			@cancel="dialog = null"
 		/>
-		<ConflictDialog
-			v-if="uploads.question.value"
-			:name="uploads.question.value.name"
-			:can-replace="uploads.question.value.canReplace"
-			:more="uploads.question.value.more"
-			@choose="(c, all) => uploads.question.value?.answer(c, all)"
-		/>
-		<UploadQueue
-			:items="uploads.items.value"
-			:active="uploads.active.value"
-			@close="uploads.clear()"
-			@resume="uploads.resume"
+		<ConfirmDialog
+			v-else-if="dialog?.kind === 'remove'"
+			title="In den Papierkorb verschieben?"
+			:text="`„${dialog.node.name}“ verschwindet aus dem Ordner. 30 Tage lang lässt ${dialog.node.kind === 'dir' ? 'er' : 'sie'} sich wiederherstellen.`"
+			action="In den Papierkorb"
+			:node="dialog.node"
+			danger
+			@confirm="dialog?.kind === 'remove' && remove(dialog.node)"
+			@cancel="dialog = null"
 		/>
 	</main>
 </template>
 
 <style scoped>
-.crumbs { display: flex; flex-wrap: wrap; gap: 0.4rem; font-size: 0.9rem; color: var(--muted); margin-bottom: 0.4rem; }
-.crumbs a { color: var(--muted); text-decoration: none; }
-.crumbs a:hover { color: var(--accent); text-decoration: underline; }
-.head h1 { margin: 0; overflow-wrap: anywhere; }
-.spacer { flex: 1; }
-.meta { margin: 0.25rem 0 1rem; }
-.notice { margin: 0.75rem 0 0; }
-.link { border: 0; background: none; padding: 0 0.3rem; color: var(--accent); text-decoration: underline; }
-.list { padding: 0.25rem 0; margin-top: 1rem; position: relative; }
-.list.dragging { outline: 2px dashed var(--accent); outline-offset: 4px; }
-.drop { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; background: color-mix(in srgb, var(--surface) 85%, transparent); color: var(--accent); font-weight: 600; border-radius: var(--radius); }
-.list table td, .list table th { padding-left: 1rem; padding-right: 1rem; }
-.list tbody tr:last-child td { border-bottom: 0; }
-.list tbody tr:hover { background: var(--bg); }
-.name { display: flex; align-items: center; gap: 0.6rem; color: var(--text); text-decoration: none; overflow-wrap: anywhere; }
-.name:hover span { text-decoration: underline; }
-.thumb { width: 28px; height: 28px; margin: -4px; object-fit: cover; border-radius: 4px; flex: none; background: var(--border); }
-.when { white-space: nowrap; width: 9rem; }
-.size { white-space: nowrap; width: 6rem; text-align: right; }
-.act { width: 5rem; text-align: right; white-space: nowrap; }
-.act.wide { width: auto; }
-.act .download { text-decoration: none; font-size: 1.1rem; padding: 0 0.3rem; }
-.empty { padding: 1.5rem 1rem; margin: 0; }
-.preview { margin-top: 1rem; }
-.versions { margin-top: 2rem; }
-.versions h2 { margin: 0; }
-@media (max-width: 40rem) {
-	.when { display: none; }
-	.head button, .head .button { padding: 0.5rem 0.7rem; }
+.crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; font-size: 13px; color: var(--muted); margin: 0 0 6px -4px; }
+.crumbs a { padding: 2px 4px; }
+.title-row { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; padding-bottom: 16px; }
+.titles { flex: 1; min-width: 12rem; }
+.titles h1 { margin: 0 0 8px; }
+.meta { margin: 0; font-size: 13px; color: var(--muted); }
+.tools { display: flex; gap: 8px; }
+.file-title { font-size: 23px; line-height: 1.2; letter-spacing: -0.02em; margin: 4px 0 6px; }
+.file-actions { margin: 14px 0 18px; }
+.notice { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; font-size: 14px; }
+.notice .link { margin-left: 4px; }
+.folder { position: relative; border-top: 1px dashed var(--dash); }
+.folder.dragging { outline: 2px dashed var(--accent); outline-offset: 6px; }
+.drop { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; background: color-mix(in srgb, var(--paper) 85%, transparent); color: var(--accent); font-weight: 500; }
+.toolbar { display: flex; align-items: center; gap: 4px; padding: 4px 0; }
+.toolbar .text { min-height: 40px; padding: 0 6px; gap: 6px; font-size: 13px; color: var(--ink-2); }
+.toolbar .icon { width: 40px; height: 40px; color: var(--faint); }
+.toolbar .icon[aria-pressed='true'] { color: var(--ink); }
+.rows li { gap: 0; }
+.open { flex: 1; min-width: 0; min-height: 58px; display: flex; align-items: center; gap: 14px; padding-left: 4px; text-decoration: none; }
+.text-col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.name { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.open:hover .name { text-decoration: underline; text-decoration-color: var(--line-strong); }
+.sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tiles { list-style: none; margin: 8px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 18px 14px; }
+.tiles .open { flex-direction: column; align-items: stretch; gap: 8px; padding: 0; min-height: 0; }
+.pic { height: 120px; border: 1px solid var(--dash); background: var(--paper-hi); display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.pic img { width: 100%; height: 100%; object-fit: cover; }
+.foot { display: flex; align-items: center; justify-content: space-between; margin-top: -6px; }
+.foot :deep(.dots) { width: 36px; height: 36px; margin-right: -8px; }
+.empty { padding: 1.5rem 0; margin: 0; }
+.tabs { margin-top: 20px; }
+.info, .versions { padding-top: 4px; }
+.versions .rows li { gap: 12px; min-height: 54px; }
+.small-link { font-size: 13px; }
+.versions .current .name { font-weight: 400; }
+.new-version { margin-top: 16px; }
+.small { font-size: 13px; }
+@media (max-width: 47.99rem) {
+	.desktop { display: none; }
+	.toolbar .rescan { font-size: 12.5px; }
 }
 </style>

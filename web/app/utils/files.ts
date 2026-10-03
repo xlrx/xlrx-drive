@@ -101,7 +101,6 @@ export function opensInBrowser(mime: string | null): boolean {
 	);
 }
 
-/** Icon for a node (see FileIcon). */
 /** Types the server makes thumbnails of (same list as `thumbs::supported`). */
 const THUMB_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff']);
 
@@ -112,14 +111,22 @@ export function thumbUrl(node: Pick<NodeInfo, 'id' | 'kind' | 'mime' | 'rev'>, s
 		: null;
 }
 
-export function iconKind(node: Pick<NodeInfo, 'kind' | 'mime'>): string {
-	if (node.kind === 'dir') return 'folder';
-	const p = previewKind(node.mime);
-	return p === 'text' ? 'doc' : (p ?? 'file');
-}
-
 const timeFormat = new Intl.DateTimeFormat('de-DE', { hour: '2-digit', minute: '2-digit' });
 const dayFormat = new Intl.DateTimeFormat('de-DE', { day: 'numeric', month: 'short', year: 'numeric' });
+
+/** "gerade eben", "vor 12 Min.", "vor 2 Std.", "gestern", otherwise the day. */
+export function formatAgo(s: string | null, now = Date.now()): string {
+	if (!s) return '';
+	const d = new Date(s);
+	const min = Math.round((now - d.getTime()) / 60_000);
+	if (min < 1) return 'gerade eben';
+	if (min < 60) return `vor ${min} Min.`;
+	if (min < 12 * 60) return `vor ${Math.round(min / 60)} Std.`;
+	const yesterday = new Date(now - 86_400_000);
+	if (d.toDateString() === new Date(now).toDateString()) return `heute, ${timeFormat.format(d)}`;
+	if (d.toDateString() === yesterday.toDateString()) return 'gestern';
+	return dayFormat.format(d);
+}
 
 /** Today: only the time; otherwise the day. */
 export function formatShortDate(s: string | null): string {

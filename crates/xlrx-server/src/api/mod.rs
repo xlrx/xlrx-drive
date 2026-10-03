@@ -100,6 +100,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/nodes/{id}/children", get(files::children))
         .route("/nodes/{id}/thumbnail", get(files::thumbnail))
+        .route("/recent", get(files::recent))
         .route(
             "/nodes/{id}/content",
             get(files::content).put(files::replace_content),

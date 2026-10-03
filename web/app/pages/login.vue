@@ -71,6 +71,7 @@ function switchTo(s: Step) {
 
 <template>
 	<main class="narrow with-scenery">
+		<p class="brand-line"><span class="brand-mark" aria-hidden="true"></span>xlrx</p>
 		<div class="card">
 			<h1>Anmelden</h1>
 			<template v-if="step === 'password'">

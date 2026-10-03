@@ -102,6 +102,7 @@ async function finish() {
 
 <template>
 	<main class="narrow with-scenery">
+		<p class="brand-line"><span class="brand-mark" aria-hidden="true"></span>xlrx</p>
 		<div class="card">
 			<h1>Konto einrichten</h1>
 			<p v-if="step === 'loading'" class="muted">Einen Moment …</p>

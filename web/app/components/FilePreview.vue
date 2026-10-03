@@ -43,7 +43,7 @@ const message = computed(() => {
 </script>
 
 <template>
-	<div class="preview card">
+	<div class="preview" :class="kind">
 		<img
 			v-if="kind === 'image' && !failed"
 			:src="contentUrl(node.id, true)"
@@ -70,28 +70,29 @@ const message = computed(() => {
 			<p v-if="truncated" class="muted">Gekürzt – die ganze Datei gibt es per Download.</p>
 		</div>
 		<div v-else class="none">
-			<FileIcon :kind="iconKind(node)" />
+			<FileMark :node="node" big />
 			<p class="muted">{{ message }}</p>
 		</div>
 	</div>
 </template>
 
 <style scoped>
-.preview { padding: 0; overflow: hidden; display: flex; justify-content: center; }
+/* The design shows a document as a sheet of paper on the desk. */
+.preview { display: flex; justify-content: center; border: 1px solid var(--dash); background: var(--paper-hi); overflow: hidden; }
+.preview.pdf, .preview.text { background: var(--sheet); border-color: var(--line-strong); box-shadow: 0 2px 10px rgb(27 26 23 / 8%); color: #1b1a17; }
 img, video { display: block; max-width: 100%; max-height: 75vh; object-fit: contain; }
 audio { width: 100%; margin: 2rem; }
 iframe { width: 100%; height: 80vh; border: 0; }
 .text { width: 100%; }
 pre {
 	margin: 0;
-	padding: 1rem 1.25rem;
+	padding: 1.5rem 1.75rem;
 	overflow: auto;
 	max-height: 75vh;
-	font: 0.85rem/1.5 ui-monospace, 'SF Mono', Menlo, monospace;
+	font: 13px/1.6 var(--mono);
 	white-space: pre-wrap;
 	overflow-wrap: anywhere;
 }
-.text p { margin: 0; padding: 0.5rem 1.25rem 1rem; }
-.none { padding: 3rem 1rem; text-align: center; }
-.none :deep(svg) { width: 48px; height: 48px; }
+.text p { margin: 0; padding: 0.5rem 1.75rem 1rem; color: #6f6a61; }
+.none { padding: 3rem 1rem; display: flex; flex-direction: column; align-items: center; gap: 4px; text-align: center; }
 </style>

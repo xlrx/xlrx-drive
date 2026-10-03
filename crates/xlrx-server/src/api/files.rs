@@ -388,6 +388,57 @@ pub struct UploadQuery {
     pub size: Option<u64>,
 }
 
+#[derive(Serialize)]
+pub struct RecentItem {
+    #[serde(flatten)]
+    pub node: NodeInfo,
+    /// The folder it is in, e.g. "Meine Ablage/Belege".
+    pub folder: String,
+}
+
+#[derive(Deserialize)]
+pub struct RecentQuery {
+    pub limit: Option<i64>,
+}
+
+/// Files changed last in the roots the person can read (start page).
+pub async fn recent(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    Query(q): Query<RecentQuery>,
+) -> ApiResult<Json<Vec<RecentItem>>> {
+    let roots = roots::readable(&st, me.id).await?;
+    let ids: Vec<i64> = roots.iter().map(|r| r.id).collect();
+    let rows: Vec<NodeRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {NODE_COLS} FROM nodes
+          WHERE root_id = ANY($1) AND kind = 'file' AND deleted_at IS NULL
+          ORDER BY mtime DESC NULLS LAST, id DESC LIMIT $2"
+    )))
+    .bind(&ids)
+    .bind(q.limit.unwrap_or(8).clamp(1, 50))
+    .fetch_all(&st.db)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for n in &rows {
+        let root = roots.iter().find(|r| r.id == n.root_id);
+        let mut folder = vec![root.map(|r| r.name.clone()).unwrap_or_default()];
+        if let Some(parent) = n.parent_id {
+            folder.extend(
+                db::ancestors(&st.db, parent)
+                    .await?
+                    .into_iter()
+                    .skip(1)
+                    .map(|a| a.name),
+            );
+        }
+        out.push(RecentItem {
+            node: NodeInfo::from(n),
+            folder: folder.join("/"),
+        });
+    }
+    Ok(Json(out))
+}
+
 #[derive(Deserialize)]
 pub struct ThumbQuery {
     /// Longest side in pixels (one of [`thumbs::SIZES`]).

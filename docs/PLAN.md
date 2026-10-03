@@ -653,7 +653,9 @@ bei neuen Freigaben. Pro Person einstellbar.
 
 **Nuxt 4** (Vue 3, Single-Page-App als statischer Build, vom Server ausgeliefert), TypeScript. Der API-Client wird aus OpenAPI generiert (utoipa).
 Live-Updates kommen per Server-Sent Events. PWA-fähig, Deutsch/Englisch, Dark Mode.
-Startseite und Anmeldung zeigen die radierte Berglandschaft aus dem App-Entwurf (12), passend zur Tageszeit
+Die Web-App folgt dem App-Entwurf (12): Papierton und Tinte (wählbar unter „Darstellung“, dazu ein dunkler Modus), Schrift Geist
+(mit der App ausgeliefert, kein Schriftendienst), gestrichelte Hilfslinien, Sheets für Aktionen und Rückfragen, auf dem Handy die
+schwebende Leiste mit „+“. Startseite und Anmeldung zeigen die radierte Berglandschaft aus dem App-Entwurf, passend zur Tageszeit
 (Morgen 5–10, Tag 10–17, Abend 17–21, Nacht 21–5 Uhr) und ohne Bewegung, wenn das System „Bewegung reduzieren“ verlangt.
 
 Bereiche wie bei Google Drive: **Startseite**, **Meine Ablage**, **Geteilte Ablagen**, **Für mich freigegeben**, **Zuletzt verwendet**,

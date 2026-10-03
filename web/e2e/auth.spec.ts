@@ -57,6 +57,14 @@ const PDF =
 	'%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n' +
 	'3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n';
 
+/** Signs out: account and settings, then "Abmelden" at the bottom (as in the design). */
+async function signOut(page: Page) {
+	await page.getByRole('link', { name: 'Konto und Einstellungen' }).click();
+	await expect(page.getByRole('heading', { name: 'Einstellungen' })).toBeVisible();
+	await page.getByRole('button', { name: 'Abmelden', exact: true }).last().click();
+	await expect(page.getByRole('heading', { name: 'Anmelden' })).toBeVisible();
+}
+
 /** The start page greets by time of day. */
 const GREETING = /^(Guten (Morgen|Tag|Abend), .+|Noch wach, .+\?)$/;
 
@@ -70,8 +78,7 @@ async function connectDevice(page: Page) {
 	const query = new URLSearchParams({ challenge, redirect_uri: 'xlrx://auth', state: 'e2e', name: 'Testmac', platform: 'macos' });
 
 	// Signed out: first the sign-in, then back to the device page.
-	await page.getByRole('button', { name: 'Abmelden' }).first().click();
-	await expect(page.getByRole('heading', { name: 'Anmelden' })).toBeVisible();
+	await signOut(page);
 	await page.goto(`/device?${query}`);
 	await expect(page).toHaveURL(/\/login\?next=/);
 	await page.getByLabel('Benutzername').fill('admin');
@@ -98,10 +105,10 @@ async function connectDevice(page: Page) {
 	// asks which app should open `xlrx://` (there is none here) and takes no clicks.
 	const tab = await page.context().newPage();
 	await tab.goto('/settings/security');
-	const row = tab.getByRole('row', { name: /Testmac/ });
+	const row = tab.getByRole('listitem').filter({ hasText: 'Testmac' });
 	await expect(row).toBeVisible();
-	tab.once('dialog', (d) => d.accept());
 	await row.getByRole('button', { name: 'Abmelden' }).click();
+	await tab.getByRole('alertdialog').getByRole('button', { name: 'Gerät abmelden' }).click();
 	await expect(tab.getByText('Noch keine Geräte.')).toBeVisible();
 	expect((await tab.request.get('/api/roots', { headers: auth })).status()).toBe(401);
 	await tab.close();
@@ -258,7 +265,8 @@ async function changeFiles(page: Page, data: string) {
 	await page.getByRole('button', { name: 'Uploads schließen' }).click();
 	await link('Rechnung.txt').click();
 	await expect(page.locator('pre')).toHaveText('Rechnung 3');
-	const versions = page.locator('section.versions tbody tr');
+	await page.getByRole('tab', { name: /Versionen/ }).click();
+	const versions = page.locator('section.versions li.old');
 	await expect(versions).toHaveCount(1);
 	await versions.getByRole('button', { name: 'Wiederherstellen' }).click();
 	await expect(page.locator('pre')).toHaveText('Rechnung 1');
@@ -268,26 +276,28 @@ async function changeFiles(page: Page, data: string) {
 	await nav().getByRole('link', { name: 'Belege' }).click();
 	await menu('Rechnung (1).txt', 'Umbenennen');
 	await page.getByLabel('Name').fill('Quittung.txt');
-	await page.getByRole('button', { name: 'Umbenennen' }).click();
+	await page.getByRole('button', { name: 'Fertig' }).click();
 	await expect(link('Quittung.txt')).toBeVisible();
 	await menu('Quittung.txt', 'Verschieben');
 	const dialog = page.getByRole('dialog');
 	await dialog.getByRole('button', { name: 'Meine Ablage' }).click();
 	await dialog.getByRole('button', { name: 'Projekte' }).click();
-	await dialog.getByRole('button', { name: 'Hierher verschieben' }).click();
+	await dialog.getByRole('button', { name: 'In „Projekte“ verschieben' }).click();
 	await expect(page.getByText('„Quittung.txt“ wurde verschoben.')).toBeVisible();
 	await expect(link('Quittung.txt')).toHaveCount(0);
 	expect(readFileSync(join(drive, 'Projekte/Quittung.txt'), 'utf8')).toBe('Rechnung 2');
 
 	// Delete, undo, delete again, restore from the trash.
-	await menu('Rechnung.txt', 'Löschen');
+	await menu('Rechnung.txt', 'In den Papierkorb');
+	await page.getByRole('alertdialog').getByRole('button', { name: 'In den Papierkorb' }).click();
 	await expect(page.getByText('„Rechnung.txt“ liegt jetzt im Papierkorb.')).toBeVisible();
 	expect(existsSync(join(drive, 'Belege/Rechnung.txt'))).toBe(false);
 	await page.getByRole('button', { name: 'Rückgängig' }).click();
 	await expect(link('Rechnung.txt')).toBeVisible();
-	await menu('Rechnung.txt', 'Löschen');
+	await menu('Rechnung.txt', 'In den Papierkorb');
+	await page.getByRole('alertdialog').getByRole('button', { name: 'In den Papierkorb' }).click();
 	await page.getByRole('link', { name: 'Papierkorb', exact: true }).click();
-	const row = page.getByRole('row', { name: /Rechnung\.txt/ });
+	const row = page.getByRole('listitem').filter({ hasText: 'Rechnung.txt' });
 	await expect(row).toContainText('Meine Ablage/Belege');
 	await row.getByRole('button', { name: 'Wiederherstellen' }).click();
 	await expect(page.getByText('„Rechnung.txt“ ist wieder da.')).toBeVisible();
@@ -319,20 +329,19 @@ test('Einrichtung, Anmeldung, Verwaltung und Dateien', async ({ page }) => {
 	await expect(page.getByRole('img', { name: /^Berglandschaft/ })).toBeVisible();
 
 	// Add a passkey (the login counts as a fresh second factor).
-	await page.getByRole('link', { name: 'Sicherheit' }).click();
+	await page.getByRole('link', { name: 'Konto und Einstellungen' }).click();
 	await page.getByPlaceholder('Name, z.B. MacBook').fill('Testgerät');
 	await page.getByRole('button', { name: 'Passkey hinzufügen' }).click();
-	await expect(page.getByRole('cell', { name: 'Testgerät' })).toBeVisible();
+	await expect(page.getByText('Testgerät', { exact: true })).toBeVisible();
 
 	// Log out, log in with the passkey alone.
-	await page.getByRole('button', { name: 'Abmelden' }).first().click();
-	await expect(page.getByRole('heading', { name: 'Anmelden' })).toBeVisible();
+	await signOut(page);
 	await page.getByLabel('Benutzername').fill('admin');
 	await page.getByRole('button', { name: 'Mit Passkey anmelden' }).click();
 	await expect(page.getByRole('heading', { name: GREETING })).toBeVisible();
 
 	// Log out, log in with password + code (next time step: the setup code must not work again).
-	await page.getByRole('button', { name: 'Abmelden' }).click();
+	await signOut(page);
 	await page.getByLabel('Benutzername').fill('admin');
 	await page.getByLabel('Passwort').fill(PASSWORD);
 	await page.getByRole('button', { name: 'Weiter' }).click();

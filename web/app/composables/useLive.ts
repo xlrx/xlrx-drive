@@ -40,5 +40,16 @@ export function useLive() {
 		onBeforeUnmount(() => clearTimeout(timer));
 	}
 
-	return { change, connect, disconnect, onRootChange };
+	/** Any change in a root the person can see (start page). */
+	function onAnyChange(fn: () => void) {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		watch(change, (c) => {
+			if (!c?.length) return;
+			clearTimeout(timer);
+			timer = setTimeout(fn, 250);
+		});
+		onBeforeUnmount(() => clearTimeout(timer));
+	}
+
+	return { change, connect, disconnect, onRootChange, onAnyChange };
 }

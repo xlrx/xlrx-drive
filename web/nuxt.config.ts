@@ -4,7 +4,8 @@ export default defineNuxtConfig({
 	ssr: false,
 	devtools: { enabled: false },
 	telemetry: false,
-	css: ['~/assets/css/main.css'],
+	// Geist is bundled with the app (no font service: CSP and privacy).
+	css: ['@fontsource-variable/geist/index.css', '@fontsource-variable/geist-mono/index.css', '~/assets/css/main.css'],
 	app: {
 		head: {
 			htmlAttrs: { lang: 'de' },

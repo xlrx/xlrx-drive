@@ -32,6 +32,7 @@ const allow = () =>
 
 <template>
 	<main class="narrow with-scenery">
+		<p class="brand-line"><span class="brand-mark" aria-hidden="true"></span>xlrx</p>
 		<div class="card stack">
 			<h1>Gerät verbinden</h1>
 			<p v-if="!complete" class="error">

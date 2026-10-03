@@ -30,43 +30,23 @@ const withPasskey = () =>
 </script>
 
 <template>
-	<div class="backdrop" role="presentation">
-		<div class="card dialog" role="dialog" aria-modal="true" aria-labelledby="stepup-title">
-			<h2 id="stepup-title">Bitte bestätigen</h2>
-			<p class="muted">Für diese Aktion ist eine erneute Bestätigung mit dem zweiten Faktor nötig.</p>
-			<button v-if="me?.passkeys.length" class="primary full" :disabled="busy" @click="withPasskey">
-				Mit Passkey bestätigen
-			</button>
-			<template v-if="me?.totp">
-				<div v-if="me?.passkeys.length" class="divider">oder</div>
-				<form @submit.prevent="withTotp">
-					<label for="stepup-code">Code aus der Authenticator-App</label>
-					<input
-						id="stepup-code"
-						v-model="code"
-						class="code"
-						inputmode="numeric"
-						autocomplete="one-time-code"
-						required
-					/>
-					<button class="full" :disabled="busy">Bestätigen</button>
-				</form>
-			</template>
-			<p v-if="error" class="error">{{ error }}</p>
-			<button class="full" @click="emit('cancel')">Abbrechen</button>
-		</div>
-	</div>
+	<Modal title="Bitte bestätigen" @cancel="emit('cancel')">
+		<p class="muted lead">Für diese Aktion ist eine erneute Bestätigung mit dem zweiten Faktor nötig.</p>
+		<button v-if="me?.passkeys.length" class="primary big full" :disabled="busy" @click="withPasskey">
+			<Icon name="key" />Mit Passkey bestätigen
+		</button>
+		<template v-if="me?.totp">
+			<div v-if="me?.passkeys.length" class="divider">oder</div>
+			<form @submit.prevent="withTotp">
+				<label for="stepup-code">Code aus der Authenticator-App</label>
+				<input id="stepup-code" v-model="code" class="code" inputmode="numeric" autocomplete="one-time-code" required />
+				<button class="big full" :disabled="busy">Bestätigen</button>
+			</form>
+		</template>
+		<p v-if="error" class="error" role="alert">{{ error }}</p>
+	</Modal>
 </template>
 
 <style scoped>
-.backdrop {
-	position: fixed;
-	inset: 0;
-	background: rgb(0 0 0 / 40%);
-	display: grid;
-	place-items: center;
-	padding: 1rem;
-	z-index: 10;
-}
-.dialog { width: min(24rem, 100%); }
+.lead { margin: 0 0 4px; font-size: 14px; }
 </style>

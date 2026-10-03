@@ -1,6 +1,6 @@
-// Upload queue of the file views: one file at a time, with progress and a question when a name
-// is taken (replace keeps the old content as a version). Large files go in parts; one that failed
-// can be continued where it stopped.
+// Upload queue of the app (one for all pages, so uploads go on while browsing): one file at a
+// time, with progress and a question when a name is taken (replace keeps the old content as a
+// version). Large files go in parts; one that failed can be continued where it stopped.
 
 export interface UploadItem {
 	key: number;
@@ -29,8 +29,16 @@ interface Question {
 	answer: (choice: ConflictChoice, forAll: boolean) => void;
 }
 
-export function useUploads(onChange: () => void) {
+let shared: ReturnType<typeof create> | null = null;
+
+export function useUploads() {
+	return (shared ??= create());
+}
+
+function create() {
 	const items = ref<UploadItem[]>([]);
+	/** Counts finished uploads; views watch it to show new files right away. */
+	const finished = ref(0);
 	const question = shallowRef<Question | null>(null);
 	const queue: Entry[] = [];
 	const failed = new Map<number, Entry>();
@@ -83,7 +91,7 @@ export function useUploads(onChange: () => void) {
 				item.resumable = !!entry.parts.uploadId;
 				failed.set(item.key, entry);
 			}
-			onChange();
+			finished.value++;
 		}
 		running = false;
 		remembered = null;
@@ -144,5 +152,5 @@ export function useUploads(onChange: () => void) {
 		if (!running) void run();
 	}
 
-	return { items, question, active, add, clear, resume };
+	return { items, question, active, finished, add, clear, resume };
 }

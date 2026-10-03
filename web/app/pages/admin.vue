@@ -80,7 +80,7 @@ const copy = () => link.value && navigator.clipboard.writeText(link.value.url);
 		<p v-if="!me?.is_admin" class="error">Nur für Administratoren.</p>
 		<template v-else>
 			<p v-if="g.error.value" class="error" role="alert">{{ g.error.value }}</p>
-			<div v-if="link" class="card stack">
+			<div v-if="link" class="note stack">
 				<strong>Einrichtungslink für {{ link.who }}</strong>
 				<p class="muted">72 Stunden gültig und nur einmal verwendbar. Bitte auf sicherem Weg weitergeben.</p>
 				<input readonly :value="link.url" class="code" />
@@ -90,7 +90,7 @@ const copy = () => link.value && navigator.clipboard.writeText(link.value.url);
 				</div>
 			</div>
 
-			<div class="card" style="margin-top: 1.5rem">
+			<section class="card">
 				<h2 style="margin-top: 0">Konten</h2>
 				<table>
 					<thead>
@@ -127,9 +127,9 @@ const copy = () => link.value && navigator.clipboard.writeText(link.value.url);
 					</label>
 					<button class="primary" :disabled="g.busy.value">Anlegen und Einrichtungslink erzeugen</button>
 				</form>
-			</div>
+			</section>
 
-			<div class="card" style="margin-top: 1.5rem">
+			<section class="card">
 				<h2 style="margin-top: 0">Protokoll</h2>
 				<table>
 					<thead>
@@ -145,7 +145,7 @@ const copy = () => link.value && navigator.clipboard.writeText(link.value.url);
 						</tr>
 					</tbody>
 				</table>
-			</div>
+			</section>
 		</template>
 	</main>
 	<StepUpDialog v-if="g.pending.value" @done="g.confirmed" @cancel="g.cancel" />
