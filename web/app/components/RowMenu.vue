@@ -1,8 +1,11 @@
 <script setup lang="ts">
 // Actions of a file or folder (as in the design): the "⋯" button opens a sheet from the bottom on
 // narrow screens, a menu beside the button on wide ones.
-const props = withDefaults(defineProps<{ node: NodeInfo; here?: boolean }>(), { here: false });
-const emit = defineEmits<{ rename: []; move: []; remove: [] }>();
+const props = withDefaults(defineProps<{ node: NodeInfo; here?: boolean; canEdit?: boolean }>(), {
+	here: false,
+	canEdit: true
+});
+const emit = defineEmits<{ rename: []; move: []; remove: []; share: [] }>();
 const open = ref(false);
 const button = ref<HTMLButtonElement | null>(null);
 const panel = ref<HTMLElement | null>(null);
@@ -32,10 +35,11 @@ function close() {
 	open.value = false;
 	button.value?.focus();
 }
-function pick(what: 'rename' | 'move' | 'remove') {
+function pick(what: 'rename' | 'move' | 'remove' | 'share') {
 	open.value = false;
 	if (what === 'rename') emit('rename');
 	else if (what === 'move') emit('move');
+	else if (what === 'share') emit('share');
 	else emit('remove');
 }
 function onKey(e: KeyboardEvent) {
@@ -104,10 +108,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
 				<NuxtLink v-if="!here" role="menuitem" class="item" :to="`/files/${node.id}`" @click="open = false">
 					<Icon :name="isFile ? 'eye' : 'folder'" /><span>{{ isFile ? 'Vorschau' : 'Öffnen' }}</span>
 				</NuxtLink>
-				<button role="menuitem" type="button" class="item" @click="pick('rename')">
+				<button role="menuitem" type="button" class="item" @click="pick('share')">
+					<Icon name="shared" /><span>Teilen</span>
+				</button>
+				<button v-if="canEdit" role="menuitem" type="button" class="item" @click="pick('rename')">
 					<Icon name="edit" /><span>Umbenennen</span>
 				</button>
-				<button role="menuitem" type="button" class="item" @click="pick('move')">
+				<button v-if="canEdit" role="menuitem" type="button" class="item" @click="pick('move')">
 					<Icon name="move" /><span>Verschieben</span>
 				</button>
 				<NuxtLink
@@ -119,7 +126,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
 				>
 					<Icon name="history" /><span>Versionen</span>
 				</NuxtLink>
-				<button role="menuitem" type="button" class="item danger" @click="pick('remove')">
+				<button v-if="canEdit" role="menuitem" type="button" class="item danger" @click="pick('remove')">
 					<Icon name="trash" /><span>In den Papierkorb</span>
 				</button>
 			</div>

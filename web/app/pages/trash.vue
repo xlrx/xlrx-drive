@@ -1,5 +1,7 @@
 <script setup lang="ts">
-// Trash of "My Drive": restore, or delete for good. Entries go after 30 days by themselves.
+// Trash of "My Drive" (or of a shared root, ?root=…): restore, or delete for good. Entries go
+// after 30 days by themselves.
+const route = useRoute();
 const root = ref<RootInfo | null>(null);
 const items = ref<TrashItem[]>([]);
 const loading = ref(true);
@@ -11,7 +13,9 @@ useHead({ title: 'Papierkorb – xlrx drive' });
 
 async function load() {
 	try {
-		root.value = (await apiGet<RootInfo[]>('/roots'))[0] ?? null;
+		const roots = await apiGet<RootInfo[]>('/roots');
+		const wanted = Number(route.query.root);
+		root.value = roots.find((r) => r.id === wanted) ?? roots[0] ?? null;
 		items.value = root.value ? await apiGet<TrashItem[]>(`/roots/${root.value.id}/trash`) : [];
 	} catch (e) {
 		error.value = errorMessage(e);
@@ -57,7 +61,7 @@ const mark = (t: TrashItem) => ({ id: t.id, kind: t.kind, name: t.name, mime: nu
 
 <template>
 	<main class="page">
-		<h1>Papierkorb</h1>
+		<h1>Papierkorb<template v-if="root?.kind === 'space'"> · {{ root.name }}</template></h1>
 		<p class="meta">Gelöschtes bleibt 30 Tage hier und lässt sich bis dahin wiederherstellen.</p>
 		<p v-if="error" class="error" role="alert">{{ error }}</p>
 		<p v-if="notice" class="notice" role="status"><Icon name="check" :size="16" :stroke="2" />{{ notice }}</p>

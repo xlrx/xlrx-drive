@@ -1,10 +1,25 @@
 // Files: types of the browse API and display helpers.
 
+export type Role = 'viewer' | 'editor' | 'manager' | 'owner';
+
+/** "Ansehen", "Bearbeiten", … as in the design. */
+export const ROLE_LABEL: Record<Role, string> = {
+	viewer: 'Ansehen',
+	editor: 'Bearbeiten',
+	manager: 'Verwalten',
+	owner: 'Besitzer'
+};
+
+/** May change things here (upload, rename, move, delete inside). */
+export const canEdit = (r: Role | undefined) => r === 'editor' || r === 'manager' || r === 'owner';
+
 export interface RootInfo {
 	id: number;
 	kind: 'home' | 'space';
 	name: string;
 	node_id: number;
+	/** My role over the whole root. */
+	role: Role;
 	scanned_at: string | null;
 }
 
@@ -23,9 +38,55 @@ export interface NodeInfo {
 }
 
 export interface NodeDetail extends NodeInfo {
-	/** From the root directory down to the node itself. */
+	/** From the highest folder I can see (root directory, or the shared folder) down to the node. */
 	path: { id: number; name: string }[];
 	root_id: number;
+	/** My role here. */
+	role: Role;
+	/** Seen through a share (not as owner or member of the whole root). */
+	shared: boolean;
+}
+
+/** A person or group something is shared with. */
+export interface Principal {
+	type: 'user' | 'group';
+	id: number;
+	name: string;
+}
+
+export interface ShareInfo {
+	id: number;
+	to: Principal;
+	role: Exclude<Role, 'owner'>;
+	expires_at: string | null;
+	expired: boolean;
+	node_id: number;
+	node_name: string;
+	/** On a folder above (inherited). */
+	inherited: boolean;
+	created_by: string | null;
+}
+
+export interface AccessInfo {
+	role: Role;
+	can_share: boolean;
+	owner: string | null;
+	space: string | null;
+	members: { to: Principal; role: Exclude<Role, 'owner'> }[];
+	shares: ShareInfo[];
+}
+
+export interface People {
+	users: { id: number; name: string; username: string }[];
+	groups: { id: number; name: string; members: number }[];
+}
+
+export interface SharedItem extends NodeInfo {
+	role: Role;
+	/** Whose it is: the owner, or the shared root. */
+	owner: string;
+	shared_by: string | null;
+	shared_at: string;
 }
 
 export interface ScanReport {

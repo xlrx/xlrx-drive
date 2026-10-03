@@ -1152,6 +1152,19 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
   - Textextraktion auf dem NAS (siehe 6.6) mit Fortschritt in der Verwaltung.
   - Web: Suche mit Vorschlägen (Dateinamen, Suchfilter, zuletzt gesucht – nur im Browser gespeichert), Ergebnisse mit Bildern als Kacheln und Textausschnitten, Suche in einem Ordner.
   - Offen für später: `von:`, `ist:`, `dokument:`, `ort:` und die Facetten Besitzer und Ort (M3/M4); Messung p95 mit echtem Bestand auf dem DS918+.
+- **M3 begonnen – Teilen erledigt (lokal getestet):**
+  - Eine Rechteprüfung für alles (Durchsuchen, Inhalte, Vorschaubilder, Versionen, Uploads, Änderungen, Papierkorb, Sync, Suche, Live-Ereignisse).
+    Rolle = höchste aus Besitz der eigenen Ablage, Mitgliedschaft in einer Geteilten Ablage, Freigabe auf dem Element oder einem Ordner darüber
+    (an die Person oder eine ihrer Gruppen, nicht abgelaufen). Ohne Rolle gibt es das Element nicht – auch für Admins.
+  - Rollen Ansehen, Bearbeiten (innen ändern), Verwalten (weiter teilen), optional mit Ablaufdatum. Umbenennen, Verschieben, Löschen verlangen
+    Bearbeiten-Rechte am Ordner darüber: Der geteilte Ordner selbst bleibt beim Besitzer. Wer nur eine Freigabe hat, kann in den Papierkorb legen
+    und zurückholen, aber nie endgültig löschen.
+  - Wer nur eine Freigabe hat, sieht ab dem geteilten Ordner: Pfade, Suchtreffer, Zugriffsliste und Live-Ereignisse verraten nichts darüber.
+    Die Suche filtert über die Vorfahren im Index; Teilen und Entziehen brauchen keine Neu-Indexierung.
+  - Gruppen und Geteilte Ablagen (bestehende Ordner des NAS, z. B. Synology-Drive-Teamordner, mit Mitgliedern) in der Verwaltung;
+    der Pfad muss ein echter Ordner unter dem Datenverzeichnis sein und darf keine andere Ablage überschneiden. Alles im Audit-Log.
+  - Web: Bereich „Geteilt“, „Teilen“ in den Aktionen, Tab „Zugriff“, „geteilt mit …“ im Ordner; wer nur ansehen darf, sieht keine Änderungs-Aktionen.
+  - Noch nicht: Verknüpfung geteilter Elemente in „Meine Ablage“ für den Mac-Client (kommt mit M5).
 
 **Nächster Schritt:** Inbetriebnahme auf dem DS918+ mit den Spike-Messungen (M0) und dem M1-Nachweis mit den echten Daten.
 

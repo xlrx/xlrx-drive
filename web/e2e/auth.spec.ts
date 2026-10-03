@@ -4,7 +4,7 @@ import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Browser, type Page } from '@playwright/test';
 
 const PASSWORD = 'Wolken über dem Garten 7';
 
@@ -366,7 +366,72 @@ async function searchFiles(page: Page, data: string) {
 	await expect(link('Heizung.txt')).toBeVisible();
 }
 
-test('Einrichtung, Anmeldung, Verwaltung und Dateien', async ({ page }) => {
+/** Sets up an account from its setup link in a browser of its own (password + authenticator app). */
+async function setupAccount(browser: Browser, url: string): Promise<Page> {
+	const page = await (await browser.newContext()).newPage();
+	await page.goto(url);
+	await page.getByLabel('Neues Passwort').fill(PASSWORD);
+	await page.getByLabel('Passwort wiederholen').fill(PASSWORD);
+	await page.getByRole('button', { name: 'Weiter' }).click();
+	await page.getByRole('button', { name: 'Authenticator-App einrichten' }).click();
+	const secret = base32Decode(await page.locator('p.muted .code').innerText());
+	await page.getByLabel('Angezeigter Code').fill(totp(secret, step()));
+	await page.getByRole('button', { name: 'Bestätigen' }).click();
+	await page.getByLabel('Ich habe die Codes sicher gespeichert.').check();
+	await page.getByRole('button', { name: 'Fertig' }).click();
+	await expect(page.getByRole('link', { name: 'Konto und Einstellungen' })).toBeVisible();
+	return page;
+}
+
+/** Sharing a folder with another person: what they see, what they may do, and ending it. */
+async function shareFiles(page: Page, browser: Browser, bertSetup: string) {
+	const link = (p: Page, name: string) => p.getByRole('link', { name, exact: true });
+	const bert = await setupAccount(browser, bertSetup);
+	await bert.getByRole('link', { name: 'Geteilt', exact: true }).first().click();
+	await expect(bert.getByText('Noch nichts.')).toBeVisible();
+
+	// The owner shares "Projekte" to edit.
+	await page.getByRole('link', { name: 'Dateien', exact: true }).click();
+	await page.getByRole('button', { name: 'Aktionen für Projekte' }).click();
+	await page.getByRole('menuitem', { name: 'Teilen' }).click();
+	const sheet = page.getByRole('dialog', { name: '„Projekte“ teilen' });
+	await sheet.getByLabel('Person oder Gruppe').selectOption({ label: 'Bert' });
+	await sheet.getByLabel('Rolle', { exact: true }).selectOption('editor');
+	await sheet.getByRole('button', { name: 'Teilen', exact: true }).click();
+	await expect(sheet.getByLabel('Rolle von Bert')).toHaveValue('editor');
+	await sheet.getByRole('button', { name: 'Schließen' }).click();
+	await link(page, 'Projekte').click();
+	await expect(page.getByText(/geteilt mit Bert/)).toBeVisible();
+
+	// Bert finds it under "Geteilt", sees only it and may add to it.
+	await bert.reload();
+	await expect(link(bert, 'Projekte')).toBeVisible();
+	await link(bert, 'Projekte').click();
+	await expect(bert.getByRole('heading', { name: 'Projekte' })).toBeVisible();
+	await expect(bert.getByRole('navigation', { name: 'Pfad' }).getByRole('link', { name: 'Geteilt' })).toBeVisible();
+	await expect(bert.getByRole('navigation', { name: 'Pfad' }).getByRole('link', { name: 'Meine Ablage' })).toHaveCount(0);
+	await expect(link(bert, 'Plan.txt')).toBeVisible();
+	await bert.getByTestId('upload-input').setInputFiles({ name: 'Von Bert.txt', mimeType: 'text/plain', buffer: Buffer.from('Hallo') });
+	await expect(link(bert, 'Von Bert.txt')).toBeVisible();
+	// The owner sees it arrive by itself.
+	await expect(link(page, 'Von Bert.txt')).toBeVisible();
+	// Nothing else of the owner's is reachable.
+	const rootId = new URL(page.url()).pathname.split('/').pop();
+	const parent = await page.request.get(`/api/nodes/${rootId}`).then((r) => r.json());
+	await bert.goto(`/files/${parent.path[0].id}`);
+	await expect(bert.getByText('Nicht gefunden – vielleicht gelöscht oder verschoben.')).toBeVisible();
+
+	// Ended by the owner: gone for Bert.
+	await page.getByRole('button', { name: 'Teilen' }).first().click();
+	await page.getByRole('dialog').getByRole('button', { name: 'Freigabe für Bert beenden' }).click();
+	await expect(page.getByRole('dialog').getByText('Noch mit niemandem geteilt.')).toBeVisible();
+	await page.getByRole('dialog').getByRole('button', { name: 'Schließen' }).click();
+	await bert.goto('/shared');
+	await expect(bert.getByText('Noch nichts.')).toBeVisible();
+	await bert.context().close();
+}
+
+test('Einrichtung, Anmeldung, Verwaltung und Dateien', async ({ page, browser }) => {
 	const setupUrl = process.env.XLRX_SETUP_URL;
 	test.skip(!setupUrl, 'XLRX_SETUP_URL fehlt (e2e/run.sh verwenden)');
 	await virtualAuthenticator(page);
@@ -417,6 +482,7 @@ test('Einrichtung, Anmeldung, Verwaltung und Dateien', async ({ page }) => {
 	await page.getByRole('button', { name: /Anlegen/ }).click();
 	await expect(page.getByText('Einrichtungslink für bert')).toBeVisible();
 	await expect(page.locator('input[readonly]')).toHaveValue(/\/setup#/);
+	const bertSetup = await page.locator('input[readonly]').inputValue();
 	await expect(page.getByRole('cell', { name: 'user_created' }).first()).toBeVisible();
 
 	const data = process.env.XLRX_E2E_DATA;
@@ -424,6 +490,7 @@ test('Einrichtung, Anmeldung, Verwaltung und Dateien', async ({ page }) => {
 		await browseFiles(page, data);
 		await changeFiles(page, data);
 		await searchFiles(page, data);
+		await shareFiles(page, browser, bertSetup);
 		await uploadLarge(page, data);
 	}
 	await connectDevice(page);

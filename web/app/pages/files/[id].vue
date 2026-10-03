@@ -24,10 +24,19 @@ type Dialog =
 	| { kind: 'folder' }
 	| { kind: 'rename'; node: NodeInfo }
 	| { kind: 'move'; node: NodeInfo }
-	| { kind: 'remove'; node: NodeInfo };
+	| { kind: 'remove'; node: NodeInfo }
+	| { kind: 'share'; node: NodeInfo };
 const dialog = ref<Dialog | null>(null);
 
 const title = computed(() => node.value?.path.at(-1)?.name ?? '');
+/** May change things here (viewers only look). */
+const editable = computed(() => canEdit(node.value?.role));
+/** Who has access (folder line "geteilt mit …", tab "Zugriff"). */
+const access = ref<AccessInfo | null>(null);
+const sharedWith = computed(() => {
+	const names = (access.value?.shares ?? []).filter((s) => !s.expired).map((s) => s.to.name);
+	return [...new Set(names)];
+});
 useHead({ title: computed(() => (title.value ? `${title.value} – xlrx drive` : 'xlrx drive')) });
 
 // How folders are shown (kept in this browser).
@@ -56,25 +65,29 @@ const sorted = computed(() => {
 const count = computed(() => (children.value.length === 1 ? '1 Element' : `${children.value.length} Elemente`));
 
 // File view: tabs (the actions menu links to the versions directly).
-const tab = ref<'info' | 'versionen'>(route.query.tab === 'versionen' ? 'versionen' : 'info');
-watch(id, () => (tab.value = route.query.tab === 'versionen' ? 'versionen' : 'info'));
+type Tab = 'info' | 'versionen' | 'zugriff';
+const tabFrom = (q: unknown): Tab => (q === 'versionen' || q === 'zugriff' ? q : 'info');
+const tab = ref<Tab>(tabFrom(route.query.tab));
+watch(id, () => (tab.value = tabFrom(route.query.tab)));
 
 async function load() {
 	clearTimeout(poll);
 	try {
 		const n = await apiGet<NodeDetail>(`/nodes/${id.value}`);
-		const [kids, vers, roots] = await Promise.all([
+		const [kids, vers, roots, acc] = await Promise.all([
 			n.kind === 'dir' ? apiGet<NodeInfo[]>(`/nodes/${n.id}/children`) : Promise.resolve([]),
 			n.kind === 'file' ? apiGet<VersionInfo[]>(`/nodes/${n.id}/versions`) : Promise.resolve([]),
-			apiGet<RootInfo[]>('/roots')
+			apiGet<RootInfo[]>('/roots'),
+			apiGet<AccessInfo>(`/nodes/${n.id}/shares`).catch(() => null)
 		]);
 		node.value = n;
 		children.value = kids;
 		versions.value = vers;
+		access.value = acc;
 		root.value = roots.find((r) => r.id === n.root_id) ?? null;
-		// Target of "Neu": this folder, or the folder of this file.
+		// Target of "Neu": this folder, or the folder of this file – if I may add there.
 		const where = n.kind === 'dir' ? n.path.at(-1) : n.path.at(-2);
-		folder.value = where ? { id: where.id, name: where.name } : null;
+		folder.value = where && canEdit(n.role) ? { id: where.id, name: where.name } : null;
 		// First import still running: show what is there and look again shortly.
 		if (root.value && !root.value.scanned_at) poll = setTimeout(load, 1500);
 	} catch (e) {
@@ -190,7 +203,7 @@ function picked(e: Event) {
 
 function dropped(e: DragEvent) {
 	dragging.value = false;
-	if (node.value?.kind !== 'dir') return;
+	if (node.value?.kind !== 'dir' || !editable.value) return;
 	const entries = Array.from(e.dataTransfer?.items ?? []).filter((i) => i.kind === 'file');
 	// Folders arrive as entries too; uploading whole folders comes later.
 	const files = entries
@@ -225,13 +238,14 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 <template>
 	<main
 		class="page"
-		@dragover.prevent="dragging = node?.kind === 'dir'"
+		@dragover.prevent="dragging = node?.kind === 'dir' && editable"
 		@dragleave.self="dragging = false"
 		@drop.prevent="dropped"
 	>
-		<nav v-if="node && node.path.length > 1" class="crumbs" aria-label="Pfad">
+		<nav v-if="node && (node.path.length > 1 || node.shared)" class="crumbs" aria-label="Pfad">
+			<NuxtLink v-if="node.shared" to="/shared">Geteilt</NuxtLink>
 			<template v-for="(c, i) in node.path.slice(0, -1)" :key="c.id">
-				<Icon v-if="i" name="chevR" :size="14" :stroke="1.8" />
+				<Icon v-if="i || node.shared" name="chevR" :size="14" :stroke="1.8" />
 				<NuxtLink :to="`/files/${c.id}`">{{ c.name }}</NuxtLink>
 			</template>
 		</nav>
@@ -241,11 +255,17 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 			<div class="title-row">
 				<div class="titles">
 					<h1>{{ title }}</h1>
-					<p class="meta">{{ count }}<template v-if="root"> · {{ root.name }}</template></p>
+					<p class="meta">
+						{{ count }}<template v-if="root"> · {{ root.name }}</template>
+						<template v-else-if="access?.owner"> · von {{ access.owner }}</template>
+						<template v-if="sharedWith.length"> · geteilt mit {{ sharedWith.join(', ') }}</template>
+						<template v-if="!editable"> · nur ansehen</template>
+					</p>
 				</div>
 				<div class="tools">
-					<button :disabled="busy" class="desktop" @click="dialog = { kind: 'folder' }"><Icon name="folderPlus" :size="18" />Neuer Ordner</button>
-					<button class="primary desktop" :disabled="busy" @click="picker?.click()"><Icon name="upload" :size="18" />Hochladen</button>
+					<button :disabled="busy" class="desktop" @click="dialog = { kind: 'share', node }"><Icon name="shared" :size="18" />Teilen</button>
+					<button v-if="editable" :disabled="busy" class="desktop" @click="dialog = { kind: 'folder' }"><Icon name="folderPlus" :size="18" />Neuer Ordner</button>
+					<button v-if="editable" class="primary desktop" :disabled="busy" @click="picker?.click()"><Icon name="upload" :size="18" />Hochladen</button>
 					<input ref="picker" type="file" multiple hidden data-testid="upload-input" @change="picked" />
 				</div>
 			</div>
@@ -259,7 +279,7 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 				<a class="button primary" :href="contentUrl(node.id)" download><Icon name="download" :size="18" />Herunterladen</a>
 				<a v-if="opensInBrowser(node.mime)" class="button" :href="contentUrl(node.id, true)" target="_blank" rel="noopener"><Icon name="openIn" :size="18" />In neuem Tab</a>
 				<span class="spacer"></span>
-				<RowMenu :node="node" here @rename="dialog = { kind: 'rename', node }" @move="dialog = { kind: 'move', node }" @remove="dialog = { kind: 'remove', node }" />
+				<RowMenu :node="node" here :can-edit="editable" @share="dialog = { kind: 'share', node }" @rename="dialog = { kind: 'rename', node }" @move="dialog = { kind: 'move', node }" @remove="dialog = { kind: 'remove', node }" />
 			</div>
 		</template>
 
@@ -278,9 +298,10 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 					<Icon name="sort" :size="15" :stroke="1.6" />{{ view.sort === 'name' ? 'Name' : 'Zuletzt geändert' }}
 				</button>
 				<span class="spacer"></span>
-				<button type="button" class="text rescan" :disabled="busy" @click="rescan">
+				<button v-if="root" type="button" class="text rescan" :disabled="busy" @click="rescan">
 					<Icon name="sync" :size="15" :stroke="1.6" />{{ busy ? 'Bitte warten …' : 'Neu einlesen' }}
 				</button>
+				<NuxtLink v-if="root && node.path.length === 1 && canEdit(root.role)" :to="root.kind === 'space' ? `/trash?root=${root.id}` : '/trash'" class="icon trash-link" aria-label="Papierkorb"><Icon name="trash" :size="18" :stroke="1.6" /></NuxtLink>
 				<NuxtLink :to="{ path: '/search', query: { folder: node.id } }" class="icon" aria-label="In diesem Ordner suchen"><Icon name="search" :size="18" :stroke="1.6" /></NuxtLink>
 				<button type="button" class="icon" aria-label="Listenansicht" :aria-pressed="view.layout === 'list'" @click="view.layout = 'list'"><Icon name="list" :size="18" :stroke="1.6" /></button>
 				<button type="button" class="icon" aria-label="Rasteransicht" :aria-pressed="view.layout === 'grid'" @click="view.layout = 'grid'"><Icon name="grid" :size="18" :stroke="1.6" /></button>
@@ -294,7 +315,7 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 							<span :id="`meta-${c.id}`" class="sub" aria-hidden="true">{{ meta(c) }}</span>
 						</span>
 					</NuxtLink>
-					<RowMenu :node="c" @rename="dialog = { kind: 'rename', node: c }" @move="dialog = { kind: 'move', node: c }" @remove="dialog = { kind: 'remove', node: c }" />
+					<RowMenu :node="c" :can-edit="editable" @share="dialog = { kind: 'share', node: c }" @rename="dialog = { kind: 'rename', node: c }" @move="dialog = { kind: 'move', node: c }" @remove="dialog = { kind: 'remove', node: c }" />
 				</li>
 			</ul>
 			<ul v-else-if="sorted.length" class="tiles">
@@ -306,11 +327,11 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 						</span>
 						<span class="name">{{ c.name }}</span>
 					</NuxtLink>
-					<span class="foot"><span class="sub">{{ meta(c) }}</span><RowMenu :node="c" @rename="dialog = { kind: 'rename', node: c }" @move="dialog = { kind: 'move', node: c }" @remove="dialog = { kind: 'remove', node: c }" /></span>
+					<span class="foot"><span class="sub">{{ meta(c) }}</span><RowMenu :node="c" :can-edit="editable" @share="dialog = { kind: 'share', node: c }" @rename="dialog = { kind: 'rename', node: c }" @move="dialog = { kind: 'move', node: c }" @remove="dialog = { kind: 'remove', node: c }" /></span>
 				</li>
 			</ul>
 			<p v-else-if="!loading" class="muted empty">
-				Dieser Ordner ist leer. Dateien hierher ziehen oder „Hochladen“ wählen.
+				{{ editable ? 'Dieser Ordner ist leer. Dateien hierher ziehen oder „Hochladen“ wählen.' : 'Dieser Ordner ist leer.' }}
 			</p>
 			<p v-if="dragging" class="drop">Loslassen zum Hochladen</p>
 		</section>
@@ -322,12 +343,23 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 				<button role="tab" type="button" :aria-selected="tab === 'versionen'" @click="tab = 'versionen'">
 					Versionen{{ versions.length ? ` (${versions.length})` : '' }}
 				</button>
+				<button role="tab" type="button" :aria-selected="tab === 'zugriff'" @click="tab = 'zugriff'">Zugriff</button>
 			</div>
 			<section v-if="tab === 'info'" class="info" role="tabpanel" aria-label="Info">
 				<div class="kv"><span>Speicherort</span><span>{{ place }}</span></div>
 				<div class="kv"><span>Geändert</span><span>{{ formatDate(node.mtime) }}</span></div>
 				<div class="kv"><span>Größe</span><span>{{ formatSize(node.size) }}</span></div>
 				<div class="kv"><span>Typ</span><span>{{ node.mime ?? '–' }}</span></div>
+			</section>
+			<section v-else-if="tab === 'zugriff'" class="access" role="tabpanel" aria-label="Zugriff">
+				<div class="kv"><span>Deine Rolle</span><span>{{ ROLE_LABEL[node.role] }}</span></div>
+				<div v-if="access?.owner" class="kv"><span>Gehört</span><span>{{ access.owner }}</span></div>
+				<div v-if="access?.space" class="kv"><span>Ablage</span><span>{{ access.space }}</span></div>
+				<div v-for="s in access?.shares ?? []" :key="s.id" class="kv">
+					<span>{{ s.to.name }}<template v-if="s.inherited"> (über „{{ s.node_name }}“)</template></span>
+					<span>{{ s.expired ? 'abgelaufen' : ROLE_LABEL[s.role] }}</span>
+				</div>
+				<button class="new-version" type="button" @click="dialog = { kind: 'share', node }"><Icon name="shared" :size="18" />{{ access?.can_share ? 'Teilen' : 'Wer hat Zugriff?' }}</button>
 			</section>
 			<section v-else class="versions" role="tabpanel" aria-label="Versionen">
 				<ul class="rows">
@@ -343,13 +375,13 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 							<span class="sub">{{ formatSize(v.size) }} · ersetzt von {{ v.created_by ?? 'außerhalb von xlrx' }}</span>
 						</span>
 						<a class="small-link" :href="`/api/versions/${v.id}/content`" download>Herunterladen</a>
-						<button class="link small-link" type="button" :disabled="busy" @click="restoreVersion(v)">Wiederherstellen</button>
+						<button v-if="editable" class="link small-link" type="button" :disabled="busy" @click="restoreVersion(v)">Wiederherstellen</button>
 					</li>
 				</ul>
 				<p v-if="!versions.length" class="muted small">
 					Noch keine früheren Fassungen. Wird die Datei über xlrx ersetzt, bleibt die bisherige hier erhalten.
 				</p>
-				<button class="new-version" :disabled="busy" @click="versionPicker?.click()"><Icon name="upload" :size="18" />Neue Fassung hochladen</button>
+				<button v-if="editable" class="new-version" :disabled="busy" @click="versionPicker?.click()"><Icon name="upload" :size="18" />Neue Fassung hochladen</button>
 				<input ref="versionPicker" type="file" hidden data-testid="version-input" @change="newVersion" />
 			</section>
 		</template>
@@ -364,12 +396,13 @@ const place = computed(() => node.value?.path.slice(0, -1).map((c) => c.name).jo
 			@cancel="dialog = null"
 		/>
 		<MoveDialog
-			v-else-if="dialog?.kind === 'move' && root"
+			v-else-if="dialog?.kind === 'move' && node"
 			:node="dialog.node"
-			:root-node="root.node_id"
+			:root-node="root?.node_id ?? node.path[0]!.id"
 			@move="(p) => dialog?.kind === 'move' && move(dialog.node, p)"
 			@cancel="dialog = null"
 		/>
+		<ShareDialog v-else-if="dialog?.kind === 'share'" :node="dialog.node" @close="dialog = null" @changed="load" />
 		<ConfirmDialog
 			v-else-if="dialog?.kind === 'remove'"
 			title="In den Papierkorb verschieben?"

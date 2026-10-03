@@ -24,8 +24,11 @@ const sections = computed(() => [
 	{ to: '/', label: 'Start', icon: 'home' as const, exact: true },
 	{ to: '/files', label: 'Dateien', icon: 'folder' as const },
 	{ to: '/search', label: 'Suche', icon: 'search' as const },
+	{ to: '/shared', label: 'Geteilt', icon: 'shared' as const },
 	{ to: '/trash', label: 'Papierkorb', icon: 'trash' as const }
 ]);
+// The bar at the bottom of phones holds four, as in the design; the trash is in the folder view.
+const docked = computed(() => sections.value.filter((s) => s.to !== '/trash'));
 const current = (s: { to: string; exact?: boolean }) =>
 	s.exact ? route.path === s.to : route.path === s.to || route.path.startsWith(`${s.to}/`);
 </script>
@@ -47,7 +50,7 @@ const current = (s: { to: string; exact?: boolean }) =>
 		<slot />
 		<div class="dock">
 			<nav class="tabs-bottom" aria-label="Navigation">
-				<NuxtLink v-for="s in sections" :key="s.to" :to="s.to" :aria-current="current(s) ? 'page' : undefined">
+				<NuxtLink v-for="s in docked" :key="s.to" :to="s.to" :aria-current="current(s) ? 'page' : undefined">
 					<Icon :name="s.icon" /><span>{{ s.label }}</span>
 				</NuxtLink>
 			</nav>
