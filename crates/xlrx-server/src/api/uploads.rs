@@ -20,12 +20,12 @@ use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
-use super::files::{NodeInfo, mtime, visible};
+use super::files::{NodeInfo, editable, mtime};
 use super::sync::{hex, hex32, uploaded_path};
 use crate::auth::session::CurrentUser;
 use crate::error::{ApiError, ApiResult};
 use crate::files::content::{self, Target};
-use crate::files::{ops, roots, store};
+use crate::files::{ops, store};
 use crate::state::AppState;
 
 /// Largest part per request (below the body limits of common proxies).
@@ -145,10 +145,7 @@ async fn check_target(st: &AppState, me: &CurrentUser, target: &UploadTarget) ->
             keep_both,
         } => {
             let name = ops::valid_name(name)?;
-            let (folder, root) = visible(st, me, *parent_id).await?;
-            if !roots::can_write(&root, me.id) {
-                return Err(ApiError::forbidden("Keine Schreibrechte in diesem Ordner."));
-            }
+            let (folder, _) = editable(st, me, *parent_id).await?;
             if !folder.is_dir() {
                 return Err(ApiError::bad("Kein Ordner."));
             }
@@ -157,10 +154,7 @@ async fn check_target(st: &AppState, me: &CurrentUser, target: &UploadTarget) ->
             }
         }
         UploadTarget::Replace { node_id, base_rev } => {
-            let (node, root) = visible(st, me, *node_id).await?;
-            if !roots::can_write(&root, me.id) {
-                return Err(ApiError::forbidden("Keine Schreibrechte für diese Datei."));
-            }
+            let (node, _) = editable(st, me, *node_id).await?;
             if node.is_dir() {
                 return Err(ApiError::bad("Ordner haben keinen Inhalt."));
             }

@@ -17,6 +17,7 @@ use xlrx_chunk::fingerprint_of;
 use xlrx_proto::Name;
 use xlrx_sync::Reject;
 
+use super::access::{self, Role};
 use super::db::{self, NODE_COLS, NodeRow, OnDisk, RootRow, Source};
 use super::fs::{ignored, walk};
 use super::store::{self, Moved};
@@ -78,22 +79,33 @@ pub fn valid_name(raw: &str) -> ApiResult<String> {
     Ok(name.as_str().to_owned())
 }
 
-/// A node of a root the person may change, with its root.
+/// A node in a folder the person may change (create, rename, move, delete there), with its root.
+pub(super) async fn changeable(
+    st: &AppState,
+    user_id: i64,
+    id: i64,
+) -> ApiResult<(NodeRow, RootRow)> {
+    let a = access::require_in_parent(&st.db, user_id, id).await?;
+    Ok((a.node, a.root))
+}
+
+/// A node the person may change (a folder to add to, a file to write), with its root.
 pub(super) async fn writable(
     st: &AppState,
     user_id: i64,
     id: i64,
 ) -> ApiResult<(NodeRow, RootRow)> {
-    let node = db::node_by_id(&st.db, id)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    let root = db::root_by_id(&st.db, node.root_id)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    if !roots::can_write(&root, user_id) {
-        return Err(ApiError::NotFound);
+    let a = access::require(&st.db, user_id, id, Role::Editor).await?;
+    Ok((a.node, a.root))
+}
+
+/// The root, if the person may manage its trash (owner, or member who may edit).
+async fn trash_keeper(st: &AppState, user_id: i64, root: &RootRow) -> ApiResult<()> {
+    match roots::role(st, root, user_id).await? {
+        Some(r) if r >= Role::Editor => Ok(()),
+        Some(_) => Err(ApiError::forbidden("Du darfst hier nur ansehen.")),
+        None => Err(ApiError::NotFound),
     }
-    Ok((node, root))
 }
 
 pub(super) fn live(node: NodeRow) -> ApiResult<NodeRow> {
@@ -273,10 +285,10 @@ fn check_at(node: &NodeRow, at: Option<&(i64, String)>) -> ApiResult<()> {
 }
 
 pub async fn update(st: &AppState, user_id: i64, id: i64, ch: Change) -> ApiResult<NodeRow> {
-    let (_, root) = writable(st, user_id, id).await?;
+    let (_, root) = changeable(st, user_id, id).await?;
     let lock = st.root_lock(root.id);
     let _guard = lock.lock().await;
-    let (node, root) = writable(st, user_id, id).await?;
+    let (node, root) = changeable(st, user_id, id).await?;
     let node = live(node)?;
     let Some(old_parent) = node.parent_id else {
         return Err(ApiError::bad(
@@ -306,6 +318,10 @@ pub async fn update(st: &AppState, user_id: i64, id: i64, ch: Change) -> ApiResu
         return Err(ApiError::bad(
             "Verschieben in eine andere Ablage ist noch nicht möglich.",
         ));
+    }
+    if target.id != old_parent {
+        // The target must be a folder the person may add to, too.
+        writable(st, user_id, target.id).await?;
     }
     if !target.is_dir() {
         return Err(ApiError::Rejected(
@@ -485,10 +501,10 @@ pub async fn trash_if(
     if_seq: Option<i64>,
     pre: &DeleteIf,
 ) -> ApiResult<()> {
-    let (_, root) = writable(st, user_id, id).await?;
+    let (_, root) = changeable(st, user_id, id).await?;
     let lock = st.root_lock(root.id);
     let _guard = lock.lock().await;
-    let (node, root) = writable(st, user_id, id).await?;
+    let (node, root) = changeable(st, user_id, id).await?;
     let node = live(node)?;
     if node.parent_id.is_none() {
         return Err(ApiError::bad(
@@ -621,9 +637,7 @@ pub async fn trash_list(st: &AppState, user_id: i64, root_id: i64) -> ApiResult<
     let root = db::root_by_id(&st.db, root_id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    if !roots::can_read(&root, user_id) {
-        return Err(ApiError::NotFound);
-    }
+    trash_keeper(st, user_id, &root).await?;
     let rows: Vec<NodeRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {NODE_COLS} FROM nodes WHERE root_id = $1 AND trash_path IS NOT NULL
          ORDER BY deleted_at DESC LIMIT 1000"
@@ -700,6 +714,8 @@ pub async fn restore(st: &AppState, user_id: i64, id: i64) -> ApiResult<NodeRow>
             .await?
             .ok_or(ApiError::NotFound)?,
     };
+    // Back into a folder the person may add to (the top of the root needs rights on all of it).
+    writable(st, user_id, parent.id).await?;
     let dir = located(st, &p, &parent).await?;
     let base = Name::new(&node.name).map_err(|e| ApiError::Internal(e.to_string()))?;
     let mut name = base.as_str().to_owned();
@@ -875,7 +891,13 @@ async fn refresh_disk(st: &AppState, top: i64, path: PathBuf) -> ApiResult<()> {
 
 /// Removes an item from the trash for good.
 pub async fn purge(st: &AppState, user_id: i64, id: i64) -> ApiResult<()> {
+    // Only who keeps the trash may destroy for good; people it was shared with never can.
     let (_, root) = writable(st, user_id, id).await?;
+    if trash_keeper(st, user_id, &root).await.is_err() {
+        return Err(ApiError::forbidden(
+            "Endgültig löschen kann nur, wer die ganze Ablage bearbeiten darf.",
+        ));
+    }
     let lock = st.root_lock(root.id);
     let _guard = lock.lock().await;
     let Some(trash_rel) = trash_path_of(st, id).await? else {

@@ -2,6 +2,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use super::access::Role;
 use super::db::{self, NewNode, OnDisk, ROOT_COLS, RootRow, Source};
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
@@ -55,6 +56,11 @@ pub async fn ensure_home(
     if let Some(r) = existing {
         return Ok(Some(r));
     }
+    if let Some(other) = overlapping(&mut tx, &rel).await? {
+        return Err(ApiError::Conflict(format!(
+            "„Meine Ablage“ ({rel_str}) würde sich mit der Ablage „{other}“ überschneiden."
+        )));
+    }
     let root: RootRow = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "INSERT INTO roots (kind, name, rel_path, owner_user_id) VALUES ('home', 'Meine Ablage', $1, $2)
          RETURNING {ROOT_COLS}"
@@ -82,6 +88,97 @@ pub async fn ensure_home(
     Ok(Some(root))
 }
 
+/// The name of a root lying inside `rel` or containing it, if any: roots never overlap (a file
+/// would belong to two of them).
+async fn overlapping(tx: &mut db::Tx, rel: &Path) -> ApiResult<Option<String>> {
+    let roots: Vec<(String, String)> = sqlx::query_as("SELECT name, rel_path FROM roots")
+        .fetch_all(&mut **tx)
+        .await?;
+    Ok(roots.into_iter().find_map(|(name, r)| {
+        let r = Path::new(&r);
+        (r.starts_with(rel) || rel.starts_with(r)).then_some(name)
+    }))
+}
+
+/// Mounts an existing directory below the data directory as a shared root ("Geteilte Ablage",
+/// PLAN 9.1), e.g. a Synology Drive team folder. Its members are set separately.
+pub async fn mount_space(st: &AppState, name: &str, rel: &str, by: i64) -> ApiResult<RootRow> {
+    let data_dir = st
+        .cfg
+        .data_dir
+        .clone()
+        .ok_or_else(|| ApiError::bad("Kein Datenverzeichnis eingerichtet."))?;
+    let name = name.trim();
+    if name.is_empty() || name.chars().any(char::is_control) || name.contains('/') {
+        return Err(ApiError::bad(
+            "Bitte einen Namen ohne Schrägstrich angeben.",
+        ));
+    }
+    let rel = PathBuf::from(rel.trim().trim_matches('/'));
+    if rel.as_os_str().is_empty() || !rel.components().all(|c| matches!(c, Component::Normal(_))) {
+        return Err(ApiError::bad(
+            "Der Pfad muss unterhalb des Datenverzeichnisses liegen, z. B. „Familie“.",
+        ));
+    }
+    if let Some(state) = &st.cfg.state_dir
+        && let Ok(state_rel) = state.strip_prefix(&data_dir)
+        && (state_rel.starts_with(&rel) || rel.starts_with(state_rel))
+    {
+        return Err(ApiError::bad(
+            "Das Verzeichnis von xlrx selbst kann keine Ablage sein.",
+        ));
+    }
+    let dir = data_dir.join(&rel);
+    // No symbolic links anywhere on the way: the root must really be this directory.
+    let real = std::fs::canonicalize(&dir)
+        .map_err(|_| ApiError::bad(format!("„{}“ gibt es nicht.", rel.display())))?;
+    let base = std::fs::canonicalize(&data_dir).map_err(|e| ApiError::Internal(e.to_string()))?;
+    let meta = std::fs::symlink_metadata(&dir).map_err(|e| ApiError::Internal(e.to_string()))?;
+    if real != base.join(&rel) || !meta.is_dir() {
+        return Err(ApiError::bad(format!(
+            "„{}“ ist kein Ordner (oder eine Verknüpfung).",
+            rel.display()
+        )));
+    }
+    let (id, fp) = xlrx_chunk::fingerprint_of(&meta);
+    let rel_str = rel.to_string_lossy().into_owned();
+    let dir_name = rel
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| name.to_owned());
+    let mut tx = db::begin_write(&st.db).await?;
+    if let Some(other) = overlapping(&mut tx, &rel).await? {
+        return Err(ApiError::Conflict(format!(
+            "„{}“ überschneidet sich mit der Ablage „{other}“.",
+            rel.display()
+        )));
+    }
+    let root: RootRow = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO roots (kind, name, rel_path) VALUES ('space', $1, $2) RETURNING {ROOT_COLS}"
+    )))
+    .bind(name)
+    .bind(&rel_str)
+    .fetch_one(&mut *tx)
+    .await?;
+    db::insert_node(
+        &mut tx,
+        &NewNode {
+            root_id: root.id,
+            parent_id: None,
+            name: &dir_name,
+            is_dir: true,
+            content: None,
+            mtime: None,
+            disk: Some(OnDisk { id, fp: Some(fp) }),
+        },
+        Source::api(by),
+    )
+    .await?;
+    tx.commit().await?;
+    tracing::info!(root = root.id, path = %rel_str, "Geteilte Ablage eingebunden");
+    Ok(root)
+}
+
 pub async fn home(st: &AppState, user_id: i64) -> ApiResult<Option<RootRow>> {
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {ROOT_COLS} FROM roots WHERE kind = 'home' AND owner_user_id = $1"
@@ -91,24 +188,28 @@ pub async fn home(st: &AppState, user_id: i64) -> ApiResult<Option<RootRow>> {
     .await?)
 }
 
-/// May this person see the root? (Home: only its owner. Spaces follow in M3.)
-pub fn can_read(root: &RootRow, user_id: i64) -> bool {
-    root.owner_user_id == Some(user_id)
-}
-
-/// The roots this person can see (for now: the own home).
+/// The roots this person can see as a whole: the own home and the shared roots they are a member
+/// of (directly or through a group). Items shared one by one are not included (see
+/// [`super::access::scope`]).
 pub async fn readable(st: &AppState, user_id: i64) -> ApiResult<Vec<RootRow>> {
+    let ids: Vec<i64> = super::access::root_roles(&st.db, user_id)
+        .await?
+        .into_keys()
+        .collect();
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {ROOT_COLS} FROM roots WHERE owner_user_id = $1 ORDER BY id"
+        "SELECT {ROOT_COLS} FROM roots WHERE id = ANY($1) ORDER BY kind, id"
     )))
-    .bind(user_id)
+    .bind(&ids)
     .fetch_all(&st.db)
     .await?)
 }
 
-/// May this person change the root's content? (Home: only its owner.)
-pub fn can_write(root: &RootRow, user_id: i64) -> bool {
-    root.owner_user_id == Some(user_id)
+/// The person's role over a whole root (owner or member), if any.
+pub async fn role(st: &AppState, root: &RootRow, user_id: i64) -> ApiResult<Option<Role>> {
+    Ok(super::access::root_roles(&st.db, user_id)
+        .await?
+        .get(&root.id)
+        .copied())
 }
 
 /// Directory of a root on disk.

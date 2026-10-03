@@ -351,3 +351,369 @@ pub async fn retry_jobs(
     .await?;
     Ok(Json(json!({ "retried": n })))
 }
+
+#[derive(Serialize)]
+pub struct GroupOut {
+    pub id: i64,
+    pub name: String,
+    pub members: Vec<MemberOut>,
+}
+
+#[derive(Serialize)]
+pub struct MemberOut {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Deserialize)]
+pub struct GroupReq {
+    pub name: String,
+    #[serde(default)]
+    pub members: Vec<i64>,
+}
+
+/// Groups such as "Familie" or "Eltern", for sharing with several people at once.
+pub async fn list_groups(
+    State(st): State<AppState>,
+    me: CurrentUser,
+) -> ApiResult<Json<Vec<GroupOut>>> {
+    me.require_admin()?;
+    let groups: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, name FROM groups ORDER BY lower(name)")
+            .fetch_all(&st.db)
+            .await?;
+    let mut out = Vec::with_capacity(groups.len());
+    for (id, name) in groups {
+        let members: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT u.id, u.display_name FROM group_members m JOIN users u ON u.id = m.user_id
+              WHERE m.group_id = $1 ORDER BY lower(u.display_name)",
+        )
+        .bind(id)
+        .fetch_all(&st.db)
+        .await?;
+        out.push(GroupOut {
+            id,
+            name,
+            members: members
+                .into_iter()
+                .map(|(id, name)| MemberOut { id, name })
+                .collect(),
+        });
+    }
+    Ok(Json(out))
+}
+
+async fn save_group(st: &AppState, id: Option<i64>, req: &GroupReq) -> ApiResult<i64> {
+    let name = req.name.trim();
+    if name.is_empty() || name.chars().count() > 80 {
+        return Err(ApiError::bad("Bitte einen Namen für die Gruppe angeben."));
+    }
+    let mut tx = st.db.begin().await?;
+    let id: i64 = match id {
+        None => sqlx::query_scalar(
+            "INSERT INTO groups (name, name_folded) VALUES ($1, $2)
+             ON CONFLICT (name_folded) DO NOTHING RETURNING id",
+        )
+        .bind(name)
+        .bind(users::fold(name))
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| ApiError::Conflict(format!("Die Gruppe „{name}“ gibt es schon.")))?,
+        Some(id) => {
+            let r = sqlx::query("UPDATE groups SET name = $2, name_folded = $3 WHERE id = $1")
+                .bind(id)
+                .bind(name)
+                .bind(users::fold(name))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| match e {
+                    sqlx::Error::Database(d) if d.is_unique_violation() => {
+                        ApiError::Conflict(format!("Die Gruppe „{name}“ gibt es schon."))
+                    }
+                    e => e.into(),
+                })?;
+            if r.rows_affected() == 0 {
+                return Err(ApiError::NotFound);
+            }
+            id
+        }
+    };
+    sqlx::query("DELETE FROM group_members WHERE group_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    let r = sqlx::query(
+        "INSERT INTO group_members (group_id, user_id)
+         SELECT $1, u.id FROM users u WHERE u.id = ANY($2)",
+    )
+    .bind(id)
+    .bind(&req.members)
+    .execute(&mut *tx)
+    .await?;
+    let mut wanted = req.members.clone();
+    wanted.sort_unstable();
+    wanted.dedup();
+    if r.rows_affected() as usize != wanted.len() {
+        return Err(ApiError::bad("Unbekanntes Konto in der Gruppe."));
+    }
+    tx.commit().await?;
+    Ok(id)
+}
+
+pub async fn create_group(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    client: ClientInfo,
+    Json(req): Json<GroupReq>,
+) -> ApiResult<(axum::http::StatusCode, Json<serde_json::Value>)> {
+    me.require_admin()?;
+    me.require_step_up()?;
+    let id = save_group(&st, None, &req).await?;
+    audit::log(
+        &st.db,
+        Some(me.id),
+        None,
+        "group_created",
+        Some(&client.ip),
+        json!({ "group": id, "name": req.name.trim(), "members": req.members }),
+    )
+    .await?;
+    Ok((axum::http::StatusCode::CREATED, Json(json!({ "id": id }))))
+}
+
+pub async fn update_group(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    client: ClientInfo,
+    Path(id): Path<i64>,
+    Json(req): Json<GroupReq>,
+) -> ApiResult<axum::http::StatusCode> {
+    me.require_admin()?;
+    me.require_step_up()?;
+    save_group(&st, Some(id), &req).await?;
+    audit::log(
+        &st.db,
+        Some(me.id),
+        None,
+        "group_changed",
+        Some(&client.ip),
+        json!({ "group": id, "name": req.name.trim(), "members": req.members }),
+    )
+    .await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Removes a group; what was shared with it is no longer shared with its members.
+pub async fn delete_group(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    client: ClientInfo,
+    Path(id): Path<i64>,
+) -> ApiResult<axum::http::StatusCode> {
+    me.require_admin()?;
+    me.require_step_up()?;
+    let r = sqlx::query("DELETE FROM groups WHERE id = $1")
+        .bind(id)
+        .execute(&st.db)
+        .await?;
+    if r.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+    audit::log(
+        &st.db,
+        Some(me.id),
+        None,
+        "group_deleted",
+        Some(&client.ip),
+        json!({ "group": id }),
+    )
+    .await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+pub struct SpaceOut {
+    pub id: i64,
+    pub name: String,
+    pub path: String,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub scanned_at: Option<OffsetDateTime>,
+    pub members: Vec<SpaceMember>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SpaceMember {
+    #[serde(flatten)]
+    pub to: super::shares::Principal,
+    #[serde(default, skip_deserializing)]
+    pub name: String,
+    pub role: String,
+}
+
+#[derive(Deserialize)]
+pub struct SpaceReq {
+    pub name: String,
+    /// Below the data directory, e.g. "Familie" (only when mounting).
+    pub path: Option<String>,
+    #[serde(default)]
+    pub members: Vec<SpaceMember>,
+}
+
+/// Shared roots ("Geteilte Ablagen") with their members.
+pub async fn list_spaces(
+    State(st): State<AppState>,
+    me: CurrentUser,
+) -> ApiResult<Json<Vec<SpaceOut>>> {
+    me.require_admin()?;
+    let roots: Vec<(i64, String, String, Option<OffsetDateTime>)> = sqlx::query_as(
+        "SELECT id, name, rel_path, scanned_at FROM roots WHERE kind = 'space' ORDER BY lower(name)",
+    )
+    .fetch_all(&st.db)
+    .await?;
+    let mut out = Vec::with_capacity(roots.len());
+    for (id, name, path, scanned_at) in roots {
+        let rows: Vec<(Option<i64>, Option<i64>, String, String)> = sqlx::query_as(
+            "SELECT m.user_id, m.group_id, m.role, coalesce(u.display_name, g.name)
+               FROM root_members m
+               LEFT JOIN users u ON u.id = m.user_id
+               LEFT JOIN groups g ON g.id = m.group_id
+              WHERE m.root_id = $1 ORDER BY 4",
+        )
+        .bind(id)
+        .fetch_all(&st.db)
+        .await?;
+        let members = rows
+            .into_iter()
+            .filter_map(|(u, g, role, name)| {
+                let to = match (u, g) {
+                    (Some(u), None) => super::shares::Principal::User(u),
+                    (None, Some(g)) => super::shares::Principal::Group(g),
+                    _ => return None,
+                };
+                Some(SpaceMember { to, name, role })
+            })
+            .collect();
+        out.push(SpaceOut {
+            id,
+            name,
+            path,
+            scanned_at,
+            members,
+        });
+    }
+    Ok(Json(out))
+}
+
+async fn set_members(st: &AppState, root_id: i64, members: &[SpaceMember]) -> ApiResult<()> {
+    let mut tx = st.db.begin().await?;
+    sqlx::query("DELETE FROM root_members WHERE root_id = $1")
+        .bind(root_id)
+        .execute(&mut *tx)
+        .await?;
+    for m in members {
+        let role = crate::files::access::Role::parse(&m.role)
+            .ok_or_else(|| ApiError::bad("Unbekannte Rolle."))?;
+        let (u, g) = match m.to {
+            super::shares::Principal::User(u) => (Some(u), None),
+            super::shares::Principal::Group(g) => (None, Some(g)),
+        };
+        sqlx::query(
+            "INSERT INTO root_members (root_id, user_id, group_id, role) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (root_id, user_id, group_id) DO UPDATE SET role = EXCLUDED.role",
+        )
+        .bind(root_id)
+        .bind(u)
+        .bind(g)
+        .bind(role.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(d) if d.is_foreign_key_violation() => {
+                ApiError::bad("Unbekanntes Konto oder unbekannte Gruppe.")
+            }
+            e => e.into(),
+        })?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Mounts an existing folder of the NAS (e.g. a Synology Drive team folder) as a shared root.
+pub async fn create_space(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    client: ClientInfo,
+    Json(req): Json<SpaceReq>,
+) -> ApiResult<(axum::http::StatusCode, Json<serde_json::Value>)> {
+    me.require_admin()?;
+    me.require_step_up()?;
+    let path = req
+        .path
+        .as_deref()
+        .ok_or_else(|| ApiError::bad("Bitte den Ordner auf dem NAS angeben."))?;
+    let root = crate::files::roots::mount_space(&st, &req.name, path, me.id).await?;
+    set_members(&st, root.id, &req.members).await?;
+    audit::log(
+        &st.db,
+        Some(me.id),
+        None,
+        "space_mounted",
+        Some(&client.ip),
+        json!({ "root": root.id, "name": root.name, "path": root.rel_path, "members": req.members.len() }),
+    )
+    .await?;
+    // Watch first, then import what is there (as for a home on first access).
+    let st2 = st.clone();
+    let r = root.clone();
+    tokio::spawn(async move {
+        if st2.cfg.watch
+            && let Err(e) = crate::files::watch::start(&st2, &r).await
+        {
+            tracing::warn!(root = r.id, error = ?e, "Überwachung nicht gestartet");
+        }
+        if let Err(e) = crate::files::roots::scan(&st2, &r).await {
+            tracing::warn!(root = r.id, error = ?e, "Erster Abgleich fehlgeschlagen");
+        }
+    });
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(json!({ "id": root.id })),
+    ))
+}
+
+/// Renames a shared root and sets its members.
+pub async fn update_space(
+    State(st): State<AppState>,
+    me: CurrentUser,
+    client: ClientInfo,
+    Path(id): Path<i64>,
+    Json(req): Json<SpaceReq>,
+) -> ApiResult<axum::http::StatusCode> {
+    me.require_admin()?;
+    me.require_step_up()?;
+    let name = req.name.trim();
+    if name.is_empty() || name.contains('/') {
+        return Err(ApiError::bad(
+            "Bitte einen Namen ohne Schrägstrich angeben.",
+        ));
+    }
+    let r = sqlx::query("UPDATE roots SET name = $2 WHERE id = $1 AND kind = 'space'")
+        .bind(id)
+        .bind(name)
+        .execute(&st.db)
+        .await?;
+    if r.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+    set_members(&st, id, &req.members).await?;
+    audit::log(
+        &st.db,
+        Some(me.id),
+        None,
+        "space_changed",
+        Some(&client.ip),
+        json!({ "root": id, "name": name, "members": req.members.len() }),
+    )
+    .await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}

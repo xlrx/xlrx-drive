@@ -26,7 +26,7 @@ use super::ops::{
     Intent, Place, blocking, ensure_free, forget, io_err, live, located, place, record, reload,
     valid_name, writable,
 };
-use super::{roots, scan, store};
+use super::{scan, store};
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 use xlrx_sync::Reject;
@@ -778,16 +778,8 @@ pub struct VersionInfo {
 }
 
 async fn readable_node(st: &AppState, user_id: i64, id: i64) -> ApiResult<NodeRow> {
-    let node = db::node_by_id(&st.db, id)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    let root = db::root_by_id(&st.db, node.root_id)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    if !roots::can_read(&root, user_id) {
-        return Err(ApiError::NotFound);
-    }
-    live(node)
+    let a = super::access::require(&st.db, user_id, id, super::access::Role::Viewer).await?;
+    live(a.node)
 }
 
 /// Earlier contents of a file, newest first.

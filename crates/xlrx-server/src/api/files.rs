@@ -14,6 +14,7 @@ use tower_http::services::ServeFile;
 
 use crate::auth::session::CurrentUser;
 use crate::error::{ApiError, ApiResult};
+use crate::files::access::{self, Role, Scope};
 use crate::files::content::{self as file_content, Target, VersionInfo};
 use crate::files::db::{self, NODE_COLS, NodeRow, RootRow};
 use crate::files::ops::{self, TrashItem};
@@ -26,6 +27,8 @@ pub struct RootInfo {
     pub kind: String,
     pub name: String,
     pub node_id: i64,
+    /// The person's role over the whole root.
+    pub role: Role,
     #[serde(with = "time::serde::rfc3339::option")]
     pub scanned_at: Option<OffsetDateTime>,
 }
@@ -53,16 +56,24 @@ pub async fn list_roots(
             }
         });
     }
-    let node = db::root_node(&st.db, home.id)
-        .await?
-        .ok_or_else(|| ApiError::Internal("Ablage ohne Wurzelknoten".into()))?;
-    Ok(Json(vec![RootInfo {
-        id: home.id,
-        kind: home.kind,
-        name: home.name,
-        node_id: node.id,
-        scanned_at: home.scanned_at,
-    }]))
+    // The own home first, then the shared roots the person is a member of.
+    let roles = access::root_roles(&st.db, me.id).await?;
+    let mut out = Vec::new();
+    for r in roots::readable(&st, me.id).await? {
+        let Some(node) = db::root_node(&st.db, r.id).await? else {
+            continue;
+        };
+        out.push(RootInfo {
+            id: r.id,
+            role: roles.get(&r.id).copied().unwrap_or(Role::Viewer),
+            kind: r.kind,
+            name: r.name,
+            node_id: node.id,
+            scanned_at: r.scanned_at,
+        });
+    }
+    out.sort_by_key(|r| (r.kind != "home", r.name.to_lowercase()));
+    Ok(Json(out))
 }
 
 pub async fn scan_root(
@@ -73,7 +84,7 @@ pub async fn scan_root(
     let root = db::root_by_id(&st.db, id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    if !roots::can_read(&root, me.id) {
+    if roots::role(&st, &root, me.id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
     Ok(Json(roots::scan(&st, &root).await?))
@@ -116,26 +127,34 @@ impl From<&NodeRow> for NodeInfo {
 
 /// A live node the person may see (otherwise "not found", without revealing existence).
 pub async fn visible(st: &AppState, me: &CurrentUser, id: i64) -> ApiResult<(NodeRow, RootRow)> {
-    let node = db::node_by_id(&st.db, id)
-        .await?
-        .filter(|n| n.deleted_at.is_none())
-        .ok_or(ApiError::NotFound)?;
-    let root = db::root_by_id(&st.db, node.root_id)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    if !roots::can_read(&root, me.id) {
+    let a = access::require(&st.db, me.id, id, Role::Viewer).await?;
+    if a.node.deleted_at.is_some() {
         return Err(ApiError::NotFound);
     }
-    Ok((node, root))
+    Ok((a.node, a.root))
+}
+
+/// A live node the person may change (a folder to add to, a file to write).
+pub async fn editable(st: &AppState, me: &CurrentUser, id: i64) -> ApiResult<(NodeRow, RootRow)> {
+    let a = access::require(&st.db, me.id, id, Role::Editor).await?;
+    if a.node.deleted_at.is_some() {
+        return Err(ApiError::NotFound);
+    }
+    Ok((a.node, a.root))
 }
 
 #[derive(Serialize)]
 pub struct NodeDetail {
     #[serde(flatten)]
     pub node: NodeInfo,
-    /// From the root directory down to the node.
+    /// From the highest folder the person can see down to the node: the root directory, or for
+    /// items shared with them, the shared folder (nothing above it is revealed).
     pub path: Vec<Crumb>,
     pub root_id: i64,
+    /// The person's role here.
+    pub role: Role,
+    /// Seen through a share, not as owner or member of the whole root.
+    pub shared: bool,
 }
 
 #[derive(Serialize)]
@@ -149,25 +168,35 @@ pub async fn get_node(
     me: CurrentUser,
     Path(id): Path<i64>,
 ) -> ApiResult<Json<NodeDetail>> {
-    let (node, root) = visible(&st, &me, id).await?;
-    let path = db::ancestors(&st.db, node.id)
+    let a = access::require(&st.db, me.id, id, Role::Viewer).await?;
+    if a.node.deleted_at.is_some() {
+        return Err(ApiError::NotFound);
+    }
+    let scope = access::scope(&st.db, me.id).await?;
+    let whole = a.root_role.is_some();
+    let chain = access::chains(&st.db, &scope, &[a.node.id])
         .await?
-        .iter()
+        .remove(&a.node.id)
+        .unwrap_or_default();
+    let path = chain
+        .into_iter()
         .enumerate()
-        .map(|(i, n)| Crumb {
-            id: n.id,
+        .map(|(i, (id, name))| Crumb {
+            id,
             // The root directory is shown with the root's name ("Meine Ablage").
-            name: if i == 0 {
-                root.name.clone()
+            name: if i == 0 && whole {
+                a.root.name.clone()
             } else {
-                n.name.clone()
+                name
             },
         })
         .collect();
     Ok(Json(NodeDetail {
-        node: NodeInfo::from(&node),
+        node: NodeInfo::from(&a.node),
         path,
-        root_id: root.id,
+        root_id: a.root.id,
+        role: a.role,
+        shared: !whole,
     }))
 }
 
@@ -418,7 +447,8 @@ pub async fn recent(
     .bind(q.limit.unwrap_or(8).clamp(1, 50))
     .fetch_all(&st.db)
     .await?;
-    let folders = folder_names(&st, &roots, &rows).await?;
+    let scope = access::scope(&st.db, me.id).await?;
+    let folders = folder_names(&st, &scope, &rows).await?;
     let out = rows
         .iter()
         .map(|n| RecentItem {
@@ -429,41 +459,45 @@ pub async fn recent(
     Ok(Json(out))
 }
 
-/// The folder each node is in, e.g. "Meine Ablage/Belege": the root's name, then the directories
-/// below its root directory.
+/// Label of the place above items shared with a person (instead of the owner's folders).
+pub const SHARED_LABEL: &str = "Geteilt";
+
+/// The folder each node is in as the person sees it, e.g. "Meine Ablage/Belege" (the root's name,
+/// then the directories below its root directory), or "Geteilt/Urlaub" for items shared with
+/// them: folders above what was shared are never named.
 pub async fn folder_names(
     st: &AppState,
-    roots: &[RootRow],
+    scope: &Scope,
     nodes: &[NodeRow],
 ) -> ApiResult<std::collections::HashMap<i64, String>> {
     let parents: Vec<i64> = nodes.iter().filter_map(|n| n.parent_id).collect();
-    let paths: std::collections::HashMap<i64, Option<String>> = sqlx::query_as::<_, (i64, Option<String>)>(
-        "WITH RECURSIVE up AS (
-            SELECT id AS start, id, parent_id, name, 0 AS depth FROM nodes WHERE id = ANY($1)
-            UNION ALL
-            SELECT up.start, n.id, n.parent_id, n.name, up.depth + 1
-              FROM nodes n JOIN up ON n.id = up.parent_id WHERE up.depth < 1000
-         )
-         SELECT start, string_agg(name, '/' ORDER BY depth DESC) FILTER (WHERE parent_id IS NOT NULL)
-           FROM up GROUP BY start",
-    )
-    .bind(&parents)
-    .fetch_all(&st.db)
-    .await?
-    .into_iter()
-    .collect();
+    let chains = access::chains(&st.db, scope, &parents).await?;
+    let root_ids: Vec<i64> = nodes.iter().map(|n| n.root_id).collect();
+    let names: std::collections::HashMap<i64, String> =
+        sqlx::query_as::<_, (i64, String)>("SELECT id, name FROM roots WHERE id = ANY($1)")
+            .bind(&root_ids)
+            .fetch_all(&st.db)
+            .await?
+            .into_iter()
+            .collect();
     Ok(nodes
         .iter()
         .map(|n| {
-            let root = roots
-                .iter()
-                .find(|r| r.id == n.root_id)
-                .map(|r| r.name.clone())
-                .unwrap_or_default();
-            let below = n.parent_id.and_then(|p| paths.get(&p).cloned().flatten());
-            let folder = match below {
-                Some(b) if !b.is_empty() => format!("{root}/{b}"),
-                _ => root,
+            let chain = n.parent_id.and_then(|p| chains.get(&p));
+            let folder = if scope.roots.contains(&n.root_id) {
+                let mut parts = vec![names.get(&n.root_id).cloned().unwrap_or_default()];
+                parts.extend(
+                    chain
+                        .into_iter()
+                        .flatten()
+                        .skip(1)
+                        .map(|(_, name)| name.clone()),
+                );
+                parts.join("/")
+            } else {
+                let mut parts = vec![SHARED_LABEL.to_string()];
+                parts.extend(chain.into_iter().flatten().map(|(_, name)| name.clone()));
+                parts.join("/")
             };
             (n.id, folder)
         })
@@ -600,10 +634,7 @@ pub async fn upload(
 ) -> ApiResult<(StatusCode, Json<NodeInfo>)> {
     // Fail fast before receiving gigabytes that would be refused anyway.
     let name = ops::valid_name(&q.name)?;
-    let (folder, root) = visible(&st, &me, parent).await?;
-    if !roots::can_write(&root, me.id) {
-        return Err(ApiError::forbidden("Keine Schreibrechte in diesem Ordner."));
-    }
+    let (folder, _) = editable(&st, &me, parent).await?;
     if !folder.is_dir() {
         return Err(ApiError::bad("Kein Ordner."));
     }
@@ -642,10 +673,7 @@ pub async fn replace_content(
     Query(q): Query<ReplaceQuery>,
     body: axum::body::Body,
 ) -> ApiResult<Json<NodeInfo>> {
-    let (node, root) = visible(&st, &me, id).await?;
-    if !roots::can_write(&root, me.id) {
-        return Err(ApiError::forbidden("Keine Schreibrechte für diese Datei."));
-    }
+    let (node, _) = editable(&st, &me, id).await?;
     if node.is_dir() {
         return Err(ApiError::bad("Ordner haben keinen Inhalt."));
     }

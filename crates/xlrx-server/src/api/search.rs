@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use super::files::{self, NodeInfo};
 use crate::auth::session::CurrentUser;
 use crate::error::{ApiError, ApiResult};
+use crate::files::access;
 use crate::files::db::{self, NODE_COLS, NodeRow};
-use crate::files::roots;
 use crate::search::query::{self, Parsed};
 use crate::search::{Found, Part, Request, Search};
 use crate::state::AppState;
@@ -95,8 +95,7 @@ pub async fn search(
             ..Default::default()
         }));
     }
-    let roots = roots::readable(&st, me.id).await?;
-    let root_ids: Vec<i64> = roots.iter().map(|r| r.id).collect();
+    let scope = access::scope(&st.db, me.id).await?;
     let within = match q.folder {
         Some(id) => {
             let (node, _) = files::visible(&st, &me, id).await?;
@@ -110,12 +109,13 @@ pub async fn search(
     let folders = if parsed.folders.is_empty() {
         None
     } else {
-        Some(folder_ids(&st, &root_ids, &parsed.folders).await?)
+        Some(folder_ids(&st, me.id, &parsed.folders).await?)
     };
-    let not_folders = folder_ids(&st, &root_ids, &parsed.not_folders).await?;
+    let not_folders = folder_ids(&st, me.id, &parsed.not_folders).await?;
     let request = Request {
         parsed,
-        roots: root_ids.clone(),
+        roots: scope.roots.clone(),
+        shared: scope.shared.clone(),
         within,
         folders,
         not_folders,
@@ -141,17 +141,10 @@ pub async fn search(
         }));
     };
 
-    // Defense in depth: every hit is checked against the database again (live, readable root).
-    let rows: Vec<NodeRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {NODE_COLS} FROM nodes WHERE id = ANY($1) AND deleted_at IS NULL AND root_id = ANY($2)"
-    )))
-    .bind(&found.ids)
-    .bind(&root_ids)
-    .fetch_all(&st.db)
-    .await?;
-    let mut by_id: HashMap<i64, NodeRow> = rows.into_iter().map(|n| (n.id, n)).collect();
-    let rows: Vec<NodeRow> = found.ids.iter().filter_map(|i| by_id.remove(i)).collect();
-    let folders = files::folder_names(&st, &roots, &rows).await?;
+    // Defense in depth: every hit is checked against the database again (live, and the person
+    // has a role on it now).
+    let rows = checked(&st, me.id, &found.ids).await?;
+    let folders = files::folder_names(&st, &scope, &rows).await?;
 
     let texts = if request.parsed.clauses.is_empty() {
         vec![None; rows.len()]
@@ -210,45 +203,76 @@ async fn catch_up(st: &AppState, engine: &Search) -> ApiResult<i64> {
     Ok((journal - at.journal).max(0))
 }
 
-/// Directories with one of these names in the given roots (exact, else names starting so).
-async fn folder_ids(st: &AppState, roots: &[i64], names: &[String]) -> ApiResult<Vec<i64>> {
+/// Live nodes with these ids that the person may see, in the given order.
+async fn checked(st: &AppState, user_id: i64, ids: &[i64]) -> ApiResult<Vec<NodeRow>> {
+    let visible = access::visible_ids(&st.db, user_id, ids).await?;
+    let rows: Vec<NodeRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {NODE_COLS} FROM nodes WHERE id = ANY($1) AND deleted_at IS NULL"
+    )))
+    .bind(ids)
+    .fetch_all(&st.db)
+    .await?;
+    let mut by_id: HashMap<i64, NodeRow> = rows
+        .into_iter()
+        .filter(|n| visible.contains(&n.id))
+        .map(|n| (n.id, n))
+        .collect();
+    Ok(ids.iter().filter_map(|i| by_id.remove(i)).collect())
+}
+
+/// Folders with one of these names that the person can see (exact, else names starting so).
+async fn folder_ids(st: &AppState, user_id: i64, names: &[String]) -> ApiResult<Vec<i64>> {
     if names.is_empty() {
         return Ok(vec![]);
     }
     let folded: Vec<String> = names.iter().map(|n| db::fold(n)).collect();
-    let exact: Vec<i64> = sqlx::query_scalar(
-        "SELECT id FROM nodes
-          WHERE root_id = ANY($1) AND kind = 'dir' AND deleted_at IS NULL AND parent_id IS NOT NULL
-            AND name_folded = ANY($2)
-          LIMIT 1000",
-    )
-    .bind(roots)
-    .bind(&folded)
-    .fetch_all(&st.db)
-    .await?;
+    let find = |pattern: bool| {
+        let folded = folded.clone();
+        async move {
+            let ids: Vec<i64> = if pattern {
+                let patterns: Vec<String> = folded
+                    .iter()
+                    .map(|f| {
+                        let escaped = f
+                            .replace('\\', "\\\\")
+                            .replace('%', "\\%")
+                            .replace('_', "\\_");
+                        format!("{escaped}%")
+                    })
+                    .collect();
+                sqlx::query_scalar(
+                    "SELECT id FROM nodes
+                      WHERE kind = 'dir' AND deleted_at IS NULL AND parent_id IS NOT NULL
+                        AND name_folded LIKE ANY($1)
+                      LIMIT 5000",
+                )
+                .bind(&patterns)
+                .fetch_all(&st.db)
+                .await?
+            } else {
+                sqlx::query_scalar(
+                    "SELECT id FROM nodes
+                      WHERE kind = 'dir' AND deleted_at IS NULL AND parent_id IS NOT NULL
+                        AND name_folded = ANY($1)
+                      LIMIT 5000",
+                )
+                .bind(&folded)
+                .fetch_all(&st.db)
+                .await?
+            };
+            let visible = access::visible_ids(&st.db, user_id, &ids).await?;
+            Ok::<_, ApiError>(
+                ids.into_iter()
+                    .filter(|i| visible.contains(i))
+                    .collect::<Vec<i64>>(),
+            )
+        }
+    };
+    let exact = find(false).await?;
     if !exact.is_empty() {
         return Ok(exact);
     }
-    let patterns: Vec<String> = folded
-        .iter()
-        .map(|f| {
-            let escaped = f
-                .replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_");
-            format!("{escaped}%")
-        })
-        .collect();
-    Ok(sqlx::query_scalar(
-        "SELECT id FROM nodes
-          WHERE root_id = ANY($1) AND kind = 'dir' AND deleted_at IS NULL AND parent_id IS NOT NULL
-            AND name_folded LIKE ANY($2)
-          LIMIT 1000",
-    )
-    .bind(roots)
-    .bind(&patterns)
-    .fetch_all(&st.db)
-    .await?)
+    find(true).await
 }
 
 /// The beginning of the extracted text of each file, with its language.
@@ -306,27 +330,18 @@ pub async fn suggest(
     if clauses.is_empty() {
         return Ok(Json(vec![]));
     }
-    let roots = roots::readable(&st, me.id).await?;
-    let root_ids: Vec<i64> = roots.iter().map(|r| r.id).collect();
+    let scope = access::scope(&st.db, me.id).await?;
     let limit = q.limit.unwrap_or(8).clamp(1, 20);
     let (ids, clauses) = {
-        let root_ids = root_ids.clone();
+        let scope = scope.clone();
         blocking(&st, move |s| {
-            let ids = s.suggest(&clauses, &root_ids, limit)?;
+            let ids = s.suggest(&clauses, &scope.roots, &scope.shared, limit)?;
             Ok((ids, clauses))
         })
         .await?
     };
-    let rows: Vec<NodeRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {NODE_COLS} FROM nodes WHERE id = ANY($1) AND deleted_at IS NULL AND root_id = ANY($2)"
-    )))
-    .bind(&ids)
-    .bind(&root_ids)
-    .fetch_all(&st.db)
-    .await?;
-    let mut by_id: HashMap<i64, NodeRow> = rows.into_iter().map(|n| (n.id, n)).collect();
-    let rows: Vec<NodeRow> = ids.iter().filter_map(|i| by_id.remove(i)).collect();
-    let folders = files::folder_names(&st, &roots, &rows).await?;
+    let rows = checked(&st, me.id, &ids).await?;
+    let folders = files::folder_names(&st, &scope, &rows).await?;
     let s = engine(&st)?;
     Ok(Json(
         rows.iter()

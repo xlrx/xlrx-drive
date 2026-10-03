@@ -1,5 +1,6 @@
 //! Files: roots on the NAS, nodes mirroring them, reconciliation with the disk.
 
+pub mod access;
 pub mod content;
 pub mod db;
 pub mod fs;

@@ -107,8 +107,10 @@ pub async fn start(st: &AppState) -> Result<(), String> {
 /// What a search looks for, with rights and folder names already resolved.
 pub struct Request {
     pub parsed: Parsed,
-    /// Roots the person may read.
+    /// Roots the person may read as a whole.
     pub roots: Vec<i64>,
+    /// Nodes shared with the person outside those roots (with everything below them).
+    pub shared: Vec<i64>,
     /// Only below this directory.
     pub within: Option<i64>,
     /// Directories named with `in:` (any of them); `None` without `in:`.
@@ -258,7 +260,9 @@ impl Search {
     /// are all punctuation).
     fn build(&self, r: &Request) -> Option<Built> {
         let f = &self.shared.fields;
-        if r.roots.is_empty() || r.folders.as_ref().is_some_and(Vec::is_empty) {
+        if (r.roots.is_empty() && r.shared.is_empty())
+            || r.folders.as_ref().is_some_and(Vec::is_empty)
+        {
             return None;
         }
         let mut words = Vec::new();
@@ -277,7 +281,7 @@ impl Search {
                 ids.iter().map(|&i| Term::from_field_u64(field, i as u64)),
             ))
         };
-        let mut filters: Vec<Box<dyn Query>> = vec![ids(f.root, &r.roots)];
+        let mut filters: Vec<Box<dyn Query>> = vec![self.allowed(&r.roots, &r.shared)];
         if let Some(w) = r.within {
             filters.push(ids(f.anc, &[w]));
         }
@@ -328,6 +332,22 @@ impl Search {
             without_types: compose(false),
             scored,
         })
+    }
+
+    /// What the person may see (PLAN 9.3): whole roots, shared nodes and everything below them.
+    /// Sharing and unsharing therefore never touch the index.
+    fn allowed(&self, roots: &[i64], shared: &[i64]) -> Box<dyn Query> {
+        let f = &self.shared.fields;
+        let set = |field: Field, ids: &[i64]| -> Box<dyn Query> {
+            Box::new(TermSetQuery::new(
+                ids.iter().map(|&i| Term::from_field_u64(field, i as u64)),
+            ))
+        };
+        Box::new(BooleanQuery::new(vec![
+            (Occur::Should, set(f.root, roots)),
+            (Occur::Should, set(f.anc, shared)),
+            (Occur::Should, set(f.id, shared)),
+        ]))
     }
 
     fn types(&self, values: &[String]) -> Box<dyn Query> {
@@ -466,10 +486,11 @@ impl Search {
         &self,
         words: &[Clause],
         roots: &[i64],
+        shared: &[i64],
         limit: usize,
     ) -> Result<Vec<i64>, String> {
         let f = &self.shared.fields;
-        if roots.is_empty() || words.is_empty() {
+        if (roots.is_empty() && shared.is_empty()) || words.is_empty() {
             return Ok(vec![]);
         }
         // Names only: every word must start a word of the name.
@@ -502,14 +523,7 @@ impl Search {
         }
         all.push((
             Occur::Must,
-            Box::new(ConstScoreQuery::new(
-                Box::new(TermSetQuery::new(
-                    roots
-                        .iter()
-                        .map(|&r| Term::from_field_u64(f.root, r as u64)),
-                )),
-                0.0,
-            )),
+            Box::new(ConstScoreQuery::new(self.allowed(roots, shared), 0.0)),
         ));
         let query = BooleanQuery::new(all);
         let searcher = self.shared.reader.searcher();

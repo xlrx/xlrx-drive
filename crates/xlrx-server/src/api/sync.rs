@@ -15,6 +15,7 @@ use xlrx_sync::{Reject, RemoteEntry, RemoteOp, RemoteResult};
 
 use crate::auth::session::CurrentUser;
 use crate::error::{ApiError, ApiResult};
+use crate::files::access;
 use crate::files::content::{self, Staged, Target, Written};
 use crate::files::db::{self, NODE_COLS, NodeRow};
 use crate::files::{live, ops, roots, store};
@@ -73,7 +74,7 @@ pub async fn changes(
     let root = db::root_by_id(&st.db, q.root)
         .await?
         .ok_or(ApiError::NotFound)?;
-    if !roots::can_read(&root, me.id) {
+    if roots::role(&st, &root, me.id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
     let limit = q.limit.unwrap_or(1000).clamp(1, 10_000);
@@ -132,22 +133,42 @@ pub async fn notify(
                 rx.changed().await.ok()?;
                 let now = *rx.borrow_and_update();
                 // Looked up each time: a root created (or shared) after connecting counts too.
-                let visible: Vec<i64> = roots::readable(&st, user)
-                    .await
-                    .ok()?
-                    .into_iter()
-                    .map(|r| r.id)
-                    .collect();
-                let rows: Vec<(i64, i64)> = sqlx::query_as(
+                let scope = access::scope(&st.db, user).await.ok()?;
+                let mut rows: Vec<(i64, i64)> = sqlx::query_as(
                     "SELECT root_id, max(seq) FROM journal
                      WHERE seq > $1 AND seq <= $2 AND root_id = ANY($3) GROUP BY root_id",
                 )
                 .bind(last)
                 .bind(now)
-                .bind(&visible)
+                .bind(&scope.roots)
                 .fetch_all(&st.db)
                 .await
                 .ok()?;
+                // In other people's roots only what happened inside the items shared with the
+                // person: nothing else there is any of their business.
+                if !scope.shared.is_empty() {
+                    let shared: Vec<(i64, i64)> = sqlx::query_as(
+                        "WITH RECURSIVE j AS (
+                            SELECT seq, root_id, node_id FROM journal
+                             WHERE seq > $1 AND seq <= $2 AND NOT (root_id = ANY($3))
+                         ), up AS (
+                            SELECT j.seq, j.root_id, n.id, n.parent_id, 0 AS depth
+                              FROM j JOIN nodes n ON n.id = j.node_id
+                            UNION ALL
+                            SELECT up.seq, up.root_id, p.id, p.parent_id, up.depth + 1
+                              FROM up JOIN nodes p ON p.id = up.parent_id WHERE up.depth < 1000
+                         )
+                         SELECT root_id, max(seq) FROM up WHERE id = ANY($4) GROUP BY root_id",
+                    )
+                    .bind(last)
+                    .bind(now)
+                    .bind(&scope.roots)
+                    .bind(&scope.shared)
+                    .fetch_all(&st.db)
+                    .await
+                    .ok()?;
+                    rows.extend(shared);
+                }
                 last = now;
                 if rows.is_empty() {
                     continue;

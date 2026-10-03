@@ -7,6 +7,7 @@ pub mod files;
 pub mod me;
 pub mod search;
 pub mod setup;
+pub mod shares;
 pub mod sync;
 pub mod uploads;
 
@@ -84,6 +85,19 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/users/{id}/disabled", post(admin::set_disabled))
         .route("/admin/audit", get(admin::audit_log))
         .route("/admin/search", get(admin::search_status))
+        .route(
+            "/admin/groups",
+            get(admin::list_groups).post(admin::create_group),
+        )
+        .route(
+            "/admin/groups/{id}",
+            put(admin::update_group).delete(admin::delete_group),
+        )
+        .route(
+            "/admin/spaces",
+            get(admin::list_spaces).post(admin::create_space),
+        )
+        .route("/admin/spaces/{id}", put(admin::update_space))
         .route("/admin/jobs/retry", post(admin::retry_jobs))
         .layer(middleware::from_fn(browser_only));
 
@@ -104,6 +118,13 @@ pub fn router(state: AppState) -> Router {
         .route("/nodes/{id}/children", get(files::children))
         .route("/nodes/{id}/thumbnail", get(files::thumbnail))
         .route("/recent", get(files::recent))
+        .route("/people", get(shares::people))
+        .route("/shared", get(shares::shared_with_me))
+        .route(
+            "/nodes/{id}/shares",
+            get(shares::node_access).post(shares::create),
+        )
+        .route("/shares/{id}", patch(shares::update).delete(shares::remove))
         .route("/search", get(search::search))
         .route("/search/suggest", get(search::suggest))
         .route(
