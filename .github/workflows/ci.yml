@@ -75,6 +75,8 @@ jobs:
       - run: cargo build --release -p xlrx-server
         working-directory: .
       - run: pnpm exec playwright install --with-deps chromium
+      # An S3 server for the outside cache's end-to-end test.
+      - run: cargo install s3s-fs --version 0.17.0 --features binary --locked
       - name: Ende-zu-Ende (Einrichtung, TOTP, Passkey per virtuellem Authenticator, Verwaltung)
         run: e2e/run.sh
         env:

@@ -59,6 +59,10 @@ export interface Me {
 	totp: boolean;
 	passkeys: { id: number; name: string; created_at: string; last_used_at: string | null }[];
 	recovery_codes_left: number;
+	/** My starred and suggested files go into the outside cache at night. */
+	prefetch: boolean;
+	/** The outside cache (S3) is set up. */
+	outside_cache?: boolean;
 	step_up_valid?: boolean;
 }
 

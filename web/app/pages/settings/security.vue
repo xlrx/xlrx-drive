@@ -48,6 +48,12 @@ const newPassword = ref('');
 const notice = ref('');
 const canPasskey = ref(false);
 
+const togglePrefetch = () =>
+	g.run(async () => {
+		await api('PUT', '/me/prefetch', { on: !me.value?.prefetch });
+		await load();
+	});
+
 async function refresh() {
 	await load();
 	sessions.value = await apiGet<SessionInfo[]>('/me/sessions');
@@ -238,6 +244,18 @@ function codesDone() {
 						<button v-if="!s.current" class="link small danger" @click="revoke(s.id)">Abmelden</button>
 					</li>
 				</ul>
+			</section>
+
+			<section v-if="me.outside_cache">
+				<h2>Unterwegs</h2>
+				<div class="setting">
+					<Icon name="cloud" :size="19" />
+					<span class="text-col">
+						<span class="name">Unterwegs vorausladen</span>
+						<span class="sub">Markierte und vorgeschlagene Dateien liegen nachts schon im Außen-Beschleuniger bereit – unterwegs öffnen sie schneller. Nur aus Ordnern mit „Cloud erlaubt“.</span>
+					</span>
+					<button type="button" class="switch" :aria-pressed="me.prefetch" aria-label="Unterwegs vorausladen" :disabled="g.busy.value" @click="togglePrefetch"></button>
+				</div>
 			</section>
 
 			<section>

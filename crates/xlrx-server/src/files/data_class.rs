@@ -8,7 +8,7 @@
 //! otherwise. Without any setting the server's default applies, "local" unless configured
 //! otherwise. Every path out of the house must call [`allows_cloud`] first.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -99,6 +99,56 @@ pub async fn allows_cloud(db: &PgPool, default: Class, id: i64) -> ApiResult<boo
         .await?
         .get(&id)
         .is_some_and(|e| e.class == Class::Cloud))
+}
+
+/// Contents that may not leave the home network (for every cloud path that sends contents: the
+/// outside cache, M4): a copy that still exists – a file, one in the trash, an old version – lies in
+/// a "Nur lokal" folder, or no live file in a "Cloud erlaubt" folder has it.
+pub async fn forbidden_contents(
+    db: &PgPool,
+    default: Class,
+    hashes: &[Vec<u8>],
+) -> ApiResult<HashSet<Vec<u8>>> {
+    if hashes.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let rows: Vec<(i64, Vec<u8>, bool)> = sqlx::query_as(
+        "SELECT n.id, n.content_hash, n.deleted_at IS NULL FROM nodes n
+          WHERE n.content_hash = ANY($1)
+            AND (n.deleted_at IS NULL OR EXISTS (
+                  SELECT 1 FROM nodes t WHERE t.id = n.deleted_with AND t.trash_path IS NOT NULL))
+         UNION ALL
+         SELECT node_id, content_hash, false FROM versions WHERE content_hash = ANY($1)",
+    )
+    .bind(hashes)
+    .fetch_all(db)
+    .await?;
+    let ids: Vec<i64> = rows
+        .iter()
+        .map(|r| r.0)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let classes = effective(db, default, &ids).await?;
+    let mut local = HashSet::new();
+    let mut allowed = HashSet::new();
+    for (id, hash, live) in rows {
+        // Unknown means local: only an explicit "Cloud erlaubt" lets a content out.
+        match classes.get(&id).map(|e| e.class) {
+            Some(Class::Cloud) if live => {
+                allowed.insert(hash);
+            }
+            Some(Class::Cloud) => {}
+            _ => {
+                local.insert(hash);
+            }
+        }
+    }
+    Ok(hashes
+        .iter()
+        .filter(|h| local.contains(*h) || !allowed.contains(*h))
+        .cloned()
+        .collect())
 }
 
 /// The settings made on these nodes themselves.

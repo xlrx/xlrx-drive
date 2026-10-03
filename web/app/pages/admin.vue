@@ -46,6 +46,32 @@ const groupForm = ref<{ id: number | null; name: string; members: number[] }>({ 
 const spaceForm = ref<{ id: number | null; name: string; path: string; members: Member[] } | null>(null);
 const search = ref<SearchStatus | null>(null);
 const classes = ref<DataClasses | null>(null);
+/** The outside cache (PLAN 15.2). */
+type CacheStatus = {
+	configured: boolean;
+	origin: string | null;
+	bucket: string | null;
+	objects: number;
+	bytes: number;
+	budget: number;
+	uploading: number;
+	by_reason: Partial<Record<'link' | 'popular' | 'prefetch', number>>;
+	hits: number;
+	error: string | null;
+};
+const cache = ref<CacheStatus | null>(null);
+const REASON_LABEL = { link: 'für Links', popular: 'oft von außen geladen', prefetch: 'vorausgeladen' } as const;
+const cacheReasons = computed(() =>
+	(Object.keys(REASON_LABEL) as (keyof typeof REASON_LABEL)[])
+		.filter((r) => cache.value?.by_reason[r])
+		.map((r) => `${num(cache.value!.by_reason[r]!)} ${REASON_LABEL[r]}`)
+		.join(' · ')
+);
+const clearCache = () =>
+	g.run(async () => {
+		await apiPost('/admin/cache/clear');
+		await refresh();
+	});
 const users = ref<User[]>([]);
 const audit = ref<Audit[]>([]);
 const form = ref({ username: '', display_name: '', email: '', is_admin: false });
@@ -58,6 +84,7 @@ async function refresh() {
 	groups.value = await apiGet<GroupOut[]>('/admin/groups');
 	spaces.value = await apiGet<SpaceOut[]>('/admin/spaces');
 	classes.value = await apiGet<DataClasses>('/admin/data-classes');
+	cache.value = await apiGet<CacheStatus>('/admin/cache');
 }
 
 /** The record of where data may go, as a table for Numbers or Excel. */
@@ -324,6 +351,28 @@ const copy = () => link.value && navigator.clipboard.writeText(link.value.url);
 					</div>
 				</form>
 				<button v-else type="button" @click="newSpace">Ablage einbinden</button>
+			</section>
+
+			<section v-if="cache" class="card">
+				<h2 style="margin-top: 0">Außen-Beschleuniger</h2>
+				<p v-if="!cache.configured" class="muted">
+					Aus. Mit einem S3-Bucket (z. B. bei Hetzner) laden Personen unterwegs große Dateien von dort statt über den
+					Heimanschluss – nur aus Ordnern mit „Cloud erlaubt“. Einrichtung: <code>XLRX_S3_BUCKET</code>, siehe
+					<code>deploy/synology.md</code>.
+				</p>
+				<template v-else>
+					<div class="kv"><span>Bucket</span><span>{{ cache.bucket }} · {{ cache.origin }}</span></div>
+					<div class="kv">
+						<span>Belegt</span>
+						<span>{{ formatSize(cache.bytes) }} von {{ formatSize(cache.budget) }} · {{ num(cache.objects) }} {{ cache.objects === 1 ? 'Datei' : 'Dateien' }}</span>
+					</div>
+					<div v-if="cacheReasons" class="kv"><span>Warum</span><span>{{ cacheReasons }}</span></div>
+					<div class="kv"><span>Von dort geladen</span><span>{{ num(cache.hits) }}-mal</span></div>
+					<div v-if="cache.uploading" class="kv"><span>Lädt gerade hoch</span><span>{{ num(cache.uploading) }}</span></div>
+					<p v-if="cache.error" class="error" role="alert">{{ cache.error }}</p>
+					<p class="muted small">„Nur lokal“-Inhalte kommen nie dorthin. Im Heimnetz wird immer direkt vom NAS geladen.</p>
+					<button type="button" :disabled="g.busy.value || !cache.objects" @click="clearCache">Leeren</button>
+				</template>
 			</section>
 
 			<section v-if="classes" class="card">

@@ -72,11 +72,21 @@ services:
       XLRX_LINK_UPLOAD_MAX_MB: ${XLRX_LINK_UPLOAD_MAX_MB:-10240}
       # Time zone of the household (start page: "usually opened on Mondays").
       XLRX_TIMEZONE: ${XLRX_TIMEZONE:-Europe/Berlin}
+      # Outside cache in S3 (PLAN 15.2): off while XLRX_S3_BUCKET is empty. Keys in secrets/.
+      XLRX_S3_BUCKET: ${XLRX_S3_BUCKET:-}
+      XLRX_S3_ENDPOINT: ${XLRX_S3_ENDPOINT:-}
+      XLRX_S3_REGION: ${XLRX_S3_REGION:-us-east-1}
+      XLRX_S3_ACCESS_KEY_FILE: /run/secrets/s3_access_key
+      XLRX_S3_SECRET_KEY_FILE: /run/secrets/s3_secret_key
+      XLRX_S3_BUDGET_GB: ${XLRX_S3_BUDGET_GB:-200}
+      XLRX_S3_UPLOAD_MBIT: ${XLRX_S3_UPLOAD_MBIT:-20}
+      # Further networks of the home (e.g. the IPv6 prefix): never redirected to the cache.
+      XLRX_LAN_NETS: ${XLRX_LAN_NETS:-}
       # "My Drive" of account NAME: /volume1/homes/NAME/Drive (the Synology Drive folder).
       XLRX_DATA_DIR: /mnt/volume1
       # Text of Office, iWork and mail documents for the search (container below, internal only).
       XLRX_TIKA_URL: http://tika:9998
-    secrets: [database_url, xlrx_secret_key]
+    secrets: [database_url, xlrx_secret_key, s3_access_key, s3_secret_key]
     # The whole volume: homes, team folders and xlrx-state on one file system, so versions can be
     # kept via reflink (PLAN 4.1).
     volumes:
@@ -132,3 +142,8 @@ secrets:
     file: ./secrets/database_url
   xlrx_secret_key:
     file: ./secrets/xlrx_secret_key
+  # Empty as long as there is no outside cache.
+  s3_access_key:
+    file: ./secrets/s3_access_key
+  s3_secret_key:
+    file: ./secrets/s3_secret_key

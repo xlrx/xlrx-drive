@@ -41,6 +41,7 @@ umask 077
 openssl rand -base64 32 | tr -d '/+=\n' > secrets/pg_password
 printf 'postgres://xlrx:%s@postgres:5432/xlrx' "$(cat secrets/pg_password)" > secrets/database_url
 sudo docker run --rm ghcr.io/xlrx/xlrx-drive-server:latest gen-secret > secrets/xlrx_secret_key
+: > secrets/s3_access_key; : > secrets/s3_secret_key   # bleiben leer bis zum Außen-Beschleuniger (Abschnitt 14)
 sudo chown xlrx secrets/*
 ```
 
@@ -132,7 +133,7 @@ Ordner weiter unten etwas anderes sagt. Ohne Einstellung gilt `XLRX_DEFAULT_DATA
 „Nur lokal“ tippen oder in den Aktionen eines Ordners „Datenklasse“ wählen. Ändern darf nur, wer den Ordner
 verwaltet, mit erneuter Bestätigung (Code oder Passkey); jede Änderung steht im Protokoll.
 
-Solange es keine Cloud-Funktionen gibt (KI-Suche ab M4, Außen-Cache ab M3b), verlässt ohnehin nichts das
+Solange weder der Außen-Beschleuniger (Abschnitt 14) noch die KI-Suche (ab M4) eingeschaltet ist, verlässt nichts das
 NAS. Die **Verwaltung** zeigt unter „Datenklassen“ jeden Ordner mit eigener Einstellung – das Verzeichnis,
 welche Daten wohin dürfen.
 
@@ -149,8 +150,8 @@ Ablaufdatum und einer Höchstzahl an Downloads; beenden geht jederzeit und wirkt
   funktioniert der Link nicht mehr.
 - Wer Passwörter oder Links rät, wird gesperrt (je Link und je Adresse). Alles steht im Protokoll der Verwaltung.
 - Größte Datei über einen Link: `XLRX_LINK_UPLOAD_MAX_MB` in `.env` (Standard 10 240 MB).
-- Links laufen über den Heimanschluss. Der Außen-Beschleuniger für große Dateien (S3) kommt mit M3b;
-  „Nur lokal“-Inhalte gehen auch dann nie über S3.
+- Links laufen über den Heimanschluss – oder, wenn eingerichtet, große Dateien über den Außen-Beschleuniger
+  (Abschnitt 14); „Nur lokal“-Inhalte gehen nie über S3.
 
 ## 13. Startseite und Aktivität
 
@@ -162,7 +163,56 @@ Unter **Aktivität** steht, was mit Dateien geschah, die du sehen darfst: hochge
 verschoben, gelöscht, geteilt. Änderungen über SMB oder Synology Drive erscheinen als „auf dem NAS“, sobald der
 Abgleich sie findet; der allererste Import einer Ablage erscheint dort nicht.
 
-## 14. DSM-Reverse-Proxy ablösen
+## 14. Außen-Beschleuniger (S3)
+
+Wer unterwegs große Dateien lädt – vor allem über Freigabe-Links –, bekommt sie aus einem S3-Bucket statt über den
+Heimanschluss und die NAS-CPU. Gespiegelt wird nur aus Ordnern mit **„Cloud erlaubt“**; „Nur lokal“-Inhalte kommen nie in
+den Bucket (auch keine Kopie davon). Im Heimnetz wird nie umgeleitet.
+
+1. Bei Hetzner (Cloud Console → Object Storage) einen **privaten** Bucket anlegen, z. B. `xlrx-cache` in `fsn1`, und dafür
+   **eigene** Zugangsdaten (nicht die von Hyper Backup).
+2. Unvollständige Uploads automatisch entfernen lassen (einmalig, z. B. mit der AWS-CLI vom Mac):
+   ```sh
+   aws s3api put-bucket-lifecycle-configuration --endpoint-url https://fsn1.your-objectstorage.com \
+     --bucket xlrx-cache --lifecycle-configuration \
+     '{"Rules":[{"ID":"abort-mpu","Status":"Enabled","Filter":{"Prefix":""},"AbortIncompleteMultipartUpload":{"DaysAfterInitiation":1}}]}'
+   ```
+3. Zugangsdaten eintragen und in `.env` den Bucket setzen:
+   ```sh
+   umask 077
+   printf '%s' 'ACCESS-KEY' > secrets/s3_access_key
+   printf '%s' 'SECRET-KEY' > secrets/s3_secret_key
+   ```
+   ```
+   XLRX_S3_BUCKET=xlrx-cache
+   XLRX_S3_ENDPOINT=https://fsn1.your-objectstorage.com
+   XLRX_S3_REGION=fsn1
+   ```
+4. `sudo docker compose up -d`. Die **Verwaltung** zeigt unter „Außen-Beschleuniger“, was im Bucket liegt und warum.
+5. Prüfen: einen Link auf eine große Datei anlegen, ein paar Minuten warten (Verwaltung: „1 für Links“) und ihn auf dem
+   Handy **ohne WLAN** öffnen. Der Download muss schnell sein und den richtigen Dateinamen tragen; im WLAN kommt dieselbe
+   Datei vom NAS.
+
+Was gespiegelt wird: Dateien hinter Freigabe-Links (ab 8 MB, sobald der Link angelegt ist), Dateien, die innerhalb
+einer Woche mehrfach von außen geladen wurden, und für Personen mit „Unterwegs vorausladen“ (Einstellungen) ihre
+markierten und vorgeschlagenen Dateien – nachts zwischen 1 und 6 Uhr. Hochgeladen wird mit höchstens
+`XLRX_S3_UPLOAD_MBIT` (Standard 20 Mbit/s), damit der Anschluss frei bleibt.
+
+Aufräumen geschieht von selbst: Endet ein Link, ist seine Datei sofort weg (auch bereits verschickte Download-Adressen
+gehen dann nicht mehr). Eine neue Fassung ersetzt die alte. Sonst bleibt der Bucket unter `XLRX_S3_BUDGET_GB`
+(Standard 200), und was 30 Tage niemand geladen hat, verschwindet. „Leeren“ in der Verwaltung entfernt alles.
+
+Wird ein Ordner auf „Nur lokal“ gestellt, verschwinden seine Dateien sofort aus dem Bucket und werden nie mehr von
+dort ausgeliefert. Im Bucket stehen nur zufällige Namen – keine Dateinamen, keine Pfade.
+
+**Heimnetz erkennen:** Private Adressen (192.168.…, fd…) gelten immer als zu Hause. Nutzen Geräte zu Hause **IPv6**,
+kommen sie mit öffentlichen Adressen an; dann den IPv6-Präfix des Anschlusses in `XLRX_LAN_NETS` eintragen (Fritz!Box:
+Heimnetz → Netzwerk → Netzwerkeinstellungen → IPv6). Wechselt der Präfix, laden Geräte zu Hause bis zur Anpassung über
+den Bucket – das kostet nur Bandbreite, ist aber kein Risiko.
+
+Vor dem Einschalten: AVV mit Hetzner abschließen (Cloud Console → Datenschutz).
+
+## 15. DSM-Reverse-Proxy ablösen
 
 1. Bestehende Regeln (Systemsteuerung → Anmeldeportal → Erweitert → Reverse Proxy) als Blöcke in `Caddyfile` übernehmen.
 2. Caddy läuft parallel; über die Caddy-IP testen (`curl --resolve fotos.example.de:443:192.168.1.20 https://fotos.example.de`).

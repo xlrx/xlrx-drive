@@ -521,6 +521,84 @@ async function publicLinks(page: Page, browser: Browser) {
 	await expect(page.getByRole('link', { name: 'Projekte', exact: true })).toBeVisible();
 }
 
+/** A short WAV tone (8 kHz, mono, 16 bit). */
+function wav(seconds: number): Buffer {
+	const n = Math.round(8000 * seconds);
+	const b = Buffer.alloc(44 + 2 * n);
+	b.write('RIFF', 0);
+	b.writeUInt32LE(36 + 2 * n, 4);
+	b.write('WAVEfmt ', 8);
+	b.writeUInt32LE(16, 16);
+	b.writeUInt16LE(1, 20);
+	b.writeUInt16LE(1, 22);
+	b.writeUInt32LE(8000, 24);
+	b.writeUInt32LE(16000, 28);
+	b.writeUInt16LE(2, 32);
+	b.writeUInt16LE(16, 34);
+	b.write('data', 36);
+	b.writeUInt32LE(2 * n, 40);
+	for (let i = 0; i < n; i++) b.writeInt16LE(Math.round(8000 * Math.sin((2 * Math.PI * 440 * i) / 8000)), 44 + 2 * i);
+	return b;
+}
+
+/** Outside cache (needs s3s-fs, see run.sh): away from home a link's file comes from the bucket – the download as
+ *  well as the player (CSP) –, at home always from the NAS. */
+async function outsideCache(page: Page, browser: Browser, data: string) {
+	const tone = wav(1);
+	await writeFile(join(data, 'homes/admin/Drive/Projekte/Ton.wav'), tone);
+	await page.getByRole('link', { name: 'Dateien', exact: true }).click();
+	await page.getByRole('link', { name: 'Projekte', exact: true }).click();
+	await expect(page.getByRole('link', { name: 'Ton.wav', exact: true })).toBeVisible({ timeout: 15_000 });
+	await page.getByRole('button', { name: 'Aktionen für Ton.wav' }).click();
+	await page.getByRole('menuitem', { name: 'Teilen' }).click();
+	const sheet = page.getByRole('dialog', { name: '„Ton.wav“ teilen' });
+	await sheet.getByLabel('Art des Links').selectOption('download');
+	await sheet.getByRole('button', { name: 'Link erstellen' }).click();
+	const url = await sheet.getByLabel('Neuer Link').inputValue();
+	await sheet.getByRole('button', { name: 'Schließen' }).click();
+	// Mirrored in the background, shown in the administration.
+	await expect
+		.poll(async () => (await (await page.request.get('/api/admin/cache')).json()).objects, { timeout: 15_000 })
+		.toBe(1);
+	await page.getByRole('link', { name: 'Verwaltung' }).click();
+	await expect(page.getByRole('heading', { name: 'Außen-Beschleuniger' })).toBeVisible();
+	await expect(page.getByText(/1 für Links/)).toBeVisible();
+
+	// Away from home: the player and the download get it from the bucket.
+	const ctx = await browser.newContext({ extraHTTPHeaders: { 'x-forwarded-for': '203.0.113.9' } });
+	const away = await ctx.newPage();
+	const fetched: string[] = [];
+	ctx.on('request', (r) => fetched.push(r.url()));
+	const blocked: string[] = [];
+	away.on('console', (m) => m.type() === 'error' && /Content Security Policy/.test(m.text()) && blocked.push(m.text()));
+	await away.goto(url);
+	await expect(away.getByRole('heading', { name: 'Ton.wav' })).toBeVisible();
+	const audio = away.locator('audio');
+	await expect.poll(() => audio.evaluate((a: HTMLAudioElement) => a.readyState), { timeout: 10_000 }).toBeGreaterThan(0);
+	expect(blocked).toEqual([]);
+	const bucket = (what: RegExp) => fetched.some((u) => u.startsWith('http://127.0.0.1:8014/') && what.test(u));
+	expect(bucket(/response-content-type=audio%2F/)).toBe(true);
+	const [download] = await Promise.all([
+		away.waitForEvent('download'),
+		away.getByRole('link', { name: 'Herunterladen' }).click()
+	]);
+	expect(readFileSync(await download.path()).equals(tone)).toBe(true);
+	// Chromium hands `<a download>` to its download manager without the test's X-Forwarded-For, so the redirect of
+	// the download itself is checked directly: away, it points to the bucket, which serves exactly the file.
+	const link = await away.getByRole('link', { name: 'Herunterladen' }).getAttribute('href');
+	const sent = await away.request.get(link!, { maxRedirects: 0 });
+	expect(sent.status()).toBe(307);
+	const target = sent.headers()['location']!;
+	expect(target).toMatch(/^http:\/\/127\.0\.0\.1:8014\/.*response-content-disposition=attachment/);
+	expect((await (await away.request.get(target)).body()).equals(tone)).toBe(true);
+	await ctx.close();
+	// At home: the NAS.
+	const token = url.split('/').pop();
+	const id = (await (await page.request.get(`/api/public/${token}`)).json()).node.id;
+	const home = await page.request.get(`/api/public/${token}/nodes/${id}/content`, { maxRedirects: 0 });
+	expect(home.status()).toBe(200);
+}
+
 /** Data class of a folder: "Nur lokal" until allowed on purpose; files inside and the administration show it. */
 async function classifyFolder(page: Page) {
 	const link = (name: string) => page.getByRole('link', { name, exact: true });
@@ -605,6 +683,7 @@ test('Einrichtung, Anmeldung, Verwaltung und Dateien', async ({ page, browser })
 		await shareFiles(page, browser, bertSetup);
 		await classifyFolder(page);
 		await publicLinks(page, browser);
+		if (process.env.XLRX_E2E_S3) await outsideCache(page, browser, data);
 		await uploadLarge(page, data);
 	}
 	await connectDevice(page);

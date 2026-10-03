@@ -1168,7 +1168,8 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
   - Datenklassen (7.4): jeder Ordner „Nur lokal“ oder „Cloud erlaubt“, vererbt bis zur nächsten eigenen Einstellung; auch für eine ganze
     Ablage. Ohne Einstellung gilt `XLRX_DEFAULT_DATA_CLASS` (Standard „Nur lokal“). Ändern nur mit Verwalten-Recht, erneuter Bestätigung
     und Eintrag im Audit-Log (vorher, nachher). Wer nur eine Freigabe hat, erfährt nicht, aus welchem Ordner darüber die Einstellung kommt.
-    `data_class::allows_cloud` ist die eine Prüfung, die jeder spätere Cloud-Weg (M3b, M4, Backup) vor dem Versand aufrufen muss.
+    Für Inhalte gilt die strengere Prüfung `data_class::forbidden_contents`: Ein Inhalt darf nur hinaus, wenn **keine** noch vorhandene
+    Kopie (Datei, Papierkorb, alte Version) in einem „Nur lokal“-Ordner liegt. Jeder Cloud-Weg (M3b, M4, Backup) ruft sie vor dem Versand auf.
   - Web: Datenklasse im Ordner und in den Aktionen, Kennzeichnung in der Liste, „Cloud-Analyse“ in den Details einer Datei,
     Verzeichnis aller Einstellungen in der Verwaltung (als Tabelle zu sichern).
   - Öffentliche Links (9.2): Ansehen, Herunterladen, Nur hochladen (Dateianfrage, sieht nichts vom Ordner), Bearbeiten (herunterladen,
@@ -1204,6 +1205,20 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
   - „Markiert“ (8.2): Sterne je Person, privat; in den Aktionen jeder Datei und jedes Ordners, als Abschnitt auf der Startseite; nur was
     noch da ist und gesehen werden darf.
   - Noch nicht: E-Mail bei neuen Freigaben (SMTP, einstellbar je Person) und Push auf iOS/Mac (APNs, mit den Apps ab M5).
+
+- **M3b erledigt (lokal getestet gegen einen S3-Server im Test, s3s-fs):**
+  - Eigener kleiner S3-Client (SigV4 in Kopfzeilen und als signierte URL, geprüft gegen die Beispiele der AWS-Doku; Upload in
+    16-MiB-Teilen, gedrosselt; HTTPS über rustls). Funktioniert mit jedem S3-kompatiblen Anbieter.
+  - Gespiegelt werden Dateien hinter Links (ab `XLRX_S3_MIN_MB`, Standard 8 MB), Inhalte, die binnen 7 Tagen zweimal von außen
+    geladen wurden, und für Personen mit „Unterwegs vorausladen“ ihre markierten und vorgeschlagenen Dateien (nachts).
+  - Von außen: `307` auf eine signierte URL (Downloads 10 Min., Audio/Video im Browser 1 Std.). Im Heimnetz (private Adressen und
+    `XLRX_LAN_NETS`) und bei unbekannter Adresse liefert immer das NAS. Linkzähler und Protokoll wie bisher.
+  - „Nur lokal“: geprüft beim Planen, direkt vor und nach dem Upload, vor jeder Umleitung und jede Minute für den ganzen Bucket;
+    Umstellen eines Ordners zieht seine Objekte sofort zurück. Nachgewiesen in Tests (Kopie, Papierkorb, alte Version, Umstellen).
+  - Zufällige Objektnamen (weder Dateinamen noch Hashes); erneutes Hochladen bekommt einen neuen Namen, alte URLs bleiben tot.
+    Aufräumen: Link-Ende, neue Fassung, Budget (LRU), 30 Tage ohne Nutzung, Waisen im Bucket, abgebrochene Uploads.
+  - Verwaltung: Belegung, Gründe, Abrufe, letzter Fehler, „Leeren“ (mit erneuter Bestätigung). Einstellungen: „Unterwegs vorausladen“.
+  - Für M5: Der Mac-Client folgt Umleitungen selbst und schickt dabei **kein** `Authorization` mit (S3 lehnt doppelte Anmeldung ab).
 
 **Nächster Schritt:** Inbetriebnahme auf dem DS918+ mit den Spike-Messungen (M0) und dem M1-Nachweis mit den echten Daten.
 

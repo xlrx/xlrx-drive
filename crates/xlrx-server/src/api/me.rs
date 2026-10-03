@@ -26,12 +26,15 @@ pub struct MeResp {
     #[serde(flatten)]
     pub me: Me,
     pub step_up_valid: bool,
+    /// The outside cache is set up ("Unterwegs vorausladen" makes sense).
+    pub outside_cache: bool,
 }
 
 pub async fn get_me(State(st): State<AppState>, me: CurrentUser) -> ApiResult<Json<MeResp>> {
     Ok(Json(MeResp {
         me: users::me(&st.db, me.id).await?,
         step_up_valid: me.step_up_valid(),
+        outside_cache: st.s3.is_some(),
     }))
 }
 

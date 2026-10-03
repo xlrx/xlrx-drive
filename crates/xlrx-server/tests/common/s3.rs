@@ -1,5 +1,7 @@
 //! An S3 server on a temporary directory (s3s-fs), checking signatures itself.
 
+use std::sync::{Arc, Mutex};
+
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder;
 use s3s::auth::SimpleAuth;
@@ -11,6 +13,8 @@ pub const BUCKET: &str = "xlrx-cache";
 pub struct FakeS3 {
     pub cfg: S3Config,
     pub dir: tempfile::TempDir,
+    /// Every request: method and path (what was uploaded, and when).
+    pub log: Arc<Mutex<Vec<String>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -24,15 +28,26 @@ impl FakeS3 {
         let service = b.build();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let l = log.clone();
         let task = tokio::spawn(async move {
             loop {
                 let Ok((socket, _)) = listener.accept().await else {
                     return;
                 };
-                let service = service.clone();
+                let (service, l) = (service.clone(), l.clone());
+                let logged = hyper::service::service_fn(
+                    move |req: hyper::Request<hyper::body::Incoming>| {
+                        l.lock()
+                            .unwrap()
+                            .push(format!("{} {}", req.method(), req.uri().path()));
+                        let service = service.clone();
+                        async move { hyper::service::Service::call(&service, req).await }
+                    },
+                );
                 tokio::spawn(async move {
                     let _ = Builder::new(TokioExecutor::new())
-                        .serve_connection(TokioIo::new(socket), service)
+                        .serve_connection(TokioIo::new(socket), logged)
                         .await;
                 });
             }
@@ -47,8 +62,19 @@ impl FakeS3 {
                 virtual_host: false,
             },
             dir,
+            log,
             task,
         }
+    }
+
+    /// Uploads so far (single requests, parts and their start and end).
+    pub fn uploads(&self) -> usize {
+        self.log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.starts_with("PUT ") || l.starts_with("POST "))
+            .count()
     }
 
     /// Keys stored in the bucket (from the directory).

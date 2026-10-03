@@ -291,6 +291,11 @@ async fn nur_lokal_nie_im_bucket() {
     link(&mut klaus, wie_alt, "download").await;
     let (_, t) = link(&mut klaus, video, "download").await;
     assert_eq!(round(&env).await.uploaded, 1);
+    assert_eq!(
+        fake.uploads(),
+        1,
+        "nichts Verbotenes hochgeladen, auch nicht kurz"
+    );
     assert_eq!(fake.keys().len(), 1);
     let g = get(
         &env,
@@ -503,12 +508,20 @@ async fn aufraeumen_und_vorausladen() {
     assert_eq!(mirror::orphans(&env.state).await.unwrap(), 1);
     assert_eq!(fake.keys(), ["fremd/datei"]);
     // An upload interrupted by a crash: cleaned up.
-    sqlx::query("INSERT INTO s3_objects (content_hash, key, size, state, reason) VALUES ('\\x01', 'x/halb', 1, 'uploading', 'popular')")
-        .execute(&env.db.pool)
+    s3.put("x/halb", bytes::Bytes::from_static(b"h"))
         .await
         .unwrap();
+    sqlx::query(
+        "INSERT INTO s3_objects (content_hash, key, size, state, reason)
+         VALUES ($1, 'x/halb', 50000, 'uploading', 'popular')",
+    )
+    .bind(hash_of(&env, karte).await)
+    .execute(&env.db.pool)
+    .await
+    .unwrap();
     round(&env).await;
     assert!(objects(&env).await.is_empty());
+    assert_eq!(fake.keys(), ["fremd/datei"]);
 
     // Prefetching: only for people who asked for it, their starred files.
     klaus
