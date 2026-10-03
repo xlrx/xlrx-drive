@@ -138,6 +138,8 @@ async function uploadLarge(page: Page, data: string) {
 		return route.continue();
 	});
 	await page.getByRole('link', { name: 'Dateien', exact: true }).click();
+	// The root folder must be shown first: a folder still on screen has an upload field too.
+	await expect(page.getByRole('heading', { name: 'Meine Ablage', exact: true })).toBeVisible();
 	await page.getByTestId('upload-input').setInputFiles({ name: 'Gross.bin', mimeType: 'application/octet-stream', buffer: content });
 	await expect(page.getByText('Testfehler')).toBeVisible({ timeout: 15_000 });
 	await page.getByRole('button', { name: 'Fortsetzen' }).click();
@@ -237,6 +239,7 @@ async function changeFiles(page: Page, data: string) {
 	};
 
 	await page.getByRole('link', { name: 'Dateien', exact: true }).click();
+	await expect(page.getByRole('heading', { name: 'Meine Ablage', exact: true })).toBeVisible();
 	await page.getByRole('button', { name: 'Neuer Ordner' }).click();
 	await page.getByLabel('Name').fill('Belege');
 	await page.getByRole('button', { name: 'Anlegen' }).click();
