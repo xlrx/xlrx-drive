@@ -113,8 +113,10 @@ pub struct CloudAi {
     pub vision_model: Option<String>,
     pub prices: Prices,
     /// Hits by meaning farther than this (cosine distance) are left out
-    /// (`XLRX_AI_MAX_DISTANCE`; default depends on the model).
+    /// (`XLRX_AI_MAX_DISTANCE`; default depends on the model), and how much farther than the
+    /// best hit a hit may be (by model).
     pub max_distance: f64,
+    pub spread: f64,
 }
 
 /// Euros per million tokens (`XLRX_AI_PRICE_EMBED`, `XLRX_AI_PRICE_VISION_IN`,
@@ -141,6 +143,9 @@ pub struct LocalAi {
     /// `XLRX_LOCAL_CLIP_MAX_DISTANCE`; defaults depend on the model).
     pub max_distance: f64,
     pub clip_max_distance: f64,
+    /// How much farther than the best hit a hit may be (by model).
+    pub spread: f64,
+    pub clip_spread: f64,
 }
 
 /// What the outside cache may hold and how fast it fills.
@@ -264,6 +269,7 @@ impl AiConfig {
                         "XLRX_AI_MAX_DISTANCE",
                         crate::ai::search::default_max_distance(&embed_model),
                     )?,
+                    spread: crate::ai::search::default_spread(&embed_model),
                     embed_model,
                     embed_dim: dimension("XLRX_AI_EMBED_DIM", 1024)?,
                     vision_model: optional_model("XLRX_AI_VISION_MODEL", "gemma-4-26b-a4b-it")?,
@@ -302,6 +308,10 @@ impl AiConfig {
                             clip_model.as_deref().unwrap_or("clip"),
                         ),
                     )?,
+                    spread: crate::ai::search::default_spread(&embed_model),
+                    clip_spread: crate::ai::search::default_spread(
+                        clip_model.as_deref().unwrap_or("clip"),
+                    ),
                     embed_model,
                     embed_dim: dimension("XLRX_LOCAL_EMBED_DIM", 384)?,
                     clip_model,

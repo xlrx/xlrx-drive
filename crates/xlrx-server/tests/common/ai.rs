@@ -364,6 +364,7 @@ pub fn configure(cfg: &mut xlrx_server::config::Config, fake: &FakeAi) {
             vision_out: 0.50,
         },
         max_distance: 0.9,
+        spread: 1.0,
     });
     cfg.ai.local = Some(xlrx_server::config::LocalAi {
         url: fake.url.clone(),
@@ -373,6 +374,8 @@ pub fn configure(cfg: &mut xlrx_server::config::Config, fake: &FakeAi) {
         clip_dim: LOCAL_DIM as u32,
         max_distance: 0.9,
         clip_max_distance: 0.9,
+        spread: 1.0,
+        clip_spread: 1.0,
     });
 }
 

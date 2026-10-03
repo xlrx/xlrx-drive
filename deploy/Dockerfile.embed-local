@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1.7
+# embed-local: embeddings in the home network for "Nur lokal" (PLAN 7.5). Built for x86-64-v2
+# (DS918+/J3455: no AVX); the matrix kernels use AVX at run time where a machine has it.
+#   docker build -f deploy/Dockerfile.embed-local -t xlrx-embed-local .
+
+FROM rust:1.97-bookworm AS build
+WORKDIR /src
+ENV RUSTFLAGS="-C target-cpu=x86-64-v2" \
+    CARGO_TERM_COLOR=never
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked -p embed-local \
+ && mkdir -p /out \
+ && cp target/release/embed-local /out/
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/embed-local /usr/local/bin/
+ENV EMBED_MODELS_DIR=/models \
+    EMBED_BIND=0.0.0.0:8090 \
+    RUST_LOG=info
+# Never runs as root; compose sets the IDs of the DSM user `xlrx` (PUID/PGID).
+USER 65534:65534
+EXPOSE 8090
+HEALTHCHECK --interval=30s --timeout=5s --start-period=2m \
+  CMD curl -fsS http://127.0.0.1:8090/health || exit 1
+ENTRYPOINT ["embed-local"]

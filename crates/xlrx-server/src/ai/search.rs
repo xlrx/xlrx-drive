@@ -18,19 +18,33 @@ const HITS: usize = 50;
 /// Query vectors kept (paging, the same query typed again).
 const CACHED: usize = 500;
 
-/// How far a hit may be (cosine distance) for a model family, until measured with real data.
-/// Models spread their similarities differently: e5 puts everything close together, CLIP
-/// compares pictures with texts and stays far even for good matches.
+/// How far a hit may be (cosine distance) for a model family. Models spread their similarities
+/// differently: e5 puts everything close together, CLIP compares pictures with texts and stays
+/// far even for good matches. Measured with German queries (`embed-local`, tests
+/// `e5_abstaende`, `clip_findet_fotos_auf_deutsch`): e5-small 0.80–0.89 similar for matches,
+/// up to 0.83 for others; CLIP 0.25–0.32 for matching photos, at most 0.21 for others. The
+/// cloud's model is to be checked with the trial run.
 pub fn default_max_distance(model: &str) -> f64 {
     let m = model.to_ascii_lowercase();
     if m.contains("clip") {
-        0.78
+        0.77
     } else if m.contains("e5") {
-        0.22
+        0.20
     } else if m.contains("qwen3-embedding") {
         0.55
     } else {
         0.5
+    }
+}
+
+/// How much farther than the best hit a hit may be: what is much worse than the best match is
+/// rarely what was meant (an absolute limit alone does not separate well for small models).
+pub fn default_spread(model: &str) -> f64 {
+    let m = model.to_ascii_lowercase();
+    if m.contains("e5") || m.contains("clip") {
+        0.06
+    } else {
+        0.12
     }
 }
 
@@ -62,12 +76,22 @@ pub async fn lists(st: &AppState, q: &str) -> Vec<List> {
     [a, b, c].into_iter().flatten().collect()
 }
 
-fn max_distance(st: &AppState, space: Space) -> f64 {
+/// The distance limit of a space and how much farther than the best hit a hit may be.
+fn limits(st: &AppState, space: Space) -> (f64, f64) {
     let ai = &st.cfg.ai;
     match space {
-        Space::Cloud => ai.cloud.as_ref().map_or(0.0, |c| c.max_distance),
-        Space::Local => ai.local.as_ref().map_or(0.0, |l| l.max_distance),
-        Space::Clip => ai.local.as_ref().map_or(0.0, |l| l.clip_max_distance),
+        Space::Cloud => ai
+            .cloud
+            .as_ref()
+            .map_or((0.0, 0.0), |c| (c.max_distance, c.spread)),
+        Space::Local => ai
+            .local
+            .as_ref()
+            .map_or((0.0, 0.0), |l| (l.max_distance, l.spread)),
+        Space::Clip => ai
+            .local
+            .as_ref()
+            .map_or((0.0, 0.0), |l| (l.clip_max_distance, l.clip_spread)),
     }
 }
 
@@ -90,10 +114,18 @@ async fn one(st: &AppState, space: Space, q: &str) -> Option<List> {
             return None;
         }
     };
-    let max = max_distance(st, space);
+    let (max, spread) = limits(st, space);
+    let hits = keep(near, max, spread);
+    Some(List { space, hits })
+}
+
+/// The pieces worth showing, one per content (its closest): not farther than `max`, nor more
+/// than `spread` farther than the best one.
+fn keep(near: Vec<vectors::Near>, max: f64, spread: f64) -> Vec<Hit> {
+    let best = near.first().map_or(0.0, |n| n.dist);
+    let max = max.min(best + spread);
     let mut seen = HashSet::new();
-    let hits = near
-        .into_iter()
+    near.into_iter()
         .filter(|n| n.dist <= max)
         .filter(|n| seen.insert(n.content_hash.clone()))
         .take(HITS)
@@ -104,8 +136,7 @@ async fn one(st: &AppState, space: Space, q: &str) -> Option<List> {
             len: n.len,
             dist: n.dist,
         })
-        .collect();
-    Some(List { space, hits })
+        .collect()
 }
 
 /// The query's vector in a space (from the cache, else embedded within [`QUERY_TIME`]).
@@ -146,3 +177,38 @@ async fn query_vector(st: &AppState, space: Space, q: &str) -> Option<Vec<f32>> 
 
 /// Query vectors by space and text.
 pub(crate) type Cache = std::sync::Mutex<HashMap<(Space, String), Vec<f32>>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn near(hash: u8, dist: f64) -> vectors::Near {
+        vectors::Near {
+            content_hash: vec![hash],
+            source: "text".into(),
+            start: 0,
+            len: 0,
+            dist,
+        }
+    }
+
+    #[test]
+    fn close_enough_and_near_the_best() {
+        let list = vec![
+            near(1, 0.10),
+            near(1, 0.12),
+            near(2, 0.14),
+            near(3, 0.17),
+            near(4, 0.30),
+        ];
+        let hashes = |h: Vec<Hit>| h.into_iter().map(|h| h.hash[0]).collect::<Vec<_>>();
+        // One per content, within 0.06 of the best and below 0.20.
+        assert_eq!(hashes(keep(list.clone(), 0.20, 0.06)), [1, 2]);
+        assert_eq!(hashes(keep(list.clone(), 0.20, 1.0)), [1, 2, 3]);
+        assert_eq!(hashes(keep(list.clone(), 0.15, 1.0)), [1, 2]);
+        assert_eq!(hashes(keep(list, 0.05, 1.0)), Vec::<u8>::new());
+        assert!(keep(Vec::new(), 1.0, 1.0).is_empty());
+        assert_eq!(default_max_distance("multilingual-e5-small"), 0.20);
+        assert_eq!(default_spread("clip-ViT-B-32-multilingual-v1"), 0.06);
+    }
+}

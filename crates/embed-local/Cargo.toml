@@ -1,0 +1,29 @@
+[package]
+name = "embed-local"
+description = "Embeddings in the home network for xlrx-drive (PLAN 7.5): multilingual-e5-small for texts, multilingual CLIP for pictures; OpenAI-compatible, no AVX assumed."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+axum = "0.8"
+base64 = "0.23"
+# Pure Rust tensors; the matrix kernels pick SSE/AVX at run time, so one build runs on the
+# DS918+ (J3455, no AVX) and on faster machines alike.
+candle-core = "0.11"
+candle-nn = "0.11"
+candle-transformers = "0.11"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+serde.workspace = true
+serde_json.workspace = true
+# Tokenizers without C/C++ parts (Hugging Face's `tokenizer.json`).
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Downloading the models once (`embed-local download`).
+ureq = "3"
+
+[lints]
+workspace = true

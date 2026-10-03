@@ -56,6 +56,8 @@ services:
         condition: service_healthy
       tika:
         condition: service_started
+      embed-local:
+        condition: service_started
     environment:
       DATABASE_URL_FILE: /run/secrets/database_url
       XLRX_SECRET_KEY_FILE: /run/secrets/xlrx_secret_key
@@ -86,7 +88,17 @@ services:
       XLRX_DATA_DIR: /mnt/volume1
       # Text of Office, iWork and mail documents for the search (container below, internal only).
       XLRX_TIKA_URL: http://tika:9998
-    secrets: [database_url, xlrx_secret_key, s3_access_key, s3_secret_key]
+      # AI search (PLAN 7): embed-local in the home network for "Nur lokal" (container below) …
+      XLRX_LOCAL_AI_URL: ${XLRX_LOCAL_AI_URL:-http://embed-local:8090/v1}
+      XLRX_LOCAL_CLIP_MODEL: ${XLRX_LOCAL_CLIP_MODEL:-clip-ViT-B-32-multilingual-v1}
+      # … and a provider in the EU for "Cloud erlaubt" (off while XLRX_AI_URL is empty; it only
+      # runs once an administrator starts it). Key in secrets/.
+      XLRX_AI_URL: ${XLRX_AI_URL:-}
+      XLRX_AI_KEY_FILE: /run/secrets/ai_key
+      XLRX_AI_EMBED_MODEL: ${XLRX_AI_EMBED_MODEL:-qwen3-embedding-8b}
+      XLRX_AI_VISION_MODEL: ${XLRX_AI_VISION_MODEL:-gemma-4-26b-a4b-it}
+      XLRX_AI_BUDGET_EUR: ${XLRX_AI_BUDGET_EUR:-20}
+    secrets: [database_url, xlrx_secret_key, s3_access_key, s3_secret_key, ai_key]
     # The whole volume: homes, team folders and xlrx-state on one file system, so versions can be
     # kept via reflink (PLAN 4.1).
     volumes:
@@ -100,6 +112,38 @@ services:
     image: apache/tika:4.1.0
     restart: unless-stopped
     mem_limit: 1536m
+    networks: [internal]
+
+  # Fetches embed-local's models once (about 1.6 GB, fixed revisions from Hugging Face): the
+  # only part of the AI in the home network with internet access; files already there are kept.
+  embed-models:
+    image: ${XLRX_EMBED_IMAGE:-ghcr.io/xlrx/xlrx-drive-embed-local:latest}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.embed-local
+    user: "${PUID}:${PGID}"
+    command: ["download"]
+    volumes:
+      - ${XLRX_MODELS_DIR:-/volume1/docker/xlrx/models}:/models
+    networks: [download]
+
+  # Embeddings for "Nur lokal" (PLAN 7.5): texts (multilingual-e5-small) and pictures
+  # (multilingual CLIP) are processed here, on the internal network without internet access.
+  # About 1.7 GB of memory, 0.8 GB without pictures (EMBED_CLIP=0, then XLRX_LOCAL_CLIP_MODEL=off).
+  embed-local:
+    image: ${XLRX_EMBED_IMAGE:-ghcr.io/xlrx/xlrx-drive-embed-local:latest}
+    restart: unless-stopped
+    user: "${PUID}:${PGID}"
+    depends_on:
+      embed-models:
+        condition: service_completed_successfully
+    environment:
+      # Cores used (the NAS has four; the rest stays for everything else).
+      RAYON_NUM_THREADS: ${XLRX_EMBED_THREADS:-2}
+      EMBED_CLIP: ${XLRX_EMBED_CLIP:-1}
+    volumes:
+      - ${XLRX_MODELS_DIR:-/volume1/docker/xlrx/models}:/models:ro
+    mem_limit: 2500m
     networks: [internal]
 
   caddy:
@@ -125,6 +169,8 @@ networks:
     internal: true
   # Caddy ↔ server.
   proxy: {}
+  # Only for fetching the models.
+  download: {}
   lan:
     driver: macvlan
     driver_opts:
@@ -147,3 +193,6 @@ secrets:
     file: ./secrets/s3_access_key
   s3_secret_key:
     file: ./secrets/s3_secret_key
+  # Empty as long as there is no AI provider in the cloud.
+  ai_key:
+    file: ./secrets/ai_key

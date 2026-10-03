@@ -100,6 +100,14 @@ jobs:
       - run: qemu-x86_64 -cpu Denverton target/release/examples/hashdir crates
       - run: qemu-x86_64 -cpu Denverton target/release/xlrx-server bench-argon2 4096 1 1
       - run: qemu-x86_64 -cpu Denverton target/release/xlrx-server gen-secret
+      # embed-local: a small model computes with the same kernels as the real ones (texts, pictures).
+      - name: embed-local ohne AVX
+        run: |
+          test=$(cargo test --release -p embed-local --no-run --message-format=json \
+            | jq -r 'select(.profile.test == true) | .executable' | head -1)
+          qemu-x86_64 -cpu Denverton "$test" kleines_modell preparation data_uris
+        env:
+          RUSTFLAGS: "-C target-cpu=x86-64-v2"
 
   simulation-nightly:
     name: Simulator-Langlauf
@@ -152,9 +160,24 @@ jobs:
           docker run --rm "$IMAGE:latest" gen-secret
           docker run --rm "$IMAGE:latest" bench-argon2 4096 1 1
           docker run --rm --entrypoint hashdir "$IMAGE:latest" /srv/web
+      - name: embed-local (Bau, Rauchtest)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.embed-local
+          platforms: linux/amd64
+          load: true
+          tags: ghcr.io/${{ github.repository_owner }}/xlrx-drive-embed-local:latest
+          cache-from: type=gha,scope=embed-local
+          cache-to: type=gha,mode=max,scope=embed-local
+      - name: embed-local startet nicht ohne Modelle (und sagt warum)
+        run: |
+          out=$(docker run --rm ghcr.io/${{ github.repository_owner }}/xlrx-drive-embed-local:latest 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -q "Modelle fehlen"
       - name: compose-Datei prüfen
         run: |
-          for s in pg_password database_url xlrx_secret_key s3_access_key s3_secret_key; do echo test > deploy/secrets/$s; done
+          for s in pg_password database_url xlrx_secret_key s3_access_key s3_secret_key ai_key; do echo test > deploy/secrets/$s; done
           docker compose --env-file deploy/.env.example -f deploy/docker-compose.yml config -q
       - name: Veröffentlichen (nur main)
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -162,3 +185,4 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           docker push "$IMAGE:latest"
           docker push "$IMAGE:${{ github.sha }}"
+          docker push "ghcr.io/${{ github.repository_owner }}/xlrx-drive-embed-local:latest"
