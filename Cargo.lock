@@ -5430,6 +5430,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlrx-fs"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+ "tempfile",
+]
+
+[[package]]
 name = "xlrx-proto"
 version = "0.1.0"
 dependencies = [

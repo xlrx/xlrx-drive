@@ -1,0 +1,16 @@
+[package]
+name = "xlrx-fs"
+description = "Thin, safe wrapper around the file system calls the xlrx-drive client needs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustix = { version = "1.1", features = ["fs"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
