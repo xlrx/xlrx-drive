@@ -3,6 +3,7 @@
 pub mod exec;
 pub mod id;
 pub mod index;
+pub mod probe;
 pub mod scan;
 pub mod store;
 
