@@ -177,10 +177,12 @@ fn ignorierte_und_ungueltige_ordner_werden_durchlaufen() {
     // A folder renamed to a name the server ignores, with a file inside.
     fs::create_dir_all(s.p("#recycle/Altlasten")).unwrap();
     fs::write(s.p("#recycle/Altlasten/a.pdf"), b"a").unwrap();
-    // A folder whose name is not UTF-8 (an old archive on Linux).
+    // A folder whose name is not UTF-8 (an old archive on Linux; APFS refuses such names).
     let bad = s.root().join(OsStr::from_bytes(b"M\x81ller"));
-    fs::create_dir(&bad).unwrap();
-    fs::write(bad.join("Lebenslauf.pdf"), b"L").unwrap();
+    let utf8_only = fs::create_dir(&bad).is_err();
+    if !utf8_only {
+        fs::write(bad.join("Lebenslauf.pdf"), b"L").unwrap();
+    }
     let snap = s.scan(&HashSet::new(), &Later::new());
     assert!(snap.obs.is_empty(), "{:?}", names(&snap));
     let got = opaque(&snap);
@@ -193,6 +195,10 @@ fn ignorierte_und_ungueltige_ordner_werden_durchlaufen() {
         got[&PathBuf::from("#recycle/Altlasten/a.pdf")],
         OpaqueWhy::InsideOpaque
     );
+    if utf8_only {
+        assert_eq!(got.len(), 3, "{got:?}");
+        return;
+    }
     let bad_rel = PathBuf::from(OsStr::from_bytes(b"M\x81ller"));
     assert_eq!(got[&bad_rel], OpaqueWhy::NameNotSyncable);
     assert_eq!(
@@ -208,18 +214,20 @@ fn links_sonderdateien_harte_links_und_nfc_zwillinge() {
     std::os::unix::fs::symlink("ziel.txt", s.p("link")).unwrap();
     fs::create_dir(s.p("ordner")).unwrap();
     std::os::unix::fs::symlink(s.p("ordner"), s.p("ordnerlink")).unwrap();
-    rustix::fs::mknodat(
-        rustix::fs::CWD,
-        s.p("rohr"),
-        rustix::fs::FileType::Fifo,
-        rustix::fs::Mode::from_raw_mode(0o644),
-        0,
-    )
-    .unwrap();
+    // A named pipe (by the tool: rustix has no `mknodat` on Apple).
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(s.p("rohr"))
+            .status()
+            .unwrap()
+            .success()
+    );
     fs::write(s.p("hart1"), b"h").unwrap();
     fs::hard_link(s.p("hart1"), s.p("ordner/hart2")).unwrap();
     fs::write(s.p("\u{00C4}pfel"), b"nfc").unwrap();
+    // On APFS both spellings are one name: the second write replaces the first, no twins.
     fs::write(s.p("A\u{0308}pfel"), b"nfd").unwrap();
+    let one_name = fs::read_dir(s.root()).unwrap().count() == 7;
     let snap = s.scan(&HashSet::new(), &Later::new());
     let got = opaque(&snap);
     assert_eq!(got[&PathBuf::from("link")], OpaqueWhy::Symlink);
@@ -237,8 +245,14 @@ fn links_sonderdateien_harte_links_und_nfc_zwillinge() {
         .iter()
         .filter(|o| o.why == OpaqueWhy::NfcTwin)
         .count();
-    assert_eq!(twins, 2, "{:?}", snap.opaque);
-    let ok: Vec<_> = names(&snap).into_keys().collect();
+    let mut ok: Vec<_> = names(&snap).into_keys().collect();
+    if one_name {
+        assert_eq!(twins, 0, "{:?}", snap.opaque);
+        assert_eq!(ok.len(), 3, "{ok:?}");
+        ok.retain(|p| p.to_str().is_some_and(|n| n.is_ascii()));
+    } else {
+        assert_eq!(twins, 2, "{:?}", snap.opaque);
+    }
     assert_eq!(ok, vec![PathBuf::from("ordner"), PathBuf::from("ziel.txt")]);
 }
 

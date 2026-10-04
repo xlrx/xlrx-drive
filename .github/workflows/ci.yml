@@ -37,11 +37,47 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Client-Crates für macOS prüfen (ohne C-Abhängigkeiten, ADR 0002)
         run: cargo clippy --target aarch64-apple-darwin -p xlrx-fs -p xlrx-sync -p xlrx-proto -p xlrx-wire -- -D warnings
+      - name: Kleines Dateisystem für den Test „Platte voll“ (Client)
+        run: sudo mkdir -p /mnt/klein && sudo mount -t tmpfs -o size=4m tmpfs /mnt/klein && sudo chmod 1777 /mnt/klein
       - name: Tests (inkl. 1000 Simulator-Seeds je Variante, Server gegen PostgreSQL 18)
         run: cargo test --workspace
         env:
           XLRX_SIM_SEEDS: "1000"
           XLRX_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+          XLRX_TEST_SMALL_FS: /mnt/klein
+
+  apple:
+    name: Mac-Client-Kern auf APFS (macOS, ADR 0002)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.0"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy -p xlrx-fs -p xlrx-client --all-targets -- -D warnings
+      - name: Tests auf APFS (Systemvolume, ohne Groß-/Kleinschreibung)
+        run: cargo test -p xlrx-fs -p xlrx-client -p xlrx-proto -p xlrx-sync
+      - name: Abbilder anlegen (APFS mit Groß-/Kleinschreibung, HFS+, exFAT)
+        run: |
+          hdiutil create -size 256m -fs "Case-sensitive APFS" -volname XlrxCS "$RUNNER_TEMP/cs.dmg"
+          hdiutil create -size 64m -fs HFS+ -volname XlrxHFS "$RUNNER_TEMP/hfs.dmg"
+          hdiutil create -size 64m -fs ExFAT -volname XlrxExFAT "$RUNNER_TEMP/exfat.dmg"
+          for i in cs hfs exfat; do hdiutil attach -nobrowse "$RUNNER_TEMP/$i.dmg"; done
+      - name: Tests auf APFS mit Groß-/Kleinschreibung
+        run: cargo test -p xlrx-fs -p xlrx-client
+        env:
+          TMPDIR: /Volumes/XlrxCS/
+      - name: Probe nimmt APFS an und lehnt HFS+ und exFAT ab
+        run: |
+          cargo build -q -p xlrx-client --example probe
+          probe=target/debug/examples/probe
+          for d in "$RUNNER_TEMP/Drive" /Volumes/XlrxCS/Drive /Volumes/XlrxHFS/Drive /Volumes/XlrxExFAT/Drive; do mkdir -p "$d"; done
+          $probe "$RUNNER_TEMP/Drive" | tee /dev/stderr | grep -q "fs: Apfs, case_insensitive: true"
+          $probe /Volumes/XlrxCS/Drive | tee /dev/stderr | grep -q "fs: Apfs, case_insensitive: false"
+          if $probe /Volumes/XlrxHFS/Drive; then echo "HFS+ angenommen"; exit 1; fi
+          if $probe /Volumes/XlrxExFAT/Drive; then echo "exFAT angenommen"; exit 1; fi
 
   web:
     name: Web (Typprüfung, Build, Ende-zu-Ende im Browser)

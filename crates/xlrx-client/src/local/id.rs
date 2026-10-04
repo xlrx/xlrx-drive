@@ -73,6 +73,35 @@ mod tests {
         }
     }
 
+    /// ext4 hands out a freed inode number again at once: the new file must not inherit the
+    /// old one's identity (the engine would take it for the old file, changed).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inode_wiederverwendung_neue_identitaet() {
+        let t = tempfile::tempdir().unwrap();
+        let d = Dir::open(t.path()).unwrap();
+        if d.fs_type().unwrap() != xlrx_fs::FsType::Ext4 {
+            // tmpfs and Btrfs do not reuse inode numbers soon: nothing to observe.
+            return;
+        }
+        d.create_new(OsStr::new("alt")).unwrap();
+        let old = d.stat(OsStr::new("alt")).unwrap();
+        assert!(old.btime_ns.is_some(), "ext4 kennt die Geburtszeit");
+        d.unlink(OsStr::new("alt")).unwrap();
+        let mut reused = None;
+        for i in 0..1000 {
+            let n = format!("neu{i}");
+            d.create_new(OsStr::new(&n)).unwrap();
+            let m = d.stat(OsStr::new(&n)).unwrap();
+            if m.ino == old.ino {
+                reused = Some(m);
+                break;
+            }
+        }
+        let new = reused.expect("ext4 hat die Inode-Nummer nicht wiederverwendet");
+        assert_ne!(local_id(&new), local_id(&old));
+    }
+
     #[cfg(not(target_vendor = "apple"))]
     #[test]
     fn nie_gone() {

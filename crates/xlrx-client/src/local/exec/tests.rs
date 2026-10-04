@@ -79,6 +79,16 @@ impl Setup {
         }
     }
 
+    /// Like [`Setup::new`], with the sync folder below `base` (the local store stays outside).
+    fn below(base: &Path) -> (Self, tempfile::TempDir) {
+        let small = tempfile::tempdir_in(base).unwrap();
+        let s = Self {
+            root: small.path().to_owned(),
+            ..Self::new()
+        };
+        (s, small)
+    }
+
     fn root(&self) -> PathBuf {
         self.root.clone()
     }
@@ -473,6 +483,8 @@ fn ordner_loeschen_mit_ds_store() {
     let s = Setup::new();
     fs::create_dir(s.p("leer")).unwrap();
     fs::write(s.p("leer/.DS_Store"), b"finder").unwrap();
+    // Two junk files in one tick: each gets its own trash name.
+    fs::write(s.p("leer/._foto.jpg"), b"apple").unwrap();
     fs::create_dir(s.p("voll")).unwrap();
     fs::write(s.p("voll/wichtig.txt"), b"w").unwrap();
     fs::create_dir(s.p("voll/.Trashes")).unwrap();
@@ -497,9 +509,104 @@ fn ordner_loeschen_mit_ds_store() {
         LocalResult::Precondition
     );
     assert!(s.p("voll/wichtig.txt").exists() && s.p("voll/.Trashes").is_dir());
-    let (_, trash) = s.inventory();
-    assert_eq!(trash, vec![b"finder".to_vec()]);
-    assert_eq!(s.store.trash().unwrap()[0].reason, TrashReason::Junk);
+    let (_, mut trash) = s.inventory();
+    trash.sort();
+    assert_eq!(trash, vec![b"apple".to_vec(), b"finder".to_vec()]);
+    let book = s.store.trash().unwrap();
+    assert_eq!(book.len(), 2);
+    assert!(book.iter().all(|t| t.reason == TrashReason::Junk));
+}
+
+#[test]
+fn liegengebliebene_download_temps_in_den_papierkorb() {
+    let s = Setup::new();
+    fs::create_dir(s.p("a")).unwrap();
+    fs::write(s.p("a/.xlrx-dl-7-00000000beef"), b"halb").unwrap();
+    fs::write(s.p(".xlrx-dl-8-00000000cafe"), b"verknuepft").unwrap();
+    fs::write(s.p(".xlrx-dl-9-0000000f00d0"), b"laeuft").unwrap();
+    fs::write(s.p("echt.txt"), b"e").unwrap();
+    let v = s.view();
+    // A linked file renamed to a temporary name, and one an intent still explains: both stay.
+    let linked = HashSet::from([v.obs[&PathBuf::from(".xlrx-dl-8-00000000cafe")].0]);
+    s.store
+        .add_intent(&Intent {
+            id: 0,
+            op_id: 9,
+            kind: IntentKind::Download,
+            dir_path: Vec::new(),
+            dir_ino: 0,
+            target_name: b"x".to_vec(),
+            temp_name: Some(b".xlrx-dl-9-0000000f00d0".to_vec()),
+            temp_ino: None,
+            orig_ino: None,
+            trash_name: None,
+            expect: None,
+            phase: Phase::Writing,
+            created_ms: 0,
+        })
+        .unwrap();
+    let x = s.exec(&v, &linked);
+    assert_eq!(x.sweep_temps(), Ok(1));
+    let (files, trash) = s.inventory();
+    assert_eq!(
+        files.keys().collect::<Vec<_>>(),
+        vec![
+            ".xlrx-dl-8-00000000cafe",
+            ".xlrx-dl-9-0000000f00d0",
+            "echt.txt"
+        ]
+    );
+    // Never removed: kept in the trash with where it lay.
+    assert_eq!(trash, vec![b"halb".to_vec()]);
+    let book = s.store.trash().unwrap();
+    assert_eq!(book[0].reason, TrashReason::Recovered);
+    assert_eq!(book[0].orig_path, b"a/.xlrx-dl-7-00000000beef");
+    // Already gone: the old index finds nothing to move.
+    assert_eq!(x.sweep_temps(), Ok(0));
+}
+
+/// A full disk while downloading leaves nothing behind (no half file keeps the disk full, no
+/// intent). Needs a small volume: `XLRX_TEST_SMALL_FS` names a writable directory on one with
+/// a few MiB (CI: a 4 MiB tmpfs); without it the test checks nothing.
+#[test]
+fn enospc_beim_download() {
+    let Some(base) = std::env::var_os("XLRX_TEST_SMALL_FS") else {
+        eprintln!("XLRX_TEST_SMALL_FS nicht gesetzt: übersprungen");
+        return;
+    };
+    let (s, _small) = Setup::below(Path::new(&base));
+    fs::create_dir(s.p("Ziel")).unwrap();
+    let v = s.view();
+    let linked = HashSet::new();
+    let x = s.exec(&v, &linked);
+    let dir = v.obs[&PathBuf::from("Ziel")].0;
+    let big: Vec<u8> = (0..16usize << 20).map(|i| (i * 7 % 251) as u8).collect();
+    let mut src = Source::default();
+    src.0.insert(NodeId(9), big.clone());
+    src.0.insert(NodeId(10), b"klein".to_vec());
+    let download = |n: &str, node: u64, c: FileContent| LocalOp::Download {
+        parent: dir,
+        name: name(n),
+        node: NodeId(node),
+        node_parent: NodeId(1),
+        rev: Rev(1),
+        content: c,
+    };
+    let (r, why) = x.run_explained(OpId(3), &download("gross.bin", 9, content(&big)), &mut src);
+    assert_eq!(r, LocalResult::Error);
+    let why = why.unwrap();
+    assert!(why.contains("(os error 28)"), "{why}");
+    let (files, trash) = s.inventory();
+    assert!(files.is_empty() && trash.is_empty(), "{files:?}");
+    assert!(s.store.intents().unwrap().is_empty());
+    // The space is free again: a small file fits.
+    let r = x.run(
+        OpId(4),
+        &download("klein.txt", 10, content(b"klein")),
+        &mut src,
+    );
+    assert!(matches!(r, LocalResult::Done { .. }), "{r:?}");
+    assert_eq!(fs::read(s.p("Ziel/klein.txt")).unwrap(), b"klein");
 }
 
 /// Dies (panics) at one step of the protocol.
@@ -623,11 +730,22 @@ fn fremde_datei_unter_temp_namen_wird_nie_entfernt() {
     assert_eq!(r, LocalResult::Error);
     let (files, _) = s.inventory();
     assert_eq!(files["plan.txt"], b"auch geaendert");
-    // Not proven to be the client's own: kept (the scan reports it, a sweep moves it to the trash).
+    // Not proven to be the client's own: kept.
     assert!(
         files
             .iter()
             .any(|(k, v)| k.starts_with(".xlrx-dl-") && v.as_slice() == b"fremde Daten"),
         "{files:?}"
     );
+    // Its intent is still open, so the sweep leaves it to `recover`, which keeps it in the trash.
+    let v = s.view();
+    let x = s.exec(&v, &linked);
+    assert_eq!(x.sweep_temps(), Ok(0));
+    assert_eq!(x.recover().unwrap().trashed, 1);
+    let (files, trash) = s.inventory();
+    assert!(
+        !files.keys().any(|k| k.starts_with(".xlrx-dl-")),
+        "{files:?}"
+    );
+    assert!(trash.contains(&b"fremde Daten".to_vec()));
 }

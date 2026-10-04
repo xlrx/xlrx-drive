@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use xlrx_chunk::{Chunker, RACY_WINDOW_NS};
 use xlrx_fs::{Dir, FileKind, Meta, RenameMode};
 use xlrx_proto::name::{CLIENT_DIR, DOWNLOAD_TEMP_PREFIX, ignored};
-use xlrx_proto::{FileContent, Name, NodeId};
+use xlrx_proto::{FileContent, Kind, Name, NodeId};
 use xlrx_sync::{Expected, Fingerprint, LocalId, LocalOp, LocalResult, OpId};
 
 use super::id::local_id;
@@ -130,6 +130,29 @@ struct Tee<'a> {
     pos: u64,
     buf: Vec<u8>,
     at: usize,
+}
+
+/// Fetches the content into `file` while hashing it, then makes it durable; returns the sealed
+/// metadata and the content as written.
+fn fill(
+    file: &File,
+    src: &mut dyn ContentSource,
+    node: NodeId,
+    size: u64,
+) -> io::Result<(Meta, FileContent)> {
+    let tee = Tee {
+        src,
+        node,
+        file,
+        size,
+        pos: 0,
+        buf: Vec::new(),
+        at: 0,
+    };
+    let digest = Chunker::new().digest_reader(tee)?;
+    // A full disk may only show here (delayed allocation).
+    xlrx_fs::sync_file(file)?;
+    Ok((xlrx_fs::meta_of(file)?, digest.content))
 }
 
 impl Read for Tee<'_> {
@@ -370,12 +393,12 @@ impl Executor<'_> {
         Ok(true)
     }
 
-    /// A name for the client's temporary file next to the target.
+    /// A name for the client's temporary file next to the target: `.xlrx-dl-<opid>-<random>`.
     fn temp_name(&self, id: OpId) -> OsString {
         OsString::from(format!(
-            "{DOWNLOAD_TEMP_PREFIX}{}-{:x}",
+            "{DOWNLOAD_TEMP_PREFIX}{}-{:012x}",
             id.0,
-            self.clock.now_ns() as u64 & 0xffff_ffff
+            rand::random::<u64>() & 0xffff_ffff_ffff
         ))
     }
 
@@ -407,10 +430,11 @@ impl Executor<'_> {
             }
             dir = dir.open_dir(OsStr::new(part))?;
         }
+        // Random, not from the clock: several files can go to the trash within one tick.
         let name = PathBuf::from(&day).join(format!(
-            "{}-{:x}",
+            "{}-{:012x}",
             id.0,
-            self.clock.now_ns() as u64 & 0xffff_ffff_ffff
+            rand::random::<u64>() & 0xffff_ffff_ffff
         ));
         Ok((dir, name))
     }
@@ -480,31 +504,26 @@ impl Executor<'_> {
         src: &mut dyn ContentSource,
     ) -> Result<(File, Meta, FileContent), Fail> {
         intent.id = self.store.add_intent(intent)?;
-        let file = dir.create_new(temp)?;
-        let meta = xlrx_fs::meta_of(&file)?;
-        intent.temp_ino = Some(meta.ino);
-        self.store.update_intent(intent)?;
-        let tee = Tee {
-            src,
-            node,
-            file: &file,
-            size,
-            pos: 0,
-            buf: Vec::new(),
-            at: 0,
-        };
-        let digest = Chunker::new().digest_reader(tee);
-        let digest = match digest {
-            Ok(d) => d,
+        let file = match dir.create_new(temp) {
+            Ok(f) => f,
             Err(e) => {
-                self.remove_own(dir, temp, meta.ino)?;
                 self.store.remove_intent(intent.id)?;
                 return Err(e.into());
             }
         };
-        xlrx_fs::sync_file(&file)?;
-        let sealed = xlrx_fs::meta_of(&file)?;
-        Ok((file, sealed, digest.content))
+        let meta = xlrx_fs::meta_of(&file)?;
+        intent.temp_ino = Some(meta.ino);
+        self.store.update_intent(intent)?;
+        match fill(&file, src, node, size) {
+            Ok((sealed, content)) => Ok((file, sealed, content)),
+            Err(e) => {
+                // Nothing half-written stays behind (a full disk would stay full).
+                drop(file);
+                self.remove_own(dir, temp, meta.ino)?;
+                self.store.remove_intent(intent.id)?;
+                Err(e.into())
+            }
+        }
     }
 
     fn download(
@@ -907,6 +926,72 @@ impl Executor<'_> {
         }
         r.adopted = self.adopt_trash().map_err(|f| format!("{f:?}"))?;
         Ok(r)
+    }
+
+    /// Download temporaries that no intent explains go to the trash, never removed (ADR 0002
+    /// §7.6): left behind where a folder with an intent moved or vanished before
+    /// [`Executor::recover`] ran. Runs after `recover` and a full scan, between operations;
+    /// linked files are left alone. Returns how many were moved.
+    pub fn sweep_temps(&self) -> Result<usize, String> {
+        let pending: HashSet<Vec<u8>> = self
+            .store
+            .intents()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter_map(|i| i.temp_name)
+            .collect();
+        let mut temps: Vec<(LocalId, LocalId, OsString)> = self
+            .index
+            .iter()
+            .filter(|(id, e)| {
+                e.kind == Kind::File
+                    && e.raw
+                        .as_bytes()
+                        .starts_with(DOWNLOAD_TEMP_PREFIX.as_bytes())
+                    && !pending.contains(e.raw.as_bytes())
+                    && !self.linked.contains(id)
+            })
+            .map(|(id, e)| (id, e.parent, e.raw.clone()))
+            .collect();
+        temps.sort();
+        let mut moved = 0;
+        for (id, parent, raw) in temps {
+            match self.sweep_one(id, parent, &raw) {
+                Ok(true) => moved += 1,
+                // Moved or changed since the scan: the next scan reports it again.
+                Ok(false) | Err(Fail::Precondition) => {}
+                Err(Fail::Error(e)) => return Err(e),
+            }
+        }
+        Ok(moved)
+    }
+
+    fn sweep_one(&self, id: LocalId, parent: LocalId, raw: &OsStr) -> Result<bool, Fail> {
+        let (dir, dir_path) = self.open(parent)?;
+        let m = match dir.stat(raw) {
+            Ok(m) => m,
+            Err(e) if missing(&e) => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
+        if m.kind != FileKind::File || local_id(&m) != id {
+            return Ok(false);
+        }
+        let (trash, trash_name) = self.trash(OpId(0))?;
+        let leaf = trash_name.file_name().expect("Name").to_owned();
+        dir.rename(raw, &trash, &leaf, RenameMode::NoReplace)?;
+        trash.sync()?;
+        dir.sync()?;
+        self.store.add_trash(&TrashItem {
+            id: 0,
+            trash_name: trash_name.as_os_str().as_bytes().to_vec(),
+            orig_path: dir_path.join(raw).as_os_str().as_bytes().to_vec(),
+            ino: Some(m.ino),
+            node: None,
+            content: None,
+            reason: TrashReason::Recovered,
+            trashed_ms: self.now_ms(),
+        })?;
+        Ok(true)
     }
 
     /// Opens a directory by its recorded path, if it is still the recorded one.

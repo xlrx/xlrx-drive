@@ -274,14 +274,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ext4_wird_vermessen() {
+    fn volume_wird_vermessen() {
         let t = tempfile::tempdir().unwrap();
         let root = t.path().join("Drive");
         fs::create_dir(&root).unwrap();
         match probe(&root) {
             Ok(caps) => {
-                // ext4 without casefold: names are exact, nanosecond times.
-                assert!(!caps.case_insensitive && !caps.normalization_insensitive);
+                match caps.fs {
+                    // ext4 without casefold: names are exact.
+                    FsType::Ext4 => {
+                        assert!(!caps.case_insensitive && !caps.normalization_insensitive)
+                    }
+                    // APFS treats NFC and NFD as one name; case depends on the variant.
+                    FsType::Apfs => assert!(caps.normalization_insensitive),
+                    _ => {}
+                }
                 assert_eq!(caps.granularity_ns, 1);
                 assert_eq!(caps.window_ns, RACY_WINDOW_NS);
                 // The probe leaves nothing behind but the client directory.
@@ -310,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn markierung_erkennt_ersetzten_ordner() {
+    fn wurzel_entfernt_ersetzt_ausgehaengt() {
         let t = tempfile::tempdir().unwrap();
         let root = t.path().join("Drive");
         fs::create_dir(&root).unwrap();
@@ -341,6 +348,20 @@ mod tests {
             check_marker(&root, &other),
             Err(RootProblem::Replaced)
         ));
+        check_marker(&root, &m).unwrap();
+        // Unmounted: the mount point stays as an empty folder (Linux) or vanishes (macOS).
+        fs::rename(&root, t.path().join("alt")).unwrap();
+        fs::create_dir(&root).unwrap();
+        assert!(matches!(
+            check_marker(&root, &m),
+            Err(RootProblem::Replaced)
+        ));
+        fs::remove_dir(&root).unwrap();
+        // A file in its place.
+        fs::write(&root, b"x").unwrap();
+        assert!(matches!(check_marker(&root, &m), Err(RootProblem::Gone(_))));
+        fs::remove_file(&root).unwrap();
+        fs::rename(t.path().join("alt"), &root).unwrap();
         check_marker(&root, &m).unwrap();
     }
 }

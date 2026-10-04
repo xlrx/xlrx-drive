@@ -46,6 +46,10 @@ impl LocalIndex {
         self.entries.get(&id)
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (LocalId, &IndexEntry)> {
+        self.entries.iter().map(|(id, e)| (*id, e))
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }

@@ -10,6 +10,16 @@ fn errno(e: &io::Error) -> Option<i32> {
     e.raw_os_error()
 }
 
+/// A named pipe (by the tool: rustix has no `mknodat` on Apple).
+fn mkfifo(path: &std::path::Path) {
+    let ok = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "mkfifo {}", path.display());
+}
+
 fn setup() -> (tempfile::TempDir, Dir) {
     let t = tempfile::tempdir().unwrap();
     let d = Dir::open(t.path()).unwrap();
@@ -101,8 +111,8 @@ fn keine_symbolischen_links_folgen() {
 
 #[test]
 fn fifo_blockiert_nicht() {
-    let (_t, d) = setup();
-    rustix::fs::mknodat(&d.fd, "rohr", FileType::Fifo, Mode::from_raw_mode(0o644), 0).unwrap();
+    let (t, d) = setup();
+    mkfifo(&t.path().join("rohr"));
     assert_eq!(d.stat(os("rohr")).unwrap().kind, FileKind::Other);
     // Opening returns at once (no writer needed); the kind tells the caller to skip it.
     let f = d.open_file(os("rohr")).unwrap();
