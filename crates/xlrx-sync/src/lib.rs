@@ -16,7 +16,7 @@ mod synced;
 mod tree;
 mod types;
 
-pub use engine::{DOWNLOAD_TEMP_PREFIX, Engine, State, TEMP_PREFIX};
+pub use engine::{Engine, State};
 pub use ops::{Expected, LocalOp, LocalResult, Op, Origin, Reject, RemoteOp, RemoteResult};
 pub use synced::Synced;
 pub use tree::{Tree, TreeEntry};
@@ -24,3 +24,4 @@ pub use types::{
     Config, Fingerprint, LocalEntry, LocalId, LocalObservation, OpId, RemoteChange, RemoteEntry,
     SyncedEntry,
 };
+pub use xlrx_proto::name::{DOWNLOAD_TEMP_PREFIX, TEMP_PREFIX};

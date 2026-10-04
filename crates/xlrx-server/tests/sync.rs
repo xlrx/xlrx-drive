@@ -62,7 +62,6 @@ fn engine(root_node: i64) -> Engine {
         remote_root: NodeId(root_node as u64),
         device: "Test".into(),
         local_case_insensitive: true,
-        max_unconfirmed_deletes: 100,
     })
 }
 

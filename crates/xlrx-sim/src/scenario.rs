@@ -80,7 +80,6 @@ impl World {
                     remote_root: server.root,
                     device: device.clone(),
                     local_case_insensitive: case_insensitive,
-                    max_unconfirmed_deletes: usize::MAX,
                 });
                 let persisted = engine.state().clone();
                 WorldClient {

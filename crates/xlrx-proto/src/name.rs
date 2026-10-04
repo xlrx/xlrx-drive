@@ -1,3 +1,7 @@
+//! File names: validation and normalization, and the naming rules server and clients share
+//! (which names never become nodes, the prefixes of temporary files).
+
+use std::ffi::OsStr;
 use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -5,6 +9,88 @@ use unicode_normalization::UnicodeNormalization;
 
 /// Maximum length of a name in bytes (UTF-8). Matches the limit of APFS, Btrfs and ext4.
 pub const MAX_NAME_BYTES: usize = 255;
+
+/// Prefix of the temporary yield names a client uses to break move cycles (ADR 0001). These are
+/// ordinary synced names: they may reach the server and are renamed back later.
+pub const TEMP_PREFIX: &str = ".xlrx-tmp-";
+
+/// Prefix of the files a client downloads into before moving them into place. Never synced: if
+/// one is left behind after a crash, it is never uploaded (the client's executor deals with it).
+pub const DOWNLOAD_TEMP_PREFIX: &str = ".xlrx-dl-";
+
+/// Prefix of the server's own short-lived files next to user files (atomic writes, PLAN 4.3).
+pub const SERVER_TEMP_PREFIX: &str = ".xlrx-srv-";
+
+/// Directory of a client inside its sync folder (marker, trash, locks; ADR 0002). Never synced.
+pub const CLIENT_DIR: &str = ".xlrx-client";
+
+/// Names that never become nodes: Synology helper directories, OS metadata, lock files and our
+/// own temporary and client files (PLAN 4.4). The server's scanner skips them, and no API (sync
+/// included) creates a node with such a name. `TEMP_PREFIX` is deliberately not among them.
+pub fn ignored(name: &str) -> bool {
+    matches!(
+        name,
+        "@eaDir"
+            | "#recycle"
+            | "#snapshot"
+            | "@tmp"
+            | ".SynologyWorkingDirectory"
+            | ".DS_Store"
+            | "Thumbs.db"
+            | "desktop.ini"
+            | ".Spotlight-V100"
+            | ".Trashes"
+            | ".fseventsd"
+            | CLIENT_DIR
+    ) || name.starts_with("._")
+        || name.starts_with("~$")
+        || name.starts_with(".~lock.")
+        || name.starts_with(SERVER_TEMP_PREFIX)
+        || name.starts_with(DOWNLOAD_TEMP_PREFIX)
+}
+
+/// Why a name chosen by a person or a client is refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum NameRefused {
+    #[error("Der Name enthält Steuerzeichen.")]
+    ControlChar,
+    #[error(transparent)]
+    Invalid(#[from] NameError),
+    #[error("Dieser Name ist für Systemdateien reserviert.")]
+    Reserved,
+}
+
+/// A name typed by a person (browser, uploads, links): surrounding spaces are removed, control
+/// characters and names from [`ignored`] are refused.
+pub fn valid_name(raw: &str) -> Result<Name, NameRefused> {
+    let trimmed = raw.trim();
+    if trimmed.chars().any(char::is_control) {
+        return Err(NameRefused::ControlChar);
+    }
+    let name = Name::new(trimmed)?;
+    if ignored(name.as_str()) {
+        return Err(NameRefused::Reserved);
+    }
+    Ok(name)
+}
+
+/// A name sent by a sync client: taken exactly as it is (only NFC), because it mirrors a name on
+/// the client's disk. Accepts what the server's scanner accepts from disk — leading or trailing
+/// spaces and control characters included — and refuses only invalid names and [`ignored`] ones.
+pub fn valid_sync_name(raw: &str) -> Result<Name, NameRefused> {
+    let name = Name::new(raw)?;
+    if ignored(name.as_str()) {
+        return Err(NameRefused::Reserved);
+    }
+    Ok(name)
+}
+
+/// Whether a name found on a client's disk can be synced at all: valid UTF-8 and a valid [`Name`]
+/// (at most [`MAX_NAME_BYTES`] after NFC). Which names a client leaves out on purpose
+/// ([`CLIENT_DIR`], [`ignored`]) is a separate question (ADR 0002).
+pub fn syncable(raw: &OsStr) -> bool {
+    raw.to_str().is_some_and(|s| Name::new(s).is_ok())
+}
 
 /// A single file or directory name, always in Unicode NFC.
 ///
@@ -203,6 +289,85 @@ mod tests {
         let b = n.with_suffix(&format!("{long} 2"));
         assert!(a.as_str().len() <= MAX_NAME_BYTES);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn ignore_list() {
+        for n in [
+            "@eaDir",
+            ".DS_Store",
+            "._Bericht.pdf",
+            "~$Bericht.docx",
+            ".xlrx-srv-1",
+            ".xlrx-dl-2",
+            ".xlrx-client",
+        ] {
+            assert!(ignored(n), "{n}");
+        }
+        for n in [
+            "Bericht.pdf",
+            ".xlrx-tmp-Mac-1~a",
+            ".bashrc",
+            "#1 Liste",
+            ".xlrx-clients",
+        ] {
+            assert!(!ignored(n), "{n}");
+        }
+    }
+
+    #[test]
+    fn gueltige_namen_wie_bisher() {
+        assert_eq!(
+            valid_name("  Bericht.pdf ").unwrap().as_str(),
+            "Bericht.pdf"
+        );
+        assert_eq!(valid_name("a\u{1}b"), Err(NameRefused::ControlChar));
+        assert_eq!(valid_name(".DS_Store"), Err(NameRefused::Reserved));
+        assert_eq!(
+            valid_name("  "),
+            Err(NameRefused::Invalid(NameError::Empty))
+        );
+        // The messages people see stay the same as before the move into this crate.
+        assert_eq!(
+            valid_name("a/b").unwrap_err().to_string(),
+            NameError::InvalidChar.to_string()
+        );
+        assert_eq!(
+            NameRefused::Reserved.to_string(),
+            "Dieser Name ist für Systemdateien reserviert."
+        );
+    }
+
+    #[test]
+    fn sync_namen_exakt() {
+        assert_eq!(valid_sync_name(" Wichtig").unwrap().as_str(), " Wichtig");
+        assert_eq!(valid_sync_name("Rechnung ").unwrap().as_str(), "Rechnung ");
+        assert_eq!(valid_sync_name("Icon\r").unwrap().as_str(), "Icon\r");
+        assert_eq!(
+            valid_sync_name("A\u{0308}rger").unwrap().as_str(),
+            "\u{00C4}rger"
+        );
+        assert_eq!(valid_sync_name(".xlrx-dl-1"), Err(NameRefused::Reserved));
+        assert!(valid_sync_name(".xlrx-tmp-Mac-1~a").is_ok());
+        assert_eq!(
+            valid_sync_name(""),
+            Err(NameRefused::Invalid(NameError::Empty))
+        );
+    }
+
+    #[test]
+    fn syncable_regeln() {
+        assert!(syncable(OsStr::new(" Wichtig")));
+        assert!(syncable(OsStr::new("Icon\r")));
+        assert!(!syncable(OsStr::new("a/b")));
+        assert!(!syncable(OsStr::new(&"x".repeat(256))));
+        // 128 × "Ä" in NFD is 384 bytes on disk but 256 bytes in NFC: too long for the server.
+        assert!(!syncable(OsStr::new(&"A\u{0308}".repeat(128))));
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert!(!syncable(OsStr::from_bytes(b"M\x81ller")));
+        }
     }
 
     proptest! {

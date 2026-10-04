@@ -207,17 +207,9 @@ pub async fn notify(
 }
 
 pub(crate) fn hex32(s: &str) -> ApiResult<[u8; 32]> {
-    let mut out = [0u8; 32];
-    if s.len() != 64 {
-        return Err(ApiError::bad("Ungültiger Hash."));
-    }
-    for (i, b) in out.iter_mut().enumerate() {
-        *b = s
-            .get(i * 2..i * 2 + 2)
-            .and_then(|x| u8::from_str_radix(x, 16).ok())
-            .ok_or_else(|| ApiError::bad("Ungültiger Hash."))?;
-    }
-    Ok(out)
+    ContentHash::from_hex(s)
+        .map(|h| h.0)
+        .ok_or_else(|| ApiError::bad("Ungültiger Hash."))
 }
 
 pub(crate) fn hex(h: &[u8]) -> String {

@@ -6,32 +6,9 @@ use time::OffsetDateTime;
 use xlrx_chunk::{FileId, Fingerprint, fingerprint_of};
 use xlrx_proto::Name;
 
-/// Prefix of the server's own short-lived files next to user files (atomic writes, PLAN 4.3).
-/// Distinct from the clients' `.xlrx-tmp-` yield names, which are regular synced names.
-pub const SERVER_TEMP_PREFIX: &str = ".xlrx-srv-";
-
-/// Names that never become nodes: Synology helper directories, OS metadata, lock files and our
-/// own temporary files (PLAN 4.4).
-pub fn ignored(name: &str) -> bool {
-    matches!(
-        name,
-        "@eaDir"
-            | "#recycle"
-            | "#snapshot"
-            | "@tmp"
-            | ".SynologyWorkingDirectory"
-            | ".DS_Store"
-            | "Thumbs.db"
-            | "desktop.ini"
-            | ".Spotlight-V100"
-            | ".Trashes"
-            | ".fseventsd"
-    ) || name.starts_with("._")
-        || name.starts_with("~$")
-        || name.starts_with(".~lock.")
-        || name.starts_with(SERVER_TEMP_PREFIX)
-        || name.starts_with(xlrx_sync::DOWNLOAD_TEMP_PREFIX)
-}
+/// Names that never become nodes and the prefix of the server's own temporary files: one
+/// definition for server and clients (`xlrx_proto::name`, PLAN 4.4).
+pub use xlrx_proto::name::{SERVER_TEMP_PREFIX, ignored};
 
 /// An entry found on disk.
 #[derive(Clone, Debug)]
@@ -137,26 +114,4 @@ pub fn walk(root: &Path, start: &Path, recursive: bool) -> std::io::Result<Walk>
         }
     }
     Ok(out)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ignore_list() {
-        for n in [
-            "@eaDir",
-            ".DS_Store",
-            "._Bericht.pdf",
-            "~$Bericht.docx",
-            ".xlrx-srv-1",
-            ".xlrx-dl-2",
-        ] {
-            assert!(ignored(n), "{n}");
-        }
-        for n in ["Bericht.pdf", ".xlrx-tmp-Mac-1~a", ".bashrc", "#1 Liste"] {
-            assert!(!ignored(n), "{n}");
-        }
-    }
 }

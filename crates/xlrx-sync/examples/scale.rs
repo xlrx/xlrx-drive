@@ -88,7 +88,6 @@ fn main() {
         remote_root: root,
         device: "Mac".into(),
         local_case_insensitive: true,
-        max_unconfirmed_deletes: usize::MAX,
     });
     let t = Instant::now();
     e.on_remote_changes(remote, Seq(1));

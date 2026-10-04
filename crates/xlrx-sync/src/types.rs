@@ -120,6 +120,4 @@ pub struct Config {
     pub device: String,
     /// Is the local file system case-insensitive (APFS default)?
     pub local_case_insensitive: bool,
-    /// More deletions than this at once are only sent to the server after confirmation.
-    pub max_unconfirmed_deletes: usize,
 }

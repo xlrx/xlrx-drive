@@ -30,12 +30,9 @@ use crate::types::{
 /// Longest chain that is followed when searching for swap cycles.
 const MAX_CHAIN: usize = 64;
 
-/// Prefix of temporary yield names.
-pub const TEMP_PREFIX: &str = ".xlrx-tmp-";
-
-/// Prefix of the temporary files the executor downloads into before swapping them into place.
-/// If one is left behind after a crash, it is never uploaded (the executor cleans it up).
-pub const DOWNLOAD_TEMP_PREFIX: &str = ".xlrx-dl-";
+// Prefixes of temporary yield names and of download temporaries (defined with the other naming
+// rules in `xlrx_proto::name`, re-exported by this crate).
+use xlrx_proto::name::{DOWNLOAD_TEMP_PREFIX, TEMP_PREFIX};
 
 /// Home name of a temporary yield name (the part after the first "~"; the device name in the
 /// prefix never contains "~"). If the home name was truncated when yielding, the truncated

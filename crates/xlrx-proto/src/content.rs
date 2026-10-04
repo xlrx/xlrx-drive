@@ -16,6 +16,24 @@ impl ContentHash {
         }
         s
     }
+
+    /// Parses the hex representation: exactly 64 hex digits, upper or lower case.
+    pub fn from_hex(s: &str) -> Option<Self> {
+        let b = s.as_bytes();
+        if b.len() != 64 {
+            return None;
+        }
+        let digit = |c: u8| {
+            char::from(c)
+                .to_digit(16)
+                .and_then(|d| u8::try_from(d).ok())
+        };
+        let mut out = [0u8; 32];
+        for (i, o) in out.iter_mut().enumerate() {
+            *o = (digit(b[2 * i])? << 4) | digit(b[2 * i + 1])?;
+        }
+        Some(Self(out))
+    }
 }
 
 impl fmt::Debug for ContentHash {
@@ -35,5 +53,28 @@ pub struct FileContent {
 impl fmt::Debug for FileContent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}/{}B", self.hash, self.size)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_hin_und_zurueck() {
+        let mut h = [0u8; 32];
+        for (i, b) in h.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(37) ^ 0xa5;
+        }
+        let hash = ContentHash(h);
+        let hex = hash.to_hex();
+        assert_eq!(ContentHash::from_hex(&hex), Some(hash));
+        assert_eq!(ContentHash::from_hex(&hex.to_uppercase()), Some(hash));
+        assert_eq!(ContentHash::from_hex(&hex[1..]), None);
+        assert_eq!(ContentHash::from_hex(&format!("{hex}0")), None);
+        assert_eq!(ContentHash::from_hex(&format!("+{}", &hex[1..])), None);
+        assert_eq!(ContentHash::from_hex(&format!("g{}", &hex[1..])), None);
+        // Multi-byte characters never count as hex digits (and never split a char).
+        assert_eq!(ContentHash::from_hex(&format!("ä{}", &hex[2..])), None);
     }
 }

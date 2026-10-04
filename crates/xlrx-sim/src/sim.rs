@@ -159,7 +159,6 @@ impl Sim {
                     remote_root: server.root,
                     device: device.clone(),
                     local_case_insensitive: cfg.case_insensitive_local,
-                    max_unconfirmed_deletes: usize::MAX,
                 };
                 let engine = Engine::new(config);
                 let persisted = engine.state().clone();

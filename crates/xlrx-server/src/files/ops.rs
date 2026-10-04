@@ -19,7 +19,7 @@ use xlrx_sync::Reject;
 
 use super::access::{self, Role};
 use super::db::{self, NODE_COLS, NodeRow, OnDisk, RootRow, Source};
-use super::fs::{ignored, walk};
+use super::fs::walk;
 use super::store::{self, Moved};
 use super::{roots, scan};
 use crate::error::{ApiError, ApiResult};
@@ -64,19 +64,11 @@ pub(super) async fn blocking<T: Send + 'static>(
         .map_err(|e| ApiError::Internal(e.to_string()))
 }
 
-/// Checks and normalizes (NFC) a name chosen through the API.
+/// Checks and normalizes (NFC) a name chosen through the API (rules in `xlrx_proto::name`).
 pub fn valid_name(raw: &str) -> ApiResult<String> {
-    let trimmed = raw.trim();
-    if trimmed.chars().any(char::is_control) {
-        return Err(ApiError::bad("Der Name enthält Steuerzeichen."));
-    }
-    let name = Name::new(trimmed).map_err(|e| ApiError::bad(e.to_string()))?;
-    if ignored(name.as_str()) {
-        return Err(ApiError::bad(
-            "Dieser Name ist für Systemdateien reserviert.",
-        ));
-    }
-    Ok(name.as_str().to_owned())
+    xlrx_proto::name::valid_name(raw)
+        .map(|n| n.as_str().to_owned())
+        .map_err(|e| ApiError::bad(e.to_string()))
 }
 
 /// A node in a folder the person may change (create, rename, move, delete there), with its root.
