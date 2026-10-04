@@ -1,7 +1,11 @@
 //! Measures the engine on large trees: initial setup (linking without transfer) and
-//! a planning pass in the idle state.
+//! a planning pass in the idle state, and its memory (ADR 0002 §15).
 //!
 //! `cargo run --release -p xlrx-sync --example scale -- 1000000`
+//!
+//! Memory comes from `/proc/self/status` (Linux): `VmHWM` is the peak including the input
+//! vectors; `VmRSS` after the inputs are freed is the resting state as an upper bound (the
+//! allocator does not hand every freed block back to the system).
 
 use std::time::Instant;
 
@@ -9,6 +13,29 @@ use xlrx_proto::{ContentHash, FileContent, Kind, Name, NodeId, Rev, Seq};
 use xlrx_sync::{
     Config, Engine, Fingerprint, LocalEntry, LocalId, LocalObservation, RemoteChange, RemoteEntry,
 };
+
+/// (VmRSS, VmHWM) in kB, where `/proc/self/status` exists.
+fn mem() -> Option<(u64, u64)> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let field = |key: &str| {
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix(key))
+            .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
+    };
+    Some((field("VmRSS:")?, field("VmHWM:")?))
+}
+
+fn print_mem(n: u64, phase: &str) {
+    match mem() {
+        Some((rss, hwm)) => println!(
+            "{n} Dateien: Speicher {phase:<26} RSS {:>7} MB, Spitze {:>7} MB",
+            rss / 1024,
+            hwm / 1024
+        ),
+        None => println!("{n} Dateien: Speicher {phase:<26} n/a"),
+    }
+}
 
 fn main() {
     let n: u64 = std::env::args()
@@ -84,6 +111,7 @@ fn main() {
         }
     }
 
+    print_mem(n, "Eingaben gebaut");
     let mut e = Engine::new(Config {
         remote_root: root,
         device: "Mac".into(),
@@ -95,6 +123,7 @@ fn main() {
         "{n} Dateien: Server-Stand übernehmen  {:>8.2?}",
         t.elapsed()
     );
+    print_mem(n, "nach Server-Stand");
     let t = Instant::now();
     e.on_local_snapshot(lroot, local.clone());
     println!(
@@ -122,6 +151,7 @@ fn main() {
         t.elapsed(),
         ops.len()
     );
+    print_mem(n, "verknüpft, Ruhe");
     // A single file is modified locally (as after an FSEvents event).
     let mut changed = local
         .iter()
@@ -150,5 +180,13 @@ fn main() {
         "{n} Dateien: voller Rescan + Planung  {:>8.2?} ({} Ops)",
         t.elapsed(),
         ops.len()
+    );
+    // All inputs are consumed now: what remains is the engine (plus what the allocator keeps).
+    drop(ops);
+    print_mem(n, "Ruhe ohne Eingaben");
+    println!(
+        "{n} Dateien: Einträge R/S {}/{}",
+        e.state().remote.len(),
+        e.state().synced.len()
     );
 }
