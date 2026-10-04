@@ -166,10 +166,11 @@ pub async fn changes(
     }))
 }
 
+/// Payload of the event `change`: a root and its newest sequence number.
 #[derive(Serialize)]
-struct Changed {
-    root: i64,
-    seq: i64,
+pub struct Changed {
+    pub root: i64,
+    pub seq: i64,
 }
 
 /// Server-sent events: `change` with `[{"root": …, "seq": …}]` whenever something in a root the

@@ -58,6 +58,8 @@ xlrx-sync.workspace = true
 hyper-util = { version = "0.1", features = ["server-auto", "tokio", "http1"] }
 s3s = "0.17"
 s3s-fs = "0.17"
+# Query strings as axum reads them (golden forms of xlrx-wire).
+serde_urlencoded = "0.7"
 tempfile.workspace = true
 webauthn-authenticator-rs = { version = "0.5", features = ["softpasskey"] }
 

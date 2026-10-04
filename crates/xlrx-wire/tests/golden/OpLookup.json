@@ -1,0 +1,17 @@
+{
+  "op": {
+    "CreateDir": {
+      "name": "Neu",
+      "origin": "New",
+      "parent": 7,
+      "source": 99
+    }
+  },
+  "result": {
+    "Created": {
+      "node": 44,
+      "rev": 1,
+      "seq": 1002
+    }
+  }
+}

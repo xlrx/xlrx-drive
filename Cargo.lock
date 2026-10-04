@@ -5467,6 +5467,7 @@ dependencies = [
  "s3s-fs",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sha1",
  "sha2 0.11.0",
  "sqlx",
@@ -5504,6 +5505,19 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "xlrx-proto",
+]
+
+[[package]]
+name = "xlrx-wire"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "time",
+ "uuid",
+ "xlrx-proto",
+ "xlrx-sync",
 ]
 
 [[package]]

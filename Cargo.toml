@@ -12,6 +12,7 @@ publish = false
 xlrx-proto = { path = "crates/xlrx-proto" }
 xlrx-chunk = { path = "crates/xlrx-chunk" }
 xlrx-sync = { path = "crates/xlrx-sync" }
+xlrx-wire = { path = "crates/xlrx-wire" }
 
 blake3 = "1.8"
 # Pinned exactly: chunk boundaries feed into the content hash (schema "xlrx-content-v1").

@@ -1,0 +1,8 @@
+{
+  "size": 20000000,
+  "target": {
+    "kind": "replace",
+    "node_id": 42,
+    "base_rev": 3
+  }
+}
