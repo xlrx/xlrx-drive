@@ -17,5 +17,6 @@ mod rng;
 pub mod scenario;
 pub mod server;
 mod sim;
+mod trace;
 
 pub use sim::{SimConfig, SimFailure, SimStats, run};

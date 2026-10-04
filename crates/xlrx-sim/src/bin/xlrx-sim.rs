@@ -5,6 +5,7 @@
 //! cargo run --release -p xlrx-sim -- --seed 4711 --trace     # inspect a single failure in detail
 //! cargo run --release -p xlrx-sim -- --ci --exact-names 300   # server-side name variants (SMB)
 //! cargo run --release -p xlrx-sim -- --coarse 8 --defer 300   # coarse timestamps, late results
+//! cargo run --release -p xlrx-sim -- --from 0 --count 50 --hashes  # trace hash per seed
 //! ```
 
 use xlrx_sim::{SimConfig, run};
@@ -14,6 +15,7 @@ fn main() {
     let mut from = 0u64;
     let mut count = 1000u64;
     let mut trace = false;
+    let mut hashes = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut val = || args.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
@@ -28,6 +30,7 @@ fn main() {
             "--steps" => cfg.steps = val() as usize,
             "--ci" => cfg.case_insensitive_local = true,
             "--trace" => trace = true,
+            "--hashes" => hashes = true,
             "--strict" => cfg.strict_rules = true,
             "--defer" => cfg.p_defer_result = val() as u32,
             "--exact-names" => cfg.p_server_exact_names = val() as u32,
@@ -48,6 +51,9 @@ fn main() {
                 total.crashes += s.crashes;
                 total.conflicts += s.conflicts;
                 total.breakers += s.breakers;
+                if hashes {
+                    println!("{seed} {:016x}", s.trace_hash);
+                }
                 if s.breakers > 0 {
                     println!(
                         "Hinweis Seed {seed}: Sicherheitsnetz {}× genutzt",

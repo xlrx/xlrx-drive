@@ -13,6 +13,7 @@ use xlrx_sync::{
 use crate::fs::SimFs;
 use crate::rng::Rng;
 use crate::server::SimServer;
+use crate::trace::TraceHash;
 
 /// Settings for a simulation run.
 #[derive(Clone, Debug)]
@@ -85,6 +86,9 @@ pub struct SimStats {
     pub conflicts: usize,
     /// How often the engine's safety net had to break a wait cycle.
     pub breakers: u64,
+    /// Hash over every trace line of the run (see `tests/golden/`): equal for the same seed as long
+    /// as the behaviour of engine and simulator does not change.
+    pub trace_hash: u64,
 }
 
 struct Client {
@@ -116,6 +120,7 @@ struct Sim {
     /// Contents a user deliberately overwrote or deleted (where they saw them).
     removed: BTreeSet<u64>,
     trace: VecDeque<String>,
+    hash: TraceHash,
     stats: SimStats,
 }
 
@@ -182,11 +187,19 @@ impl Sim {
             written: BTreeSet::new(),
             removed: BTreeSet::new(),
             trace: VecDeque::new(),
+            hash: TraceHash::default(),
             stats: SimStats::default(),
         }
     }
 
+    /// Records a trace line: in the ring buffer shown on failure, and in the run's hash.
     fn log(&mut self, s: String) {
+        self.hash.line(&s);
+        self.log_detail(s);
+    }
+
+    /// Records a line only for the failure report (diagnostic dumps that are not behaviour).
+    fn log_detail(&mut self, s: String) {
         if self.trace.len() >= TRACE_LEN {
             self.trace.pop_front();
         }
@@ -271,6 +284,7 @@ impl Sim {
         if self.cfg.strict_rules && self.stats.breakers > 0 {
             return Err(self.fail("Sicherheitsnetz wurde benötigt (Regellücke)".into()));
         }
+        self.stats.trace_hash = self.hash.value();
         Ok(self.stats.clone())
     }
 
@@ -662,9 +676,8 @@ impl Sim {
         if self.clients[ci].engine.state().breakers_used != before {
             let b = self.clients[ci].engine.state().last_breaker.clone();
             let summary = self.clients[ci].engine.debug_summary();
-            self.log(format!(
-                "C{ci} SICHERHEITSNETZ {b:?}, Zustand danach:\n{summary}"
-            ));
+            self.log(format!("C{ci} SICHERHEITSNETZ {b:?}"));
+            self.log_detail(format!("Zustand danach:\n{summary}"));
         }
         // Incremental planning must not miss anything: if it yields nothing, a full planning
         // pass must not find anything either.
