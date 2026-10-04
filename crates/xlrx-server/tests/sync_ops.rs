@@ -139,6 +139,7 @@ async fn operationen_wie_im_simulator() {
         )
         .await;
     assert_eq!(missing.status, 409);
+    assert_eq!(missing.body["reason"], "content_missing");
     let wrong = c
         .send_bytes(
             "PUT",
@@ -360,5 +361,304 @@ async fn aenderung_von_aussen_wird_nicht_ueberfahren() {
         RemoteResult::Rejected(Reject::Moved)
     );
     assert!(dir.join("anders.txt").exists());
+    env.finish().await;
+}
+
+async fn root_row(env: &Env, root_id: i64) -> db::RootRow {
+    db::root_by_id(&env.db.pool, root_id)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn nfd_name_verschieben_und_loeschen() {
+    // A name written in NFD (macOS over SMB) stays NFD in the database; the feed gives clients
+    // the NFC form. Preconditions compare both forms.
+    let env = env_or_skip!();
+    let (mut c, root_id, root_node, dir) = signed_in(&env, "nfd").await;
+    write(&dir.join("A\u{0308}pfel.txt"), b"apfel");
+    write(&dir.join("A\u{0308}rger.txt"), b"aerger");
+    roots::scan(&env.state, &root_row(&env, root_id).await)
+        .await
+        .unwrap();
+    let rr = root_row(&env, root_id).await;
+    let apfel = node(&env, &rr, "A\u{0308}pfel.txt").await;
+    let aerger = node(&env, &rr, "A\u{0308}rger.txt").await;
+    assert_eq!(apfel.name, "A\u{0308}pfel.txt", "stored as found on disk");
+    let root = NodeId(root_node as u64);
+    let moved = op(
+        &mut c,
+        1,
+        &RemoteOp::Move {
+            node: NodeId(apfel.id as u64),
+            from_parent: root,
+            from_name: name("\u{00C4}pfel.txt"),
+            parent: root,
+            name: name("Birne.txt"),
+        },
+    )
+    .await;
+    assert!(matches!(moved, RemoteResult::Moved { .. }), "{moved:?}");
+    assert!(dir.join("Birne.txt").is_file());
+    let deleted = op(
+        &mut c,
+        2,
+        &RemoteOp::DeleteFile {
+            node: NodeId(aerger.id as u64),
+            base_rev: Rev(aerger.rev as u64),
+            parent: root,
+            name: name("\u{00C4}rger.txt"),
+        },
+    )
+    .await;
+    assert!(
+        matches!(deleted, RemoteResult::Deleted { .. }),
+        "{deleted:?}"
+    );
+    assert!(!dir.join("A\u{0308}rger.txt").exists());
+    env.finish().await;
+}
+
+#[tokio::test]
+async fn name_mit_leerzeichen_am_rand() {
+    // Sync clients mirror names exactly: no trimming, control characters allowed (only what
+    // the scanner accepts from disk, too).
+    let env = env_or_skip!();
+    let (mut c, root_id, root_node, dir) = signed_in(&env, "rand").await;
+    let root = NodeId(root_node as u64);
+    let wichtig = op(
+        &mut c,
+        1,
+        &RemoteOp::CreateDir {
+            parent: root,
+            name: name(" Wichtig"),
+            source: LocalId(1),
+            origin: Origin::New,
+        },
+    )
+    .await;
+    assert!(
+        matches!(wichtig, RemoteResult::Created { .. }),
+        "{wichtig:?}"
+    );
+    assert!(dir.join(" Wichtig").is_dir());
+    let fc = upload(&mut c, b"Rechnung").await;
+    let rechnung = op(
+        &mut c,
+        2,
+        &RemoteOp::CreateFile {
+            parent: root,
+            name: name("Rechnung "),
+            content: fc,
+            source: LocalId(2),
+            fp: FP,
+            origin: Origin::New,
+        },
+    )
+    .await;
+    assert!(dir.join("Rechnung ").is_file(), "{rechnung:?}");
+    let moved = op(
+        &mut c,
+        3,
+        &RemoteOp::Move {
+            node: node_of(&rechnung),
+            from_parent: root,
+            from_name: name("Rechnung "),
+            parent: root,
+            name: name("a\u{1}b"),
+        },
+    )
+    .await;
+    assert!(matches!(moved, RemoteResult::Moved { .. }), "{moved:?}");
+    assert!(dir.join("a\u{1}b").is_file());
+    // Reserved names stay refused for sync clients, too.
+    let r = c
+        .post(
+            "/api/sync/ops",
+            json!({"device": DEVICE, "op_id": 4, "op": {"CreateDir": {
+                "parent": root_node, "name": ".DS_Store", "source": 3, "origin": "New"}}}),
+        )
+        .await;
+    assert_eq!(r.status, 400, "{}", r.body);
+    // A name made over SMB can be moved by a sync client without being renamed.
+    fs::create_dir(dir.join(" Archiv ")).unwrap();
+    let rr = root_row(&env, root_id).await;
+    roots::scan(&env.state, &rr).await.unwrap();
+    let archiv = node(&env, &rr, " Archiv ").await;
+    let moved = op(
+        &mut c,
+        5,
+        &RemoteOp::Move {
+            node: NodeId(archiv.id as u64),
+            from_parent: root,
+            from_name: name(" Archiv "),
+            parent: node_of(&wichtig),
+            name: name(" Archiv "),
+        },
+    )
+    .await;
+    assert!(matches!(moved, RemoteResult::Moved { .. }), "{moved:?}");
+    assert!(dir.join(" Wichtig/ Archiv ").is_dir());
+    // People still get trimmed names in the browser.
+    let r = c
+        .post(
+            &format!("/api/nodes/{root_node}/folders"),
+            json!({ "name": "  Neu  " }),
+        )
+        .await;
+    assert_eq!(r.ok()["name"], "Neu");
+    env.finish().await;
+}
+
+#[tokio::test]
+async fn op_body_abweichung_409() {
+    let env = env_or_skip!();
+    let (mut c, _, root_node, dir) = signed_in(&env, "body").await;
+    let root = NodeId(root_node as u64);
+    let mkdir = |n: &str, source: u64| RemoteOp::CreateDir {
+        parent: root,
+        name: name(n),
+        source: LocalId(source),
+        origin: Origin::New,
+    };
+    let a = op(&mut c, 5, &mkdir("A", 1)).await;
+    // The same ID for a different operation: refused, nothing executed.
+    let r = c
+        .post(
+            "/api/sync/ops",
+            json!({"device": DEVICE, "op_id": 5, "op": serde_json::to_value(mkdir("B", 2)).unwrap()}),
+        )
+        .await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert_eq!(r.body["reason"], "op_mismatch");
+    assert!(!dir.join("B").exists());
+    // The same operation again: the stored result. Only the client's own bookkeeping (here the
+    // local ID) differs: still the same operation.
+    assert_eq!(op(&mut c, 5, &mkdir("A", 1)).await, a);
+    assert_eq!(op(&mut c, 5, &mkdir("A", 99)).await, a);
+    // Lookup: bare result as before, or with the operation.
+    let r = c.get(&format!("/api/sync/ops/{DEVICE_URL}/5")).await;
+    assert_eq!(
+        serde_json::from_value::<RemoteResult>(r.ok().clone()).unwrap(),
+        a
+    );
+    for q in ["true", "1"] {
+        let r = c
+            .get(&format!("/api/sync/ops/{DEVICE_URL}/5?with_op={q}"))
+            .await;
+        assert_eq!(
+            serde_json::from_value::<RemoteResult>(r.ok()["result"].clone()).unwrap(),
+            a
+        );
+        assert_eq!(
+            serde_json::from_value::<RemoteOp>(r.ok()["op"].clone()).unwrap(),
+            mkdir("A", 1)
+        );
+    }
+    // Rows stored before the server kept operations answer any operation as before.
+    sqlx::query("UPDATE sync_ops SET op = NULL WHERE op_id = 5")
+        .execute(&env.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(op(&mut c, 5, &mkdir("C", 3)).await, a);
+    assert!(!dir.join("C").exists());
+    let r = c
+        .get(&format!("/api/sync/ops/{DEVICE_URL}/5?with_op=true"))
+        .await;
+    assert!(r.ok()["op"].is_null());
+    env.finish().await;
+}
+
+#[tokio::test]
+async fn op_mit_veraltetem_cursor_tag_409() {
+    let env = env_or_skip!();
+    let (mut c, root_id, root_node, dir) = signed_in(&env, "tag").await;
+    // An empty root has no cursor yet (0, no tag): one change first.
+    write(&dir.join("a.txt"), b"a");
+    roots::scan(&env.state, &root_row(&env, root_id).await)
+        .await
+        .unwrap();
+    let feed = c
+        .get(&format!("/api/sync/changes?root={root_id}&cursor=0"))
+        .await;
+    let cursor = feed.ok()["cursor"].as_i64().unwrap();
+    let tag = feed.ok()["cursor_tag"].as_str().unwrap().to_owned();
+    let mkdir = |n: &str| {
+        serde_json::to_value(RemoteOp::CreateDir {
+            parent: NodeId(root_node as u64),
+            name: name(n),
+            source: LocalId(1),
+            origin: Origin::New,
+        })
+        .unwrap()
+    };
+    let ok = c
+        .post(
+            "/api/sync/ops",
+            json!({"device": DEVICE, "op_id": 1, "op": mkdir("Gut"), "cursor": cursor, "check": tag}),
+        )
+        .await;
+    assert!(ok.ok().get("Created").is_some(), "{}", ok.body);
+    // The database "was restored": the entry at the client's cursor is no longer the same.
+    sqlx::query("UPDATE journal SET at = at + interval '1 second' WHERE seq = $1")
+        .bind(cursor)
+        .execute(&env.db.pool)
+        .await
+        .unwrap();
+    let r = c
+        .post(
+            "/api/sync/ops",
+            json!({"device": DEVICE, "op_id": 2, "op": mkdir("Schlecht"), "cursor": cursor, "check": tag}),
+        )
+        .await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert_eq!(r.body["reason"], "cursor_invalid");
+    // Checked before the stored results, too: a repeated operation is refused as well.
+    let r = c
+        .post(
+            "/api/sync/ops",
+            json!({"device": DEVICE, "op_id": 1, "op": mkdir("Gut"), "cursor": cursor, "check": tag}),
+        )
+        .await;
+    assert_eq!(r.body["reason"], "cursor_invalid");
+    env.finish().await;
+}
+
+#[tokio::test]
+async fn op_abfrage_wartet_auf_laufende_op() {
+    let env = env_or_skip!();
+    let (c, _, _, _) = signed_in(&env, "warten").await;
+    let user_id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE username = 'warten'")
+        .fetch_one(&env.db.pool)
+        .await
+        .unwrap();
+    // An operation of this device is running (holds the device's lock) …
+    let lock = env.state.sync_lock(user_id, DEVICE);
+    let guard = lock.lock().await;
+    let mut asker = c.clone();
+    let lookup = tokio::spawn(async move {
+        asker
+            .get(&format!("/api/sync/ops/{DEVICE_URL}/7"))
+            .await
+            .body
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!lookup.is_finished(), "must wait, not answer 404");
+    // … and finishes with a stored result.
+    let result = RemoteResult::Rejected(Reject::NameTaken);
+    sqlx::query("INSERT INTO sync_ops (user_id, device, op_id, result) VALUES ($1, $2, 7, $3)")
+        .bind(user_id)
+        .bind(DEVICE)
+        .bind(serde_json::to_value(&result).unwrap())
+        .execute(&env.db.pool)
+        .await
+        .unwrap();
+    drop(guard);
+    let body = lookup.await.unwrap();
+    assert_eq!(
+        serde_json::from_value::<RemoteResult>(body).unwrap(),
+        result
+    );
     env.finish().await;
 }

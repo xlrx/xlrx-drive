@@ -23,8 +23,8 @@ use xlrx_chunk::{Chunker, FileDigest, Fingerprint, digest_file, fingerprint_of};
 
 use super::db::{self, NodeRow, OnDisk, Source};
 use super::ops::{
-    Intent, Place, blocking, ensure_free, forget, io_err, live, located, place, record, reload,
-    valid_name, writable,
+    Intent, Naming, Place, blocking, ensure_free, forget, io_err, live, located, place, record,
+    reload, writable,
 };
 use super::{scan, store};
 use crate::error::{ApiError, ApiResult};
@@ -92,6 +92,11 @@ fn disk_full(e: &std::io::Error) -> bool {
     e.raw_os_error() == Some(rustix::io::Errno::NOSPC.raw_os_error())
 }
 
+/// The NAS is full: 409 with reason `disk_full`, so a client can show it (ADR 0002).
+pub fn no_space(msg: &str) -> ApiError {
+    ApiError::Refused("disk_full", msg.to_owned())
+}
+
 /// Streams a request body into a new staging file and hashes it. With `size`, the body must have
 /// exactly that length (an aborted upload never counts as complete).
 pub async fn stage(st: &AppState, body: Body, size: Option<u64>) -> ApiResult<Staged> {
@@ -118,7 +123,7 @@ pub async fn stage(st: &AppState, body: Body, size: Option<u64>) -> ApiResult<St
         }
         file.write_all(&chunk).await.map_err(|e| {
             if disk_full(&e) {
-                ApiError::Conflict("Kein Platz mehr auf dem NAS.".into())
+                no_space("Kein Platz mehr auf dem NAS.")
             } else {
                 io_err(e)
             }
@@ -214,6 +219,7 @@ pub enum Target {
         parent_id: i64,
         name: String,
         keep_both: bool,
+        naming: Naming,
     },
     /// New content for an existing file, only if it is still at revision `base_rev`.
     Replace { node_id: i64, base_rev: i64 },
@@ -260,8 +266,9 @@ pub async fn write(
             parent_id,
             name,
             keep_both,
+            naming,
         } => {
-            let name = valid_name(&name)?;
+            let name = naming.check(&name)?;
             let parent = live(reload(st, parent_id).await?)?;
             if !parent.is_dir() {
                 return Err(ApiError::Rejected(
@@ -434,7 +441,7 @@ async fn write_new(
                 std::io::ErrorKind::AlreadyExists => {
                     ApiError::Conflict(format!("„{name}“ gibt es hier schon."))
                 }
-                _ if disk_full(&e) => ApiError::Conflict("Kein Platz mehr auf dem NAS.".into()),
+                _ if disk_full(&e) => no_space("Kein Platz mehr auf dem NAS."),
                 _ => io_err(e),
             });
         }
@@ -601,7 +608,7 @@ async fn write_replace(
         Err(e) => {
             forget(st, op).await?;
             return Err(if disk_full(&e) {
-                ApiError::Conflict("Kein Platz mehr auf dem NAS.".into())
+                no_space("Kein Platz mehr auf dem NAS.")
             } else {
                 io_err(e)
             });

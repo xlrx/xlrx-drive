@@ -10,8 +10,9 @@ use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use xlrx_proto::{ContentHash, FileContent, Kind, Name, NodeId, Rev, Seq};
-use xlrx_sync::{Reject, RemoteEntry, RemoteOp, RemoteResult};
+use xlrx_sync::{Fingerprint, LocalId, Origin, Reject, RemoteEntry, RemoteOp, RemoteResult};
 
 use crate::auth::session::CurrentUser;
 use crate::error::{ApiError, ApiResult};
@@ -28,6 +29,9 @@ pub struct ChangesQuery {
     #[serde(default)]
     pub cursor: i64,
     pub limit: Option<i64>,
+    /// `cursor_tag` received with `cursor`: if the journal no longer has that entry, the database
+    /// was restored or replaced, and the answer is 409 `cursor_invalid` (ADR 0002).
+    pub check: Option<String>,
 }
 
 /// One node's current state; `None` if it was deleted (or is no longer visible).
@@ -44,6 +48,49 @@ pub struct Changes {
     /// More changes follow: fetch them with `cursor` and apply all pages together. (A page may
     /// contain a node whose folder only comes on a later page.)
     pub more: bool,
+    /// Fingerprint of the journal entry at `cursor` (`null` at cursor 0): sent back as `check`.
+    pub cursor_tag: Option<String>,
+}
+
+/// Fingerprint of the journal entry with sequence number `seq` (`None` if there is none):
+/// `hex(sha256(seq ‖ node_id ‖ at in µs))[..16]`, each as big-endian i64. Part of the contract
+/// with clients (ADR 0002): a restored backup reuses sequence numbers, but not with the same
+/// node and time. A later pruning of the journal must answer differently (`cursor_expired`).
+async fn cursor_tag(st: &AppState, seq: i64, root: Option<i64>) -> ApiResult<Option<String>> {
+    let row: Option<(i64, time::OffsetDateTime)> = sqlx::query_as(
+        "SELECT node_id, at FROM journal WHERE seq = $1 AND ($2::bigint IS NULL OR root_id = $2)",
+    )
+    .bind(seq)
+    .bind(root)
+    .fetch_optional(&st.db)
+    .await?;
+    Ok(row.map(|(node, at)| {
+        let micros = (at.unix_timestamp_nanos() / 1000) as i64;
+        let mut h = Sha256::new();
+        h.update(seq.to_be_bytes());
+        h.update(node.to_be_bytes());
+        h.update(micros.to_be_bytes());
+        hex(&h.finalize()[..8])
+    }))
+}
+
+/// Refuses a cursor whose journal entry is gone or different (`check` from an earlier answer).
+async fn check_cursor(
+    st: &AppState,
+    cursor: i64,
+    check: Option<&str>,
+    root: Option<i64>,
+) -> ApiResult<()> {
+    let Some(check) = check else {
+        return Ok(());
+    };
+    if cursor <= 0 || cursor_tag(st, cursor, root).await?.as_deref() == Some(check) {
+        return Ok(());
+    }
+    Err(ApiError::Refused(
+        "cursor_invalid",
+        "Der Stand passt nicht mehr zum Server (Datenbank zurückgespielt?): neu abgleichen.".into(),
+    ))
 }
 
 fn entry(n: &NodeRow) -> Option<RemoteEntry> {
@@ -77,6 +124,7 @@ pub async fn changes(
     if roots::role(&st, &root, me.id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
+    check_cursor(&st, q.cursor, q.check.as_deref(), Some(root.id)).await?;
     let limit = q.limit.unwrap_or(1000).clamp(1, 10_000);
     // One query, one snapshot: writers commit in sequence order (journal lock), so nothing with
     // a lower sequence can appear later.
@@ -105,10 +153,16 @@ pub async fn changes(
             },
         })
         .collect();
+    let cursor_tag = if cursor > 0 {
+        cursor_tag(&st, cursor, Some(root.id)).await?
+    } else {
+        None
+    };
     Ok(Json(Changes {
         changes,
         cursor,
         more,
+        cursor_tag,
     }))
 }
 
@@ -326,6 +380,25 @@ pub struct OpRequest {
     pub device: String,
     pub op_id: u64,
     pub op: RemoteOp,
+    /// The client's cursor and its `cursor_tag`: checked before anything else, so that an
+    /// operation planned against a database that was restored since is never executed.
+    #[serde(default)]
+    pub cursor: i64,
+    pub check: Option<String>,
+}
+
+/// An executed operation and its result (`GET …/ops/{device}/{op_id}?with_op=true`).
+#[derive(Serialize)]
+pub struct OpLookup {
+    pub result: RemoteResult,
+    /// `null` for operations stored before the server kept them.
+    pub op: Option<RemoteOp>,
+}
+
+#[derive(Deserialize)]
+pub struct OpResultQuery {
+    /// "true" or "1": answer with [`OpLookup`] instead of the bare result.
+    pub with_op: Option<String>,
 }
 
 fn check_device(device: &str) -> ApiResult<()> {
@@ -335,26 +408,78 @@ fn check_device(device: &str) -> ApiResult<()> {
     Ok(())
 }
 
-async fn known(
-    st: &AppState,
-    user: i64,
-    device: &str,
-    op_id: u64,
-) -> ApiResult<Option<RemoteResult>> {
-    let r: Option<serde_json::Value> = sqlx::query_scalar(
-        "SELECT result FROM sync_ops WHERE user_id = $1 AND device = $2 AND op_id = $3",
+/// An operation stored before: its result, and the operation itself if it was kept.
+struct Known {
+    result: RemoteResult,
+    op: Option<RemoteOp>,
+}
+
+async fn known(st: &AppState, user: i64, device: &str, op_id: u64) -> ApiResult<Option<Known>> {
+    let row: Option<(serde_json::Value, Option<serde_json::Value>)> = sqlx::query_as(
+        "SELECT result, op FROM sync_ops WHERE user_id = $1 AND device = $2 AND op_id = $3",
     )
     .bind(user)
     .bind(device)
     .bind(op_id as i64)
     .fetch_optional(&st.db)
     .await?;
-    Ok(r.and_then(|v| serde_json::from_value(v).ok()))
+    Ok(row.and_then(|(result, op)| {
+        Some(Known {
+            result: serde_json::from_value(result).ok()?,
+            op: op.and_then(|o| serde_json::from_value(o).ok()),
+        })
+    }))
+}
+
+/// What of an operation the server acts on, without the client's own bookkeeping (its local ID,
+/// the file's fingerprint, where a conflict copy lies locally). Two requests with the same ID
+/// are the same operation if these parts are equal; a client update that changes only its own
+/// fields must not turn a retry into a mismatch. (Should the server ever apply `fp.mtime_ns`,
+/// that part counts too.)
+fn canonical(op: &RemoteOp) -> RemoteOp {
+    let none = Fingerprint {
+        size: 0,
+        mtime_ns: 0,
+        ctime_ns: 0,
+    };
+    let mut op = op.clone();
+    match &mut op {
+        RemoteOp::CreateDir { source, origin, .. } => {
+            *source = LocalId(0);
+            *origin = Origin::New;
+        }
+        RemoteOp::CreateFile {
+            source, fp, origin, ..
+        } => {
+            *source = LocalId(0);
+            *fp = none;
+            *origin = Origin::New;
+        }
+        RemoteOp::Upload { source, fp, .. } => {
+            *source = LocalId(0);
+            *fp = none;
+        }
+        RemoteOp::Move { .. } | RemoteOp::DeleteFile { .. } | RemoteOp::DeleteDir { .. } => {}
+    }
+    op
+}
+
+fn to_json<T: Serialize>(v: &T) -> ApiResult<serde_json::Value> {
+    serde_json::to_value(v).map_err(|e| ApiError::Internal(e.to_string()))
+}
+
+fn op_mismatch() -> ApiError {
+    ApiError::Refused(
+        "op_mismatch",
+        "Diese Operationsnummer wurde schon für eine andere Operation verwendet.".into(),
+    )
 }
 
 /// Executes an operation of the sync engine (PLAN 5.3) once: a retry with the same id gets the
 /// same answer. Preconditions that no longer hold are answered with the reason (`Rejected`);
-/// nothing is overwritten. `Transient`: changed outside xlrx meanwhile, try again.
+/// nothing is overwritten. `Transient`: changed outside xlrx meanwhile, try again. The same id
+/// with a different operation (a client whose state was restored, cloned or reinstalled) is
+/// refused with 409 `op_mismatch` instead of getting a stranger's result (ADR 0002).
 pub async fn op(
     State(st): State<AppState>,
     me: CurrentUser,
@@ -363,19 +488,24 @@ pub async fn op(
     check_device(&req.device)?;
     let lock = st.sync_lock(me.id, &req.device);
     let _guard = lock.lock().await;
-    if let Some(r) = known(&st, me.id, &req.device, req.op_id).await? {
-        return Ok(Json(r));
+    check_cursor(&st, req.cursor, req.check.as_deref(), None).await?;
+    if let Some(k) = known(&st, me.id, &req.device, req.op_id).await? {
+        if k.op.is_some_and(|o| canonical(&o) != canonical(&req.op)) {
+            return Err(op_mismatch());
+        }
+        return Ok(Json(k.result));
     }
     let result = execute(&st, me.id, &req.device, &req.op).await?;
     if result != RemoteResult::Transient {
         sqlx::query(
-            "INSERT INTO sync_ops (user_id, device, op_id, result) VALUES ($1, $2, $3, $4)
+            "INSERT INTO sync_ops (user_id, device, op_id, result, op) VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT DO NOTHING",
         )
         .bind(me.id)
         .bind(&req.device)
         .bind(req.op_id as i64)
-        .bind(serde_json::to_value(&result).map_err(|e| ApiError::Internal(e.to_string()))?)
+        .bind(to_json(&result)?)
+        .bind(to_json(&req.op)?)
         .execute(&st.db)
         .await?;
     }
@@ -383,16 +513,29 @@ pub async fn op(
 }
 
 /// The result of an operation executed before (for a client that lost the answer: it then needs
-/// neither the source file nor a new upload).
+/// neither the source file nor a new upload). Waits for an operation of the same device that is
+/// still running, so that "unknown" really means "never executed".
 pub async fn op_result(
     State(st): State<AppState>,
     me: CurrentUser,
     Path((device, op_id)): Path<(String, u64)>,
-) -> ApiResult<Json<RemoteResult>> {
-    known(&st, me.id, &device, op_id)
+    Query(q): Query<OpResultQuery>,
+) -> ApiResult<axum::response::Response> {
+    use axum::response::IntoResponse as _;
+    check_device(&device)?;
+    let lock = st.sync_lock(me.id, &device);
+    let _guard = lock.lock().await;
+    let k = known(&st, me.id, &device, op_id)
         .await?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
+        .ok_or(ApiError::NotFound)?;
+    Ok(match q.with_op.as_deref() {
+        Some("1" | "true") => Json(OpLookup {
+            result: k.result,
+            op: k.op,
+        })
+        .into_response(),
+        _ => Json(k.result).into_response(),
+    })
 }
 
 fn created(n: &NodeRow) -> RemoteResult {
@@ -404,7 +547,10 @@ fn created(n: &NodeRow) -> RemoteResult {
 }
 
 fn missing_content() -> ApiError {
-    ApiError::Conflict("Der Inhalt fehlt: zuerst hochladen (PUT /api/sync/content/{hash}).".into())
+    ApiError::Refused(
+        "content_missing",
+        "Der Inhalt fehlt: zuerst hochladen (PUT /api/sync/content/{hash}).".into(),
+    )
 }
 
 async fn execute(st: &AppState, user: i64, device: &str, op: &RemoteOp) -> ApiResult<RemoteResult> {
@@ -417,10 +563,12 @@ async fn execute(st: &AppState, user: i64, device: &str, op: &RemoteOp) -> ApiRe
     };
     let id = |n: &NodeId| n.0 as i64;
     let res: ApiResult<RemoteResult> = match op {
-        RemoteOp::CreateDir { parent, name, .. } => ops::mkdir(st, user, id(parent), name.as_str())
-            .await
-            .map_err(gone(Reject::ParentGone))
-            .map(|n| created(&n)),
+        RemoteOp::CreateDir { parent, name, .. } => {
+            ops::mkdir(st, user, id(parent), name.as_str(), ops::Naming::Exact)
+                .await
+                .map_err(gone(Reject::ParentGone))
+                .map(|n| created(&n))
+        }
         RemoteOp::CreateFile {
             parent,
             name,
@@ -434,6 +582,7 @@ async fn execute(st: &AppState, user: i64, device: &str, op: &RemoteOp) -> ApiRe
                 parent_id: id(parent),
                 name: name.as_str().to_owned(),
                 keep_both: false,
+                naming: ops::Naming::Exact,
             };
             content::write(st, user, target, staged, None)
                 .await
@@ -481,6 +630,7 @@ async fn execute(st: &AppState, user: i64, device: &str, op: &RemoteOp) -> ApiRe
                 parent_id: Some(id(parent)),
                 if_seq: None,
                 from: Some((id(from_parent), from_name.as_str().to_owned())),
+                naming: ops::Naming::Exact,
             };
             ops::update(st, user, id(node), change)
                 .await

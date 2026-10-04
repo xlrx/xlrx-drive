@@ -19,6 +19,9 @@ pub enum ApiError {
     Gone(String),
     /// A precondition of a change does not hold: sync clients get the reason, people the message.
     Rejected(xlrx_sync::Reject, String),
+    /// Refused with 409 and a reason a client can act on (`content_missing`, `op_mismatch`,
+    /// `cursor_invalid`, `disk_full`; ADR 0002).
+    Refused(&'static str, String),
     TooManyRequests,
     /// A part of the server is not set up or not running (e.g. search without a state directory).
     Unavailable(String),
@@ -56,6 +59,13 @@ impl IntoResponse for ApiError {
                     .into_response();
             }
             Self::Rejected(reason, m) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({ "error": m, "reason": reason })),
+                )
+                    .into_response();
+            }
+            Self::Refused(reason, m) => {
                 return (
                     StatusCode::CONFLICT,
                     Json(serde_json::json!({ "error": m, "reason": reason })),

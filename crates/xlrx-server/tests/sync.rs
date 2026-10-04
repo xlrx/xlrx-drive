@@ -296,3 +296,100 @@ async fn live_benachrichtigung_bei_aenderungen() {
     }
     env.finish().await;
 }
+
+#[tokio::test]
+async fn cursor_tag_erkennt_ruecksetzung() {
+    let env = env_or_skip!();
+    let (mut c, root, _, dir) = signed_in(&env, "ruecksetzung").await;
+    write(&dir.join("a.txt"), b"a");
+    let rr = xlrx_server::files::db::root_by_id(&env.db.pool, root)
+        .await
+        .unwrap()
+        .unwrap();
+    xlrx_server::files::roots::scan(&env.state, &rr)
+        .await
+        .unwrap();
+    let first = c
+        .get(&format!("/api/sync/changes?root={root}&cursor=0"))
+        .await;
+    let cursor = first.ok()["cursor"].as_i64().unwrap();
+    let tag = first.ok()["cursor_tag"].as_str().unwrap().to_owned();
+    assert!(cursor > 0);
+    assert_eq!(tag.len(), 16);
+    let url = |check: &str| format!("/api/sync/changes?root={root}&cursor={cursor}&check={check}");
+    // Unchanged: fine, and the tag of an unchanged cursor stays the same.
+    let again = c.get(&url(&tag)).await;
+    assert_eq!(again.ok()["cursor"].as_i64().unwrap(), cursor);
+    assert_eq!(again.ok()["cursor_tag"], tag.as_str());
+    // Cursor 0 has no tag, and any check is ignored there.
+    let zero = c
+        .get(&format!(
+            "/api/sync/changes?root={root}&cursor=0&check=egal"
+        ))
+        .await;
+    assert_eq!(zero.ok()["cursor"].as_i64().unwrap(), cursor);
+    // Without check: as before.
+    c.get(&format!("/api/sync/changes?root={root}&cursor={cursor}"))
+        .await
+        .ok();
+    // The entry at the cursor changed (a backup was restored and the sequence reused) …
+    sqlx::query("UPDATE journal SET at = at + interval '1 second' WHERE seq = $1")
+        .bind(cursor)
+        .execute(&env.db.pool)
+        .await
+        .unwrap();
+    let r = c.get(&url(&tag)).await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert_eq!(r.body["reason"], "cursor_invalid");
+    // … or is gone.
+    sqlx::query("DELETE FROM journal WHERE seq = $1")
+        .bind(cursor)
+        .execute(&env.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(c.get(&url(&tag)).await.body["reason"], "cursor_invalid");
+    env.finish().await;
+}
+
+#[tokio::test]
+async fn sync_download_zaehlt_nicht() {
+    let env = env_or_skip!();
+    let (mut c, root, _, dir) = signed_in(&env, "zaehlen").await;
+    write(&dir.join("bericht.txt"), b"Bericht");
+    let rr = xlrx_server::files::db::root_by_id(&env.db.pool, root)
+        .await
+        .unwrap()
+        .unwrap();
+    xlrx_server::files::roots::scan(&env.state, &rr)
+        .await
+        .unwrap();
+    let n = node(&env, &rr, "bericht.txt").await;
+    let count = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM access_events WHERE node_id = $1")
+            .bind(n.id)
+            .fetch_one(&env.db.pool)
+            .await
+            .unwrap()
+    };
+    for range in [None, Some("bytes=0-")] {
+        let headers: Vec<(&str, &str)> = range.map(|r| ("range", r)).into_iter().collect();
+        let r = c
+            .get_raw(
+                &format!("/api/nodes/{}/content?purpose=sync", n.id),
+                &headers,
+            )
+            .await;
+        assert!(r.status.is_success(), "{}", r.status);
+    }
+    assert_eq!(
+        count().await,
+        0,
+        "a sync client mirroring is not a person opening"
+    );
+    let r = c
+        .get_raw(&format!("/api/nodes/{}/content", n.id), &[])
+        .await;
+    assert!(r.status.is_success());
+    assert_eq!(count().await, 1);
+    env.finish().await;
+}

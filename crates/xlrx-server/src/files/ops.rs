@@ -66,9 +66,29 @@ pub(super) async fn blocking<T: Send + 'static>(
 
 /// Checks and normalizes (NFC) a name chosen through the API (rules in `xlrx_proto::name`).
 pub fn valid_name(raw: &str) -> ApiResult<String> {
-    xlrx_proto::name::valid_name(raw)
+    Naming::Typed.check(raw)
+}
+
+/// Where a new name comes from, and so which rule checks it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Naming {
+    /// Typed by a person: surrounding spaces removed, control characters refused.
+    #[default]
+    Typed,
+    /// Sent by a sync client: taken exactly (only NFC), as it mirrors a name on its disk
+    /// (ADR 0002). Otherwise a name like " Wichtig" would end up different on both sides.
+    Exact,
+}
+
+impl Naming {
+    pub fn check(self, raw: &str) -> ApiResult<String> {
+        match self {
+            Self::Typed => xlrx_proto::name::valid_name(raw),
+            Self::Exact => xlrx_proto::name::valid_sync_name(raw),
+        }
         .map(|n| n.as_str().to_owned())
         .map_err(|e| ApiError::bad(e.to_string()))
+    }
 }
 
 /// A node in a folder the person may change (create, rename, move, delete there), with its root.
@@ -198,8 +218,9 @@ pub async fn mkdir(
     user_id: i64,
     parent_id: i64,
     raw_name: &str,
+    naming: Naming,
 ) -> ApiResult<NodeRow> {
-    let name = valid_name(raw_name)?;
+    let name = naming.check(raw_name)?;
     let (_, root) = writable(st, user_id, parent_id).await?;
     let lock = st.root_lock(root.id);
     let _guard = lock.lock().await;
@@ -258,12 +279,21 @@ pub struct Change {
     /// Only if the node is still in this folder under this name (sync clients).
     #[serde(skip)]
     pub from: Option<(i64, String)>,
+    /// How `name` is checked.
+    #[serde(skip)]
+    pub naming: Naming,
+}
+
+/// Equal as names: exactly, or in NFC. The scanner stores names as found on disk (an NFD name
+/// written over SMB stays NFD), while sync clients only know the NFC form from the feed.
+fn same_name(stored: &str, seen: &str) -> bool {
+    stored == seen || matches!((Name::new(stored), Name::new(seen)), (Ok(a), Ok(b)) if a == b)
 }
 
 /// Is the node still where the caller saw it? (Otherwise someone else moved it: their move wins.)
 fn check_at(node: &NodeRow, at: Option<&(i64, String)>) -> ApiResult<()> {
     match at {
-        Some((parent, name)) if node.parent_id != Some(*parent) || node.name != *name => {
+        Some((parent, name)) if node.parent_id != Some(*parent) || !same_name(&node.name, name) => {
             Err(ApiError::Rejected(
                 Reject::Moved,
                 format!(
@@ -290,7 +320,7 @@ pub async fn update(st: &AppState, user_id: i64, id: i64, ch: Change) -> ApiResu
     check_seq(&node, ch.if_seq)?;
     check_at(&node, ch.from.as_ref())?;
     let name = match &ch.name {
-        Some(n) => valid_name(n)?,
+        Some(n) => ch.naming.check(n)?,
         None => node.name.clone(),
     };
     let parent_id = ch.parent_id.unwrap_or(old_parent);

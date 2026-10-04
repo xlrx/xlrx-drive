@@ -230,6 +230,7 @@ impl Env {
     }
 }
 
+#[derive(Clone)]
 pub struct Client {
     app: Router,
     pub cookie: Option<String>,

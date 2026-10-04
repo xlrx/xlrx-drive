@@ -555,6 +555,7 @@ pub async fn public_upload(
             parent_id: folder.id,
             name: q.name.clone(),
             keep_both: true,
+            naming: crate::files::ops::Naming::Typed,
         },
         staged,
         files::mtime(q.mtime_ms),

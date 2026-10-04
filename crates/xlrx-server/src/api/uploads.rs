@@ -128,7 +128,7 @@ async fn blocking<T: Send + 'static>(
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .map_err(|e| {
             if e.raw_os_error() == Some(rustix::io::Errno::NOSPC.raw_os_error()) {
-                ApiError::Conflict("Kein Platz mehr auf dem NAS.".into())
+                content::no_space("Kein Platz mehr auf dem NAS.")
             } else {
                 ApiError::Internal(format!("Upload: {e}"))
             }
@@ -201,8 +201,8 @@ pub async fn create(
     })
     .await?;
     if req.size > free {
-        return Err(ApiError::Conflict(
-            "Nicht genug freier Platz auf dem NAS für diese Datei.".into(),
+        return Err(content::no_space(
+            "Nicht genug freier Platz auf dem NAS für diese Datei.",
         ));
     }
     let id: Uuid = sqlx::query_scalar(
@@ -432,6 +432,7 @@ async fn put_in_place(
             parent_id,
             name,
             keep_both,
+            naming: ops::Naming::Typed,
         },
         UploadTarget::Replace { node_id, base_rev } => Target::Replace { node_id, base_rev },
     };

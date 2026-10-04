@@ -290,6 +290,9 @@ pub struct ContentQuery {
     /// Show in the browser instead of downloading (only for harmless types).
     #[serde(default)]
     pub inline: bool,
+    /// `sync`: a sync client mirrors the file. Not a person opening it: not counted for the start
+    /// page's suggestions, nor for the mirror cache's popularity (ADR 0002).
+    pub purpose: Option<String>,
 }
 
 /// Types the browser may display directly (the web app mirrors this in `opensInBrowser`). Everything else (HTML, SVG, scripts …) is only
@@ -350,8 +353,9 @@ pub async fn content(
         return Err(ApiError::bad("Ordner können nicht heruntergeladen werden."));
     }
     let inline = q.inline && inline_allowed(&mime_of(&node.name));
-    // A download (not a preview, not the continuation of one) for the start page.
-    if !inline && starts_download(req.headers()) {
+    // A download (not a preview, not the continuation of one, not a sync client) for the start
+    // page.
+    if !inline && q.purpose.as_deref() != Some("sync") && starts_download(req.headers()) {
         super::suggest::record(&st, me.id, node.id, "download", "web", None).await?;
         mirror::fetched(&st, &client.ip, &node).await?;
     }
@@ -454,7 +458,7 @@ pub async fn create_folder(
     Path(parent): Path<i64>,
     Json(b): Json<NewFolder>,
 ) -> ApiResult<(StatusCode, Json<NodeInfo>)> {
-    let n = ops::mkdir(&st, me.id, parent, &b.name).await?;
+    let n = ops::mkdir(&st, me.id, parent, &b.name, ops::Naming::Typed).await?;
     Ok((StatusCode::CREATED, Json(NodeInfo::from(&n))))
 }
 
@@ -766,6 +770,7 @@ pub async fn upload(
             parent_id: parent,
             name: q.name,
             keep_both: q.keep_both,
+            naming: ops::Naming::Typed,
         },
         staged,
         mtime(q.mtime_ms),
