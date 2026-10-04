@@ -760,7 +760,7 @@ impl Sim {
                 self.persist(ci)
             }
             Op::Remote(id, rop) => {
-                let res = self.exec_remote(ci, id, &rop, faults);
+                let res = self.exec_remote(ci, id, &rop, faults)?;
                 self.log(format!("C{ci} sendet {id:?} {rop:?} → {res:?}"));
                 if matches!(res, RemoteResult::Conflict { .. }) {
                     self.stats.conflicts += 1;
@@ -792,22 +792,27 @@ impl Sim {
         id: xlrx_sync::OpId,
         op: &RemoteOp,
         faults: bool,
-    ) -> RemoteResult {
+    ) -> Result<RemoteResult, SimFailure> {
         if faults && self.rng.chance(self.cfg.p_drop_request) {
-            return RemoteResult::Transient;
+            return Ok(RemoteResult::Transient);
         }
         // As in the real protocol: the client first asks whether the server already knows the
         // operation; only a new operation needs the (unchanged) source file.
-        let known = self.server.known_result(self.clients[ci].idx, id);
-        if known.is_none() && !crate::driver::source_ok(&self.clients[ci].fs, op) {
-            return RemoteResult::SourceChanged;
-        }
         let device = self.clients[ci].device.clone();
-        let res = self.server.apply(self.clients[ci].idx, id, op, &device);
-        if faults && self.rng.chance(self.cfg.p_drop_response) {
-            return RemoteResult::Transient;
+        let known = self.server.known_result(&device, id);
+        if known.is_none() && !crate::driver::source_ok(&self.clients[ci].fs, op) {
+            return Ok(RemoteResult::SourceChanged);
         }
-        res
+        let Ok(res) = self.server.apply(&device, id, op) else {
+            // Operation IDs are unique per engine and device names per run: a reuse is a bug.
+            return Err(self.fail(format!(
+                "OpId {id:?} von {device} für eine andere Operation wiederverwendet: {op:?}"
+            )));
+        };
+        if faults && self.rng.chance(self.cfg.p_drop_response) {
+            return Ok(RemoteResult::Transient);
+        }
+        Ok(res)
     }
 
     // ------------------------------------------------------------------ Settle phase and checks

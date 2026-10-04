@@ -16,6 +16,10 @@ pub struct SNode {
     pub alive: bool,
 }
 
+/// An operation ID a device already used for a different operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpMismatch;
+
 #[derive(Clone, Debug)]
 pub struct SimServer {
     pub nodes: BTreeMap<NodeId, SNode>,
@@ -24,7 +28,9 @@ pub struct SimServer {
     next_node: u64,
     /// Compact journal: node → sequence number of its last change.
     journal: BTreeMap<NodeId, u64>,
-    dedup: BTreeMap<(usize, OpId), RemoteResult>,
+    /// Executed operations per (device name, operation ID), with the operation itself: like the
+    /// real server (`sync_ops`), which knows a device only by its name.
+    dedup: BTreeMap<(String, OpId), (RemoteOp, RemoteResult)>,
     /// Exact name check instead of a case-insensitive one (as with SMB/shell access to the NAS
     /// file system). This produces variants like "A" and "a" in the same folder.
     pub exact_names: bool,
@@ -247,23 +253,32 @@ impl SimServer {
 
     /// Result of an already executed operation (idempotency). The real client queries this
     /// before uploading content: a repeated operation no longer needs the source file.
-    pub fn known_result(&self, client: usize, op_id: OpId) -> Option<RemoteResult> {
-        self.dedup.get(&(client, op_id)).cloned()
+    pub fn known_result(&self, device: &str, op_id: OpId) -> Option<RemoteResult> {
+        self.dedup
+            .get(&(device.to_owned(), op_id))
+            .map(|(_, r)| r.clone())
     }
 
+    /// Executes an operation once per (device, ID); a repetition gets the stored result. The
+    /// same ID with a different operation is refused and not executed (the real server answers
+    /// 409 `op_mismatch`, ADR 0002).
     pub fn apply(
         &mut self,
-        client: usize,
+        device: &str,
         op_id: OpId,
         op: &RemoteOp,
-        device: &str,
-    ) -> RemoteResult {
-        if let Some(r) = self.dedup.get(&(client, op_id)) {
-            return r.clone();
+    ) -> Result<RemoteResult, OpMismatch> {
+        let key = (device.to_owned(), op_id);
+        if let Some((stored, r)) = self.dedup.get(&key) {
+            return if stored == op {
+                Ok(r.clone())
+            } else {
+                Err(OpMismatch)
+            };
         }
         let r = self.execute(op, device);
-        self.dedup.insert((client, op_id), r.clone());
-        r
+        self.dedup.insert(key, (op.clone(), r.clone()));
+        Ok(r)
     }
 
     fn execute(&mut self, op: &RemoteOp, device: &str) -> RemoteResult {
@@ -375,5 +390,41 @@ impl SimServer {
 impl Default for SimServer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use xlrx_sync::{LocalId, Origin};
+
+    use super::*;
+
+    fn mkdir(name: &str, source: u64) -> RemoteOp {
+        RemoteOp::CreateDir {
+            parent: NodeId(1),
+            name: Name::new(name).expect("Name"),
+            source: LocalId(source),
+            origin: Origin::New,
+        }
+    }
+
+    #[test]
+    fn dedup_nach_geraet_und_inhalt() {
+        let mut s = SimServer::new();
+        let a = s.apply("Mac", OpId(5), &mkdir("A", 7)).expect("neu");
+        assert!(matches!(a, RemoteResult::Created { .. }));
+        // Same device, same ID, same operation: the stored result, nothing executed again.
+        assert_eq!(s.apply("Mac", OpId(5), &mkdir("A", 7)), Ok(a.clone()));
+        assert_eq!(s.known_result("Mac", OpId(5)), Some(a));
+        // Same ID for a different operation: refused, nothing executed.
+        let before = s.listing();
+        assert_eq!(s.apply("Mac", OpId(5), &mkdir("B", 8)), Err(OpMismatch));
+        assert_eq!(s.listing(), before);
+        // The namespace is the device name: another device may use the same ID.
+        assert_eq!(s.known_result("PC", OpId(5)), None);
+        assert!(matches!(
+            s.apply("PC", OpId(5), &mkdir("B", 8)),
+            Ok(RemoteResult::Created { .. })
+        ));
     }
 }

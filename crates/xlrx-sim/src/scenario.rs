@@ -284,10 +284,12 @@ impl World {
                 if matches!(rop, RemoteOp::CreateFile { .. } | RemoteOp::Upload { .. }) {
                     self.transfers.uploads += 1;
                 }
-                let known = self.server.known_result(c, id).is_some();
+                let device = self.clients[c].device.clone();
+                let known = self.server.known_result(&device, id).is_some();
                 let res = if known || driver::source_ok(&self.clients[c].fs, &rop) {
-                    let device = self.clients[c].device.clone();
-                    self.server.apply(c, id, &rop, &device)
+                    self.server
+                        .apply(&device, id, &rop)
+                        .expect("OpId für eine andere Operation wiederverwendet")
                 } else {
                     RemoteResult::SourceChanged
                 };
