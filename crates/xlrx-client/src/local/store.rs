@@ -10,7 +10,7 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, params};
 use xlrx_chunk::{CacheEntry, Fingerprint as ChunkFp};
 use xlrx_proto::{ContentHash, FileContent};
-use xlrx_sync::{Fingerprint, LocalId};
+use xlrx_sync::{Expected, Fingerprint, LocalId};
 
 /// Schema version (`PRAGMA user_version`).
 const SCHEMA: i64 = 1;
@@ -115,6 +115,92 @@ pub struct TrashItem {
     pub content: Option<FileContent>,
     pub reason: TrashReason,
     pub trashed_ms: i64,
+}
+
+/// What an intent protects (ADR 0002 §7.6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntentKind {
+    Download,
+    Replace,
+    Delete,
+}
+
+impl IntentKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Download => "download",
+            Self::Replace => "replace",
+            Self::Delete => "delete",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "download" => Self::Download,
+            "replace" => Self::Replace,
+            "delete" => Self::Delete,
+            _ => return None,
+        })
+    }
+}
+
+/// Where an operation stands that is not reversible by a rescan alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    /// The temporary file is being created or written (download, replacement content).
+    Writing,
+    /// Replacement content is complete under the temporary name.
+    Prepared,
+    /// The swap may have happened: the temporary name may hold the original.
+    Swapping,
+    /// The file may already lie in the trash.
+    Deleting,
+}
+
+impl Phase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Writing => "writing",
+            Self::Prepared => "prepared",
+            Self::Swapping => "swapping",
+            Self::Deleting => "deleting",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "writing" => Self::Writing,
+            "prepared" => Self::Prepared,
+            "swapping" => Self::Swapping,
+            "deleting" => Self::Deleting,
+            _ => return None,
+        })
+    }
+}
+
+/// Written (durably) before an irreversible step, removed after it: what `recover()` needs to
+/// finish or undo the step after a crash, proving every file it touches by its inode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Intent {
+    pub id: i64,
+    pub op_id: u64,
+    pub kind: IntentKind,
+    /// Directory of the target, relative to the sync folder (raw bytes), and its inode.
+    pub dir_path: Vec<u8>,
+    pub dir_ino: u64,
+    /// The target's name in that directory (raw bytes).
+    pub target_name: Vec<u8>,
+    /// The client's temporary file in the same directory, and its inode once created.
+    pub temp_name: Option<Vec<u8>>,
+    pub temp_ino: Option<u64>,
+    /// The original's inode (replace, delete).
+    pub orig_ino: Option<u64>,
+    /// Where the original goes in the trash (relative to the trash directory).
+    pub trash_name: Option<Vec<u8>>,
+    /// What the original must still be (replace, delete).
+    pub expect: Option<Expected>,
+    pub phase: Phase,
+    pub created_ms: i64,
 }
 
 pub struct LocalStore {
@@ -270,6 +356,89 @@ impl LocalStore {
         rows.collect()
     }
 
+    /// Records an intent. Durable when this returns.
+    pub fn add_intent(&self, i: &Intent) -> rusqlite::Result<i64> {
+        let expect = i
+            .expect
+            .map(|e| serde_json::to_string(&e).expect("Expected serializes"));
+        self.conn.execute(
+            "INSERT INTO intent (op_id, kind, dir_path, dir_ino, target_name, temp_name, temp_ino,
+                                 orig_ino, trash_name, expect, phase, created_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                sql(i.op_id),
+                i.kind.as_str(),
+                i.dir_path,
+                sql(i.dir_ino),
+                i.target_name,
+                i.temp_name,
+                i.temp_ino.map(sql),
+                i.orig_ino.map(sql),
+                i.trash_name,
+                expect,
+                i.phase.as_str(),
+                i.created_ms
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Updates what changes during an operation: temporary inode, original inode, phase.
+    pub fn update_intent(&self, i: &Intent) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE intent SET temp_ino = ?2, orig_ino = ?3, phase = ?4 WHERE id = ?1",
+            params![
+                i.id,
+                i.temp_ino.map(sql),
+                i.orig_ino.map(sql),
+                i.phase.as_str()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_intent(&self, id: i64) -> rusqlite::Result<()> {
+        self.conn
+            .execute("DELETE FROM intent WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// All open intents, oldest first.
+    pub fn intents(&self) -> rusqlite::Result<Vec<Intent>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, op_id, kind, dir_path, dir_ino, target_name, temp_name, temp_ino,
+                    orig_ino, trash_name, expect, phase, created_ms
+               FROM intent ORDER BY id",
+        )?;
+        let rows = st.query_map([], |r| {
+            let kind: String = r.get(2)?;
+            let expect: Option<String> = r.get(10)?;
+            let phase: String = r.get(11)?;
+            let bad = |what: &str| {
+                rusqlite::Error::InvalidColumnType(0, what.to_owned(), rusqlite::types::Type::Text)
+            };
+            Ok(Intent {
+                id: r.get(0)?,
+                op_id: unsql(r.get(1)?),
+                kind: IntentKind::parse(&kind).ok_or_else(|| bad("kind"))?,
+                dir_path: r.get(3)?,
+                dir_ino: unsql(r.get(4)?),
+                target_name: r.get(5)?,
+                temp_name: r.get(6)?,
+                temp_ino: r.get::<_, Option<i64>>(7)?.map(unsql),
+                orig_ino: r.get::<_, Option<i64>>(8)?.map(unsql),
+                trash_name: r.get(9)?,
+                expect: match expect {
+                    Some(e) => Some(serde_json::from_str(&e).map_err(|_| bad("expect"))?),
+                    None => None,
+                },
+                phase: Phase::parse(&phase).ok_or_else(|| bad("phase"))?,
+                created_ms: r.get(12)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     /// Forgets a trash entry (after its file was removed for good or restored).
     pub fn remove_trash(&self, id: i64) -> rusqlite::Result<()> {
         self.conn.execute("DELETE FROM trash WHERE id = ?1", [id])?;
@@ -344,6 +513,37 @@ mod tests {
         assert!(s.add_trash(&item).is_err());
         s.remove_trash(id).unwrap();
         assert!(s.trash().unwrap().is_empty());
+    }
+
+    #[test]
+    fn absichten_rundlauf() {
+        let t = tempfile::tempdir().unwrap();
+        let s = LocalStore::open(&t.path().join("local.sqlite")).unwrap();
+        let mut i = Intent {
+            id: 0,
+            op_id: u64::MAX - 3,
+            kind: IntentKind::Replace,
+            dir_path: b"Projekte/A\xcc\x88".to_vec(),
+            dir_ino: 12,
+            target_name: b"plan.txt".to_vec(),
+            temp_name: Some(b".xlrx-dl-9-ab".to_vec()),
+            temp_ino: None,
+            orig_ino: Some(77),
+            trash_name: None,
+            expect: Some(Expected {
+                fp: fp(4, 5 * S),
+                content: content(9, 4),
+            }),
+            phase: Phase::Writing,
+            created_ms: 1,
+        };
+        i.id = s.add_intent(&i).unwrap();
+        i.temp_ino = Some(u64::MAX - 1);
+        i.phase = Phase::Swapping;
+        s.update_intent(&i).unwrap();
+        assert_eq!(s.intents().unwrap(), vec![i.clone()]);
+        s.remove_intent(i.id).unwrap();
+        assert!(s.intents().unwrap().is_empty());
     }
 
     #[test]

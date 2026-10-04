@@ -9,13 +9,14 @@ publish.workspace = true
 [dependencies]
 # Pinned: 0.40 needs libsqlite3-sys 0.38, which clashes with sqlx's (links = "sqlite3").
 rusqlite = { version = "=0.39.0", features = ["bundled"] }
+rustix = { version = "1.1", features = ["fs"] }
+serde_json.workspace = true
 xlrx-chunk.workspace = true
 xlrx-fs = { path = "../xlrx-fs" }
 xlrx-proto.workspace = true
 xlrx-sync.workspace = true
 
 [dev-dependencies]
-rustix = { version = "1.1", features = ["fs"] }
 tempfile.workspace = true
 
 [lints]
