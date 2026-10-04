@@ -1,0 +1,21 @@
+[package]
+name = "xlrx-client"
+description = "The xlrx-drive sync client: local file system adapter, network, folder agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Pinned: 0.40 needs libsqlite3-sys 0.38, which clashes with sqlx's (links = "sqlite3").
+rusqlite = { version = "=0.39.0", features = ["bundled"] }
+xlrx-chunk.workspace = true
+xlrx-fs = { path = "../xlrx-fs" }
+xlrx-proto.workspace = true
+xlrx-sync.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
