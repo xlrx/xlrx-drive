@@ -5484,6 +5484,7 @@ name = "xlrx-client"
 version = "0.1.0"
 dependencies = [
  "rusqlite",
+ "rustix",
  "tempfile",
  "xlrx-chunk",
  "xlrx-fs",
