@@ -189,10 +189,17 @@ als Simulator-Varianten dauerhaft in `tests/seeds.rs` und in der nächtlichen CI
 ## Offene Punkte
 
 - **Vollständiger Scan/Erstplanung beschleunigen:** Baum-Aufbau mit vorberechneten Namensschlüsseln, Persistenz von L im Client.
-- **Selective Sync:** ausgeschlossene Teilbäume dürfen nicht als „lokal gelöscht“ gelten.
-- **Ignorierte Dateien:** `.DS_Store` u.ä. in zu löschenden Ordnern.
-- **Massenlösch-Schutz:** Der Konfigurationswert existiert, die Bestätigungslogik fehlt noch.
-- **Dateisystem-Adapter des Clients** (`xlrx-client`) mit Tausch-, Papierkorb- und Neu-Hash-Protokoll (4.1) und eigenen Tests gegen gleichzeitige Schreiber.
+- **Selective Sync:** ausgeschlossene Teilbäume dürfen nicht als „lokal gelöscht“ gelten. Geplant als
+  Engine-Erweiterung E7 in [ADR 0002](0002-mac-client.md) (§4, M5.10).
+- **Ignorierte Dateien:** `.DS_Store` u.ä. in zu löschenden Ordnern. Gelöst im Dateisystem-Adapter
+  ([ADR 0002](0002-mac-client.md) §7.3 und §7.6): Unverknüpfte Junk-Dateien kommen mit dem Ordner in den
+  Papierkorb des Clients (Test `ordner_loeschen_mit_ds_store`).
+- **Massenlösch-Schutz:** Er gehört in den Ordner-Treiber des Clients (`DeleteGuard`,
+  [ADR 0002](0002-mac-client.md) §5). Der ungenutzte Konfigurationswert `max_unconfirmed_deletes` ist
+  entfallen (E0).
+- **Dateisystem-Adapter des Clients** (`xlrx-fs`, `xlrx-client::local`) mit Tausch-, Papierkorb- und
+  Neu-Hash-Protokoll (4.1) und eigenen Tests gegen gleichzeitige Schreiber: umgesetzt nach
+  [ADR 0002](0002-mac-client.md) §7.
 - **Sehr lange Namen:** Ein temporärer Ausweichname kann den Heimatnamen nicht vollständig tragen. Bleibt
   ein solches Objekt nach einem Absturz liegen, wird es unter dem gekürzten Namen wiederhergestellt.
 - **Orakel des Simulators:** Inhalte, die ein Nutzer irgendwo entfernt hat, gelten global als entfernbar.

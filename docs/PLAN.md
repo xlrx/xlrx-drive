@@ -4,7 +4,7 @@
 > Volltextsuche, Teilen zwischen Benutzern, extrem effizienter und zuverlässiger Sync, Mac- und iOS-App.
 > Hosting: Docker (Container Manager) auf Synology, amd64.
 
-Stand: 2026-10-02 · Status: v5 – alle Grundsatzfragen geklärt, bereit für M0
+Stand: 2026-10-04 · Status: v5 – alle Grundsatzfragen geklärt; M5 (Mac-Client) im Detail in [ADR 0002](adr/0002-mac-client.md)
 
 ---
 
@@ -253,8 +253,9 @@ Der M0-Spike prüft, dass Synology Drive die Temp-Dateien in der Parallelphase n
 ### 4.5 Namen & Plattform-Eigenheiten
 - Namen werden serverseitig in **NFC** gespeichert. macOS liefert oft NFD („Ä“ zerlegt).
 - **Case-Insensitivity:** APFS ist meist case-insensitiv, Btrfs nicht. Der Server erzwingt Eindeutigkeit **case-insensitiv pro Ordner**
-  für Änderungen über die API. Entstehen über SMB trotzdem „Foo.txt“ und „foo.txt“, synchronisiert der Mac-Client
-  eine davon als `foo (Groß-/Kleinschreibungskonflikt).txt`.
+  für Änderungen über die API. Entstehen über SMB trotzdem „Foo.txt“ und „foo.txt“, benennt der Mac-Client den Ankömmling
+  auf dem Server auf einen Konfliktnamen um (ADR 0001 §3). Lokal vergleicht er mit voller Unicode-Faltung wie APFS,
+  sodass auch „Maße.pdf“ und „Masse.pdf“ als gleicher Name gelten (E8 in ADR 0002).
 - Unzulässige Zeichen und zu lange Pfade bekommen eine Warnung in der UI und werden nie still verworfen.
 
 ### 4.6 Speicher-Schnittstelle (Cloud-Umzug offenhalten)
@@ -314,7 +315,8 @@ Das ist das Herzstück. Es ist bewusst nach dem Vorbild der Dropbox-„Nucleus�
   optionalem Inhalts-Hash). Ein Teil wird erst bestätigt, wenn er auf der Platte ist (fsync). Schon Empfangenes wird nie überschrieben.
   Nach einem Abbruch schickt der Client nur die fehlenden Bereiche. Ein Absturz mitten im Speichern wird beim Neustart sicher aufgelöst.
   Unbenutzte Sitzungen verschwinden nach 24 h. Die Web-App lädt Dateien über 8 MiB so hoch, mit automatischer Wiederholung und „Fortsetzen“.
-  **Delta-Uploads** (nur fehlende Chunks, Chunk-Index) folgen mit dem Mac-Client (M5); sie passen als „Bereiche, die der Server schon hat“ hinein.
+  **Delta-Uploads** (nur fehlende Chunks, Chunk-Index) kommen nach M5 und nur, wenn Messungen im Dogfooding sie verlangen
+  (ADR 0002, Offene Punkte 3); sie passen als „Bereiche, die der Server schon hat“ hinein.
 - Ändert sich eine Datei während des Uploads, schlägt der Hash-Check am Ende fehl. Der Upload wird dann später wiederholt.
   Das betrifft z.B. Lightroom-Kataloge und SQLite-Dateien. Für geöffnete Datenbanken gilt zusätzlich eine Ruhezeit vor dem Upload.
 
@@ -371,6 +373,8 @@ Im Test führt eine Verletzung zum Abbruch. In Produktion folgt eine Selbstheilu
 - FSEvents mit persistierter Event-ID (`sinceWhen`). Nach Neustart oder Schlaf werden nur die Änderungen seitdem verarbeitet, nicht alles gescannt.
 - Hintergrund-QoS (`utility`), Pausieren im Akkubetrieb oder Stromsparmodus optional.
 - Zielwerte: Leerlauf ~0 % CPU, Client-RAM < 200 MB bei 1 Mio Dateien, BLAKE3 > 1 GB/s auf Apple Silicon.
+  Gemessen braucht die Engine heute rund 2 GB bei 1 Mio Dateien. ADR 0002 §15 schlägt für M5 stattdessen ein Budget am realen
+  Bestand vor.
 
 ### 5.9 Transport: HTTPS, bevorzugt HTTP/3 (QUIC)
 **Grundsatz:** Sync, Web-UI, Benachrichtigungen und Links laufen **ausschließlich über HTTPS auf Port 443**. Es gibt keine
@@ -1077,14 +1081,20 @@ Zuverlässigkeit entsteht durch Tests, nicht durch Hoffnung. Darum hat das Teste
 xlrx-drive/
 ├─ Cargo.toml                    (Workspace)
 ├─ crates/
-│  ├─ xlrx-proto/                API-Typen & Protokoll (Server + Clients teilen sie)
+│  ├─ xlrx-proto/                Grundtypen & Namensregeln (Server + Clients teilen sie)
 │  ├─ xlrx-chunk/                FastCDC + BLAKE3, Hash-Cache
 │  ├─ xlrx-sync/                 sans-IO Sync-Engine (Bäume, Planner, Merge)
-│  ├─ xlrx-client/               HTTP-Client, Transfers, lokale SQLite, FS-Adapter (macOS/iOS)
+│  ├─ xlrx-wire/                 JSON-Formen der API für Clients (Golden-Tests gegen den Server)
+│  ├─ xlrx-driver/               sans-IO Ordner-Treiber: Zeitsteuerung, Commit-Barriere, Massenlösch-Schutz
+│  ├─ xlrx-fs/                   sichere Dateisystem-Aufrufe relativ zu einem Verzeichnis (rustix)
+│  ├─ xlrx-client/               lokale SQLite, Scanner, Executor, Watcher, Netz, Anmeldung, Agent (macOS/Linux)
+│  ├─ xlrx-cli/                  Headless-Client `xlrx` (Anmelden, Ordner, Sync)
 │  ├─ xlrx-ffi/                  UniFFI-Bindings → XCFramework
 │  ├─ xlrx-server/               axum-API, Journal, Storage, Watcher, Suche, Auth, Freigaben
 │  ├─ xlrx-worker/               Extraktion, Thumbnails, OCR, KI-Provider
-│  └─ xlrx-sim/                  deterministische Simulation & Fuzzing
+│  ├─ xlrx-sim/                  deterministische Simulation & Fuzzing
+│  ├─ xlrx-testkit/              Testgerüst des Servers (Datenbank, Umgebung, Geräte-Anmeldung, S3-Attrappe)
+│  └─ xlrx-e2e/                  Ende-zu-Ende-Tests: echter Server, mehrere echte Clients
 ├─ web/                          Nuxt-App
 ├─ apple/
 │  ├─ Project.yml                (XcodeGen/Tuist)
@@ -1119,7 +1129,7 @@ Zwei parallele Stränge: **A – Server/Web/Suche** liefert früh Nutzen, währe
 | **M3** | Teilen, Aktivität, Startseite | Ablagen (inkl. Einbinden der Synology-Drive-Team-Ordner), Gruppen, **Datenklassen pro Ordner (7.4)**, Freigaben, Links, Aktivitätsstream, Vorschläge, Benachrichtigungen | Familie nutzt Web-UI für Teilen und findet Dinge über die Startseite | L |
 | **M3b** | Außen-Beschleuniger | `S3CacheStore`, Spiegeln von Link-Dateien, Vorausladen für Personen unterwegs, 307 auf signierte URLs, Aufräumen, Datenklassen-Prüfung (15.2) | Ein Link auf ein 2-GB-Video lädt extern mit voller Geschwindigkeit, ohne den Heimanschluss zu belasten. „Nur lokal“-Inhalte nachweislich nie im Bucket | M |
 | **M4** | KI-Suche | Provider-Abstraktion (Scaleway/Cloudflare/lokal), Vision-Analyse, Embeddings, **lokales Embedding-Modell + CLIP für „Nur lokal“-Ordner**, drei Vektor-Indizes, hybride Rangfolge, Budget, Kostenschätzung | „Rechnung Heizung 2025“ und „Hund am Strand“ liefern sinnvolle Treffer. Sensible Ordner sind semantisch und nach Bildinhalt durchsuchbar, ohne dass ein Byte das Heimnetz verlässt. Kosten im Rahmen | M–L |
-| **M5** | Mac-App (Spiegel-Modus) | xlrx-client + FFI, SyncAgent, Menüleisten-App, Selective Sync, FinderSync, LAN-Direktverbindung | 4 Wochen Dogfooding ohne Datenverlust → **Synology-Drive-Client abschalten** | XL |
+| **M5** | Mac-App (Spiegel-Modus) | xlrx-client + FFI, SyncAgent, Menüleisten-App, Selective Sync, FinderSync, LAN-Direktverbindung über Split-DNS. Entwurf und Teilschritte M5.1–M5.13: [ADR 0002](adr/0002-mac-client.md) | 4 Wochen Dogfooding ohne Datenverlust → **Synology-Drive-Client abschalten** | XL |
 | **M6** | iOS-App | Startseite, Suche, Durchsuchen, Vorschau, File Provider (Dateien-App), Share-Extension, Push | Alltagstauglich auf iPhone/iPad, über TestFlight verteilt | L |
 | **M7** | Mac File-Provider-Modus | FP-Extension, Offline-Pinning, Moduswechsel pro Ordner | Große Ablagen auf Abruf, stabil im Dogfooding | L |
 | **M8** | Härtung & Feinschliff | Lasttest mit 3 Mio Dateien, Security-Review, Backup/Restore-Probe, Dokumentation, Tuning der Vorschläge | Go-live für alle, Synology Drive deinstalliert | M |
@@ -1127,7 +1137,7 @@ Zwei parallele Stränge: **A – Server/Web/Suche** liefert früh Nutzen, währe
 Größen: S ≈ Tage, M ≈ 1–3 Wochen, L ≈ 3–6 Wochen, XL ≈ 6+ Wochen fokussierte Arbeit. Das sind grobe Richtwerte.
 Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
 
-**Stand 2026-10-03:**
+**Stand 2026-10-04:**
 - **B1 erledigt:** Chunker, Sync-Engine (inkrementell), Simulator; nach einem adversarialen Review 1 Mio. Seeds ohne Befund (ADR 0001).
 - **M0 im Code erledigt:** Server mit Konten und Anmeldung (Passwort + TOTP oder Passkey, Wiederherstellungscodes, Step-up, Verwaltung, Audit-Log), Web-App dazu, Docker-Image, compose mit Caddy (macvlan, HTTP/3), CI inkl. Browser-Test und Prüfung ohne AVX.
 - **Offen für M0:** Inbetriebnahme auf dem DS918+ (`deploy/synology.md`) und die Messungen aus `spikes/ds918/`.
@@ -1165,7 +1175,7 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
   - Gruppen und Geteilte Ablagen (bestehende Ordner des NAS, z. B. Synology-Drive-Teamordner, mit Mitgliedern) in der Verwaltung;
     der Pfad muss ein echter Ordner unter dem Datenverzeichnis sein und darf keine andere Ablage überschneiden. Alles im Audit-Log.
   - Web: Bereich „Geteilt“, „Teilen“ in den Aktionen, Tab „Zugriff“, „geteilt mit …“ im Ordner; wer nur ansehen darf, sieht keine Änderungs-Aktionen.
-  - Noch nicht: Verknüpfung geteilter Elemente in „Meine Ablage“ für den Mac-Client (kommt mit M5).
+  - Noch nicht: Verknüpfung geteilter Elemente in „Meine Ablage“ für den Mac-Client (nach M5, ADR 0002, Offene Punkte 11).
   - Datenklassen (7.4): jeder Ordner „Nur lokal“ oder „Cloud erlaubt“, vererbt bis zur nächsten eigenen Einstellung; auch für eine ganze
     Ablage. Ohne Einstellung gilt `XLRX_DEFAULT_DATA_CLASS` (Standard „Nur lokal“). Ändern nur mit Verwalten-Recht, erneuter Bestätigung
     und Eintrag im Audit-Log (vorher, nachher). Wer nur eine Freigabe hat, erfährt nicht, aus welchem Ordner darüber die Einstellung kommt.
@@ -1205,7 +1215,8 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
   - Bilder, deren Vorschaubild nicht geht (beschädigt), zeigen überall das Dateisymbol statt eines kaputten Bildes.
   - „Markiert“ (8.2): Sterne je Person, privat; in den Aktionen jeder Datei und jedes Ordners, als Abschnitt auf der Startseite; nur was
     noch da ist und gesehen werden darf.
-  - Noch nicht: E-Mail bei neuen Freigaben (SMTP, einstellbar je Person) und Push auf iOS/Mac (APNs, mit den Apps ab M5).
+  - Noch nicht: E-Mail bei neuen Freigaben (SMTP, einstellbar je Person) und Push auf iOS/Mac (APNs, mit der iOS-App in M6;
+    auf dem Mac nach M5, ADR 0002, Offene Punkte 12).
 
 - **M3b erledigt (lokal getestet gegen einen S3-Server im Test, s3s-fs):**
   - Eigener kleiner S3-Client (SigV4 in Kopfzeilen und als signierte URL, geprüft gegen die Beispiele der AWS-Doku; Upload in
@@ -1251,7 +1262,18 @@ Am meisten Zeit kostet erfahrungsgemäß die Härtung des Syncs (M5).
     Treffer nach Bedeutung für die noch nicht neu berechneten Inhalte (der alte Index antwortet nicht weiter). Abstandsgrenze der Cloud mit
     dem Probelauf prüfen.
 
-**Nächster Schritt:** Inbetriebnahme auf dem DS918+ mit den Spike-Messungen (M0) und dem M1-Nachweis mit den echten Daten.
+- **M5 begonnen** (Entwurf: [ADR 0002](adr/0002-mac-client.md)):
+  - **M5.1 erledigt:** Namensregeln an einer Stelle (`xlrx_proto::name`), der Server behält Namen auf dem Sync-Weg exakt und vergleicht
+    sie in NFC, Op-Body-Vergleich (409 `op_mismatch`), Cursor-Prüfsumme gegen Server-Rücksetzungen (409 `cursor_invalid`), jede 409
+    mit `reason`, Sync-Downloads zählen nicht als Öffnen. Crate `xlrx-wire` mit Golden-JSON gegen den Server. Im Simulator ein
+    Trace-Hash-Tor: Golden-Dateien halten das Verhalten der Engine fest. Speicher bei 200 000 und 1 Mio. Dateien gemessen
+    (ADR 0002 §15); die Messung am realen Bestand folgt, sobald das NAS erreichbar ist.
+  - **M5.2 zum großen Teil erledigt (Linux):** `xlrx-fs` und `xlrx-client::local`: lokale Identitäten, `local.sqlite`, voller Scan, der
+    kein verknüpftes Objekt weglässt, Ausführung mit Absichtsprotokoll, Papierkorb und Wiederherstellung nach Absturz an jeder Stelle,
+    Probe des Volumes. Volle Unicode-Faltung für lokale Namen (E8). Offen: macOS-CI auf APFS und drei weitere Tests.
+
+**Nächster Schritt:** Inbetriebnahme auf dem DS918+ mit den Spike-Messungen (M0) und dem M1-Nachweis mit den echten Daten, sobald das NAS
+erreichbar ist. Bis dahin weiter mit M5.2 und M5.3a (Netz, Anmeldung, Testgerüst).
 
 ---
 
