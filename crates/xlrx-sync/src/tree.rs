@@ -10,9 +10,19 @@ pub trait TreeEntry<I> {
     fn name(&self) -> &Name;
 }
 
+/// How names are compared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fold {
+    Exact,
+    /// Lowercase + NFC ([`Name::fold_key`]): the server's comparison.
+    Lower,
+    /// Full Unicode case folding ([`Name::local_fold_key`]): a case-insensitive local volume.
+    Full,
+}
+
 /// A tree of entries, indexed by parent node and by (parent, name key).
 ///
-/// Depending on the file system, the name key is the exact name or its lowercased form.
+/// Depending on the file system, the name key is the exact name or a folded form.
 /// Multiple entries with the same key are allowed (temporarily, e.g. case variants on the server);
 /// [`Tree::lookup`] then returns all of them.
 #[derive(Clone, Debug)]
@@ -20,11 +30,26 @@ pub struct Tree<I, E> {
     entries: BTreeMap<I, E>,
     children: BTreeMap<I, BTreeSet<I>>,
     by_name: BTreeMap<(I, String), BTreeSet<I>>,
-    fold: bool,
+    fold: Fold,
 }
 
 impl<I: Ord + Copy, E: TreeEntry<I>> Tree<I, E> {
+    /// A tree compared exactly, or case-insensitively like the server (`fold`).
     pub fn new(fold: bool) -> Self {
+        Self::with(if fold { Fold::Lower } else { Fold::Exact })
+    }
+
+    /// The local tree: on a case-insensitive volume, names collide under full Unicode case
+    /// folding (ADR 0002, E8).
+    pub fn new_local(case_insensitive: bool) -> Self {
+        Self::with(if case_insensitive {
+            Fold::Full
+        } else {
+            Fold::Exact
+        })
+    }
+
+    fn with(fold: Fold) -> Self {
         Self {
             entries: BTreeMap::new(),
             children: BTreeMap::new(),
@@ -34,10 +59,10 @@ impl<I: Ord + Copy, E: TreeEntry<I>> Tree<I, E> {
     }
 
     pub fn key(&self, name: &Name) -> String {
-        if self.fold {
-            name.fold_key()
-        } else {
-            name.as_str().to_owned()
+        match self.fold {
+            Fold::Exact => name.as_str().to_owned(),
+            Fold::Lower => name.fold_key(),
+            Fold::Full => name.local_fold_key(),
         }
     }
 

@@ -42,6 +42,9 @@ pub struct SimConfig {
     /// Strict: if the engine's safety net has to intervene, the run counts as a failure
     /// (this reveals gaps in the rules, even if the data is safe).
     pub strict_rules: bool,
+    /// Names that only full Unicode case folding merges ("Maße"/"MASSE", "ς"/"σ", "ﬁle"/"FILE"):
+    /// the server keeps them apart, a case-insensitive Mac does not (ADR 0002, E8).
+    pub folding_names: bool,
 }
 
 impl Default for SimConfig {
@@ -60,6 +63,7 @@ impl Default for SimConfig {
             p_server_exact_names: 0,
             mtime_granularity: 1,
             strict_rules: false,
+            folding_names: false,
         }
     }
 }
@@ -126,6 +130,17 @@ struct Sim {
 
 const NAMES: &[&str] = &["a", "b", "c", "Bericht.txt", "x y.pdf", "Ä", "d"];
 const NAMES_CI: &[&str] = &["a", "A", "b", "Bericht.txt", "bericht.TXT", "Ä", "ä"];
+const NAMES_FOLD: &[&str] = &[
+    "Maße.pdf",
+    "Masse.pdf",
+    "MASSE.PDF",
+    "ς",
+    "σ",
+    "Σ",
+    "ﬁle",
+    "FILE",
+    "Straẞe",
+];
 const TRACE_LEN: usize = 400;
 
 fn content(tag: u64) -> FileContent {
@@ -244,7 +259,9 @@ impl Sim {
     }
 
     fn names(&self) -> &'static [&'static str] {
-        if self.cfg.case_insensitive_local {
+        if self.cfg.folding_names {
+            NAMES_FOLD
+        } else if self.cfg.case_insensitive_local {
             NAMES_CI
         } else {
             NAMES

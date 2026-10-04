@@ -4,6 +4,7 @@
 //! IDs, revisions, content hashes and file names.
 
 mod content;
+mod fold_table;
 mod ids;
 pub mod name;
 

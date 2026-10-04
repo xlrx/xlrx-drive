@@ -127,6 +127,7 @@ jobs:
           - "--count 30000 --ci --clients 3 --steps 1000 --defer 300"
           - "--count 100000 --ci --exact-names 400"
           - "--count 100000 --coarse 8 --defer 300"
+          - "--count 100000 --ci --folding --exact-names 200"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master

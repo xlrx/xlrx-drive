@@ -193,3 +193,19 @@ fn grobe_zeitstempel_und_spaete_ergebnisse() {
         5_000_000,
     );
 }
+
+#[test]
+fn volle_unicode_faltung() {
+    // ADR 0002, E8: names the server keeps apart but a case-insensitive Mac merges.
+    check(
+        "volle_unicode_faltung",
+        SimConfig {
+            case_insensitive_local: true,
+            folding_names: true,
+            p_server_exact_names: 200,
+            strict_rules: true,
+            ..SimConfig::default()
+        },
+        6_000_000,
+    );
+}

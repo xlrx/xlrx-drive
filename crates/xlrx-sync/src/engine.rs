@@ -156,7 +156,7 @@ impl Engine {
         let fold = st.config.local_case_insensitive;
         Self {
             st,
-            local: Tree::new(fold),
+            local: Tree::new_local(fold),
             local_root: None,
             inflight_local: BTreeMap::new(),
             sent: BTreeSet::new(),
@@ -291,7 +291,7 @@ impl Engine {
 
     /// Full scan of the local sync directory.
     pub fn on_local_snapshot(&mut self, root: LocalId, observations: Vec<LocalObservation>) {
-        let mut t = Tree::new(self.st.config.local_case_insensitive);
+        let mut t = Tree::new_local(self.st.config.local_case_insensitive);
         for o in observations {
             if o.id != root && o.id != LocalId::GONE {
                 t.insert(o.id, o.entry);

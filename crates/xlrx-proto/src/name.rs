@@ -143,6 +143,23 @@ impl Name {
         self.0.to_lowercase().nfc().collect()
     }
 
+    /// Comparison key on a client's case-insensitive volume: full Unicode case folding on top of
+    /// lowercasing ("ß"/"ẞ" → "ss", "ς" → "σ", "ﬁ" → "fi" …), then NFC. A superset of what APFS
+    /// and casefold-ext4 treat as the same name, so the engine sees every local name collision
+    /// (ADR 0002, E8). Only for the local tree: the server keeps [`Name::fold_key`], so two
+    /// names it allows side by side may collide locally — the engine renames the arrival then.
+    pub fn local_fold_key(&self) -> String {
+        use crate::fold_table::FULL_FOLD;
+        let mut out = String::with_capacity(self.0.len());
+        for c in self.0.chars() {
+            match FULL_FOLD.binary_search_by_key(&c, |(k, _)| *k) {
+                Ok(i) => out.push_str(FULL_FOLD[i].1),
+                Err(_) => out.extend(c.to_lowercase()),
+            }
+        }
+        out.nfc().collect()
+    }
+
     /// Splits into stem and extension ("Bericht.final.pdf" → ("Bericht.final", ".pdf")).
     /// Hidden files without a further extension (".bashrc") have no extension.
     pub fn split_extension(&self) -> (&str, &str) {
@@ -250,6 +267,39 @@ mod tests {
             Name::new("Bericht.PDF").unwrap().fold_key(),
             Name::new("bericht.pdf").unwrap().fold_key()
         );
+    }
+
+    #[test]
+    fn volle_faltung_lokal() {
+        let key = |s: &str| Name::new(s).unwrap().local_fold_key();
+        assert_eq!(key("Maße.pdf"), key("MASSE.PDF"));
+        assert_eq!(key("Straẞe"), key("strasse"));
+        assert_eq!(key("ς"), key("Σ"));
+        assert_eq!(key("ﬁle"), key("FILE"));
+        assert_eq!(key("A\u{0308}rger"), key("ärger"));
+        assert_ne!(key("Masse"), key("Maste"));
+        // Everything fold_key merges, local_fold_key merges too.
+        for (a, b) in [
+            ("Bericht.PDF", "bericht.pdf"),
+            ("Ä", "ä"),
+            ("İ", "i\u{307}"),
+        ] {
+            let (a, b) = (Name::new(a).unwrap(), Name::new(b).unwrap());
+            if a.fold_key() == b.fold_key() {
+                assert_eq!(a.local_fold_key(), b.local_fold_key(), "{a} {b}");
+            }
+        }
+        // The server's key keeps ß and ss apart, as before.
+        assert_ne!(
+            Name::new("Maße").unwrap().fold_key(),
+            Name::new("Masse").unwrap().fold_key()
+        );
+    }
+
+    #[test]
+    fn faltungstabelle_sortiert() {
+        let t = crate::fold_table::FULL_FOLD;
+        assert!(t.windows(2).all(|w| w[0].0 < w[1].0));
     }
 
     #[test]

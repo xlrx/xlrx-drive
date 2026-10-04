@@ -32,6 +32,7 @@ fn main() {
             "--trace" => trace = true,
             "--hashes" => hashes = true,
             "--strict" => cfg.strict_rules = true,
+            "--folding" => cfg.folding_names = true,
             "--defer" => cfg.p_defer_result = val() as u32,
             "--exact-names" => cfg.p_server_exact_names = val() as u32,
             "--coarse" => cfg.mtime_granularity = val().max(1) as i64,

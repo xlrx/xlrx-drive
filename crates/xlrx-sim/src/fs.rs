@@ -53,7 +53,7 @@ impl SimFs {
 
     fn key(&self, n: &Name) -> String {
         if self.case_insensitive {
-            n.fold_key()
+            n.local_fold_key()
         } else {
             n.as_str().to_owned()
         }
